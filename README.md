@@ -43,6 +43,24 @@ go run .\cmd\supercdnctl -- upload -project assets -file .\README.md -path /docs
 
 Open `http://127.0.0.1:8080/o/assets/docs/readme.txt`.
 
+## Foundation check
+
+Before architecture changes, run the local baseline:
+
+```powershell
+.\scripts\foundation-check.ps1
+```
+
+This checks Go formatting, tests, vet, Windows/Linux builds, Worker tests/typecheck, and a local service `/healthz` startup probe when `configs/config.local.json` exists.
+
+Run the full operational probe only when real Cloudflare/R2 credentials should be exercised:
+
+```powershell
+.\scripts\foundation-check.ps1 -Full -LiveSiteUrl "https://cyberstream.sites.qwk.ccwu.cc/?v=dpl-di49qyrhf5y0" -SpaPath /movie/123
+```
+
+`-Full` runs Cloudflare status checks plus `overseas_accel` R2 write/read/delete health probes and an `overseas_r2` API e2e probe.
+
 ## Deploy a static site
 
 ```powershell
