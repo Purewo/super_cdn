@@ -1,0 +1,240 @@
+{
+  "server": {
+    "addr": "127.0.0.1:8080",
+    "public_base_url": "https://origin.example.com",
+    "data_dir": "./data",
+    "admin_token": "${SUPERCDN_ADMIN_TOKEN}"
+  },
+  "database": {
+    "path": "./data/supercdn.db"
+  },
+  "limits": {
+    "max_upload_bytes": 214748364800,
+    "max_active_transfers": 5,
+    "default_max_site_files": 5,
+    "resource_health_min_interval_seconds": 300,
+    "overclock_mode": false
+  },
+  "storage": [
+    {
+      "name": "local_default",
+      "type": "local",
+      "local": {
+        "root": "./data/objects/local_default"
+      }
+    },
+    {
+      "name": "ipfs_pinata",
+      "type": "pinata",
+      "pinata": {
+        "jwt": "${PINATA_JWT}",
+        "gateway_base_url": "https://gateway.pinata.cloud",
+        "proxy_url": "http://127.0.0.1:10808"
+      }
+    }
+  ],
+  "mount_points": [
+    {
+      "name": "alist_main",
+      "type": "alist",
+      "alist": {
+        "base_url": "http://localhost:5244",
+        "token": "${ALIST_TOKEN}",
+        "root": "/",
+        "use_proxy_url": true,
+        "public_base_url": "https://alist.example.com",
+        "proxy_url": ""
+      }
+    },
+    {
+      "name": "openlist_main",
+      "type": "alist",
+      "alist": {
+        "base_url": "http://gameuniverse.top:82",
+        "token": "${OPENLIST_TOKEN}",
+        "root": "/",
+        "use_proxy_url": true,
+        "public_base_url": "http://gameuniverse.top:82",
+        "proxy_url": ""
+      }
+    }
+  ],
+  "resource_libraries": [
+    {
+      "name": "repo_overseas",
+      "bindings": [
+        {
+          "name": "alist_overseas",
+          "mount_point": "alist_main",
+          "path": "/supercdn/overseas"
+        }
+      ]
+    },
+    {
+      "name": "repo_china_all",
+      "policy": {
+        "max_bindings": 1,
+        "total_capacity_bytes": 16492674416640,
+        "notes": "resource-library level capacity is configured from first-version binding data; available capacity is unknown until remote usage polling is implemented."
+      },
+      "bindings": [
+        {
+          "name": "openlist_china_all_primary",
+          "mount_point": "openlist_main",
+          "path": "/豆包/Super_CDN",
+          "constraints": {
+            "max_capacity_bytes": 16492674416640,
+            "peak_bandwidth_mbps": 25,
+            "max_file_size_bytes": 314572800,
+            "supports_online_extract": false,
+            "notes": "max_batch_files and daily_upload_limit_bytes are unknown for the first version."
+          }
+        }
+      ]
+    },
+    {
+      "name": "repo_china_telecom",
+      "policy": {
+        "max_bindings": 1,
+        "total_capacity_bytes": 13194139533312,
+        "notes": "resource-library level capacity is configured from first-version binding data; available capacity is unknown until remote usage polling is implemented."
+      },
+      "bindings": [
+        {
+          "name": "alist_telecom_primary",
+          "mount_point": "alist_main",
+          "path": "/天翼资源/我的应用/Super_CDN",
+          "constraints": {
+            "max_capacity_bytes": 13194139533312,
+            "peak_bandwidth_mbps": 1000,
+            "max_batch_files": 1000,
+            "max_file_size_bytes": 214748364800,
+            "daily_upload_limit_bytes": 214748364800,
+            "supports_online_extract": true,
+            "max_online_extract_bytes": 4294967296
+          }
+        }
+      ]
+    },
+    {
+      "name": "repo_china_mobile",
+      "policy": {
+        "max_bindings": 1,
+        "total_capacity_bytes": 4398046511104,
+        "notes": "resource-library level capacity is configured from first-version binding data; available capacity is unknown until remote usage polling is implemented."
+      },
+      "bindings": [
+        {
+          "name": "alist_mobile_primary",
+          "mount_point": "alist_main",
+          "path": "/移动资源/个人云/Super_CDN",
+          "constraints": {
+            "max_capacity_bytes": 4398046511104,
+            "peak_bandwidth_mbps": 1000,
+            "max_batch_files": 1000,
+            "max_file_size_bytes": 8589934592,
+            "daily_upload_limit_unlimited": true,
+            "supports_online_extract": true,
+            "max_online_extract_bytes": 2147483648
+          }
+        }
+      ]
+    },
+    {
+      "name": "repo_china_unicom",
+      "bindings": [
+        {
+          "name": "alist_china_unicom",
+          "mount_point": "alist_main",
+          "path": "/supercdn/china_unicom"
+        }
+      ]
+    }
+  ],
+  "route_profiles": [
+    {
+      "name": "overseas",
+      "primary": "overseas_accel",
+      "backups": ["ipfs_pinata", "repo_overseas"],
+      "default_cache_control": "public, max-age=3600, s-maxage=86400",
+      "allow_redirect": false
+    },
+    {
+      "name": "china_all",
+      "primary": "repo_china_all",
+      "backups": ["overseas_accel", "ipfs_pinata"],
+      "default_cache_control": "public, max-age=600, s-maxage=3600",
+      "allow_redirect": false
+    },
+    {
+      "name": "china_telecom",
+      "primary": "repo_china_telecom",
+      "backups": ["overseas_accel", "ipfs_pinata"],
+      "default_cache_control": "public, max-age=600, s-maxage=3600",
+      "allow_redirect": false
+    },
+    {
+      "name": "china_mobile",
+      "primary": "repo_china_mobile",
+      "backups": ["overseas_accel", "ipfs_pinata"],
+      "default_cache_control": "public, max-age=600, s-maxage=3600",
+      "allow_redirect": false
+    },
+    {
+      "name": "china_unicom",
+      "primary": "repo_china_unicom",
+      "backups": ["overseas_accel", "ipfs_pinata"],
+      "default_cache_control": "public, max-age=600, s-maxage=3600",
+      "allow_redirect": false
+    }
+  ],
+  "cloudflare": {
+    "account_id": "${CF_ACCOUNT_ID}",
+    "zone_id": "${CF_ZONE_ID}",
+    "api_token": "${CF_API_TOKEN}",
+    "root_domain": "qwk.ccwu.cc",
+    "site_domain_suffix": "sites.qwk.ccwu.cc",
+    "site_dns_target": "qwk.ccwu.cc",
+    "worker_script": "supercdn-edge",
+    "edge_bypass_secret": "${SUPERCDN_EDGE_BYPASS_SECRET}"
+  },
+  "cloudflare_accounts": [
+    {
+      "name": "cf_business_main",
+      "default": true,
+      "account_id": "${CF_ACCOUNT_ID}",
+      "zone_id": "${CF_ZONE_ID}",
+      "api_token": "${CF_API_TOKEN}",
+      "root_domain": "qwk.ccwu.cc",
+      "site_domain_suffix": "sites.qwk.ccwu.cc",
+      "site_dns_target": "qwk.ccwu.cc",
+      "worker_script": "supercdn-edge",
+      "edge_bypass_secret": "${SUPERCDN_EDGE_BYPASS_SECRET}",
+      "r2": {
+        "account_id": "${CF_ACCOUNT_ID}",
+        "api_token": "${CF_R2_API_TOKEN}",
+        "bucket": "${R2_BUCKET}",
+        "access_key_id": "${R2_ACCESS_KEY_ID}",
+        "secret_access_key": "${R2_SECRET_ACCESS_KEY}",
+        "endpoint": "",
+        "public_base_url": "https://pub-r2.example.com",
+        "proxy_url": "http://127.0.0.1:10808"
+      }
+    }
+  ],
+  "cloudflare_libraries": [
+    {
+      "name": "overseas_accel",
+      "policy": {
+        "notes": "Logical Cloudflare acceleration library. Bind multiple Cloudflare accounts here as independent edge/control-plane mount points."
+      },
+      "bindings": [
+        {
+          "name": "business_main",
+          "account": "cf_business_main",
+          "path": "/assets/overseas"
+        }
+      ]
+    }
+  ]
+}

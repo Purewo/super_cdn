@@ -1,0 +1,28 @@
+# Local runtime data and secrets
+data/
+configs/data/
+configs/private/
+configs/config.local.json
+test_file/
+alist/
+.env
+*.env
+
+# Databases and logs
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Build outputs
+bin/
+*.exe
+*.test
+
+# Node/Worker generated files
+**/node_modules/
+worker/.wrangler/
+
+# Python cache
+__pycache__/
+*.pyc

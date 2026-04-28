@@ -1,0 +1,11 @@
+name = "supercdn-edge"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+
+[vars]
+ORIGIN_BASE_URL = "https://origin.example.com"
+EDGE_DEFAULT_CACHE_CONTROL = "public, max-age=300"
+
+# Set this with `wrangler secret put EDGE_BYPASS_SECRET` in production.
+# It must match cloudflare.edge_bypass_secret on the origin if you want
+# Worker storage-fetch failures to fall back to origin streaming.
