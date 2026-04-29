@@ -107,6 +107,25 @@ func TestRouteProfileRejectsControlPlaneOnlyCloudflareLibrary(t *testing.T) {
 	}
 }
 
+func TestRouteProfileNormalizesDeploymentTarget(t *testing.T) {
+	cfg := minimalConfig(t)
+	cfg.RouteProfiles[0].DeploymentTarget = "workers_static"
+	if err := cfg.ApplyDefaults(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.RouteProfiles[0].DeploymentTarget; got != "cloudflare_static" {
+		t.Fatalf("deployment target = %q", got)
+	}
+}
+
+func TestRouteProfileRejectsUnknownDeploymentTarget(t *testing.T) {
+	cfg := minimalConfig(t)
+	cfg.RouteProfiles[0].DeploymentTarget = "r2_website"
+	if err := cfg.ApplyDefaults(t.TempDir()); err == nil {
+		t.Fatal("expected unknown deployment target to fail")
+	}
+}
+
 func TestCloudflareAccountAllowsControlPlaneOnlyR2Config(t *testing.T) {
 	cfg := minimalConfig(t)
 	cfg.CloudflareAccounts = []CloudflareAccountConfig{{

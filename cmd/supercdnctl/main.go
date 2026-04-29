@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,7 +15,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	urlpath "path"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,7 +43,7 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	if *token == "" && args[0] != "inspect-site" && args[0] != "probe-site" && args[0] != "set-r2-credentials" {
+	if *token == "" && args[0] != "inspect-site" && args[0] != "probe-site" && args[0] != "set-r2-credentials" && args[0] != "publish-cloudflare-static" {
 		fatal(errors.New("token is required, pass -token or SUPERCDN_TOKEN"))
 	}
 	c := client{baseURL: strings.TrimRight(*serverURL, "/"), token: *token, http: http.DefaultClient}
@@ -76,6 +83,12 @@ func main() {
 		err = listDeployments(c, args[1:])
 	case "deployment":
 		err = getDeployment(c, args[1:])
+	case "export-edge-manifest":
+		err = exportEdgeManifest(c, args[1:])
+	case "publish-edge-manifest":
+		err = publishEdgeManifest(c, args[1:])
+	case "publish-cloudflare-static":
+		err = publishCloudflareStatic(args[1:])
 	case "promote-deployment":
 		err = promoteDeployment(c, args[1:])
 	case "delete-deployment":
@@ -174,6 +187,7 @@ func createSite(c client, args []string) error {
 	site := fs.String("site", "", "site id")
 	name := fs.String("name", "", "site display name")
 	profile := fs.String("profile", "overseas", "route profile")
+	target := fs.String("target", "", "deployment target: origin_assisted, cloudflare_static, or hybrid_edge")
 	mode := fs.String("mode", "standard", "standard or spa")
 	domains := fs.String("domains", "", "comma-separated domains")
 	defaultDomainID := fs.String("domain-id", "", "default allocated subdomain id")
@@ -187,6 +201,7 @@ func createSite(c client, args []string) error {
 		"id":                    *site,
 		"name":                  *name,
 		"route_profile":         *profile,
+		"deployment_target":     *target,
 		"mode":                  *mode,
 		"domains":               splitCSV(*domains),
 		"default_domain_id":     *defaultDomainID,
@@ -521,6 +536,14 @@ func deploySite(c client, args []string) error {
 	wait := fs.Bool("wait", true, "wait for asynchronous deployment completion")
 	timeout := fs.Duration("timeout", 30*time.Minute, "maximum time to wait")
 	profile := fs.String("profile", "", "route profile override")
+	target := fs.String("target", "", "deployment target override: origin_assisted, cloudflare_static, or hybrid_edge")
+	domains := fs.String("domains", "", "comma-separated Cloudflare Static custom domains when -target cloudflare_static")
+	staticName := fs.String("static-name", "", "Worker name when -target cloudflare_static; defaults to supercdn-{site}-static")
+	compatDate := fs.String("compatibility-date", time.Now().UTC().Format("2006-01-02"), "Workers compatibility date when -target cloudflare_static")
+	staticMessage := fs.String("message", "", "Cloudflare deployment message when -target cloudflare_static")
+	staticCachePolicy := fs.String("static-cache-policy", cloudflareStaticCachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
+	staticNotFoundHandling := fs.String("static-not-found-handling", "", "Cloudflare Static not_found_handling: none, 404-page, or single-page-application")
+	staticSPA := fs.Bool("static-spa", false, "enable Cloudflare Static single-page-application fallback")
 	_ = fs.Parse(args)
 	if *site == "" {
 		return errors.New("-site is required")
@@ -530,6 +553,48 @@ func deploySite(c client, args []string) error {
 	}
 	if *dir != "" && *bundle != "" {
 		return errors.New("use either -dir or -bundle, not both")
+	}
+	if strings.EqualFold(*env, "production") && !flagWasSet(fs, "promote") {
+		*promote = true
+	}
+	resolvedTarget := deploymentTargetAlias(*target)
+	resolvedProfile := *profile
+	resolvedDomains := splitCSV(*domains)
+	if strings.TrimSpace(*target) == "" {
+		defaults, err := c.resolveSiteDeploymentTarget(*site, *profile, "")
+		if err != nil {
+			return err
+		}
+		resolvedTarget = deploymentTargetAlias(defaults.DeploymentTarget)
+		if strings.TrimSpace(resolvedProfile) == "" {
+			resolvedProfile = defaults.RouteProfile
+		}
+		if len(resolvedDomains) == 0 {
+			resolvedDomains = defaults.Domains
+		}
+	}
+	if resolvedTarget == "cloudflare_static" {
+		if *dir == "" {
+			return errors.New("cloudflare_static deploy-site requires -dir")
+		}
+		if *bundle != "" {
+			return errors.New("cloudflare_static deploy-site does not accept -bundle yet")
+		}
+		return deploySiteCloudflareStatic(c, cloudflareStaticDeploySiteOptions{
+			Site:              *site,
+			Dir:               *dir,
+			Environment:       *env,
+			RouteProfile:      resolvedProfile,
+			DeploymentTarget:  resolvedTarget,
+			Domains:           resolvedDomains,
+			WorkerName:        *staticName,
+			CompatibilityDate: *compatDate,
+			Message:           *staticMessage,
+			CachePolicy:       *staticCachePolicy,
+			NotFoundHandling:  cloudflareStaticNotFoundHandlingFlag(*staticNotFoundHandling, *staticSPA),
+			Promote:           *promote,
+			Pinned:            *pinned,
+		})
 	}
 	artifact := *bundle
 	cleanup := ""
@@ -544,14 +609,12 @@ func deploySite(c client, args []string) error {
 	if cleanup != "" {
 		defer os.Remove(cleanup)
 	}
-	if strings.EqualFold(*env, "production") && !flagWasSet(fs, "promote") {
-		*promote = true
-	}
 	fields := map[string]string{
-		"route_profile": *profile,
-		"environment":   *env,
-		"promote":       fmt.Sprint(*promote),
-		"pinned":        fmt.Sprint(*pinned),
+		"route_profile":     *profile,
+		"deployment_target": resolvedTarget,
+		"environment":       *env,
+		"promote":           fmt.Sprint(*promote),
+		"pinned":            fmt.Sprint(*pinned),
 	}
 	raw, err := c.uploadFileRaw("/api/v1/sites/"+url.PathEscape(*site)+"/deployments", "artifact", artifact, fields)
 	if err != nil {
@@ -570,6 +633,104 @@ func deploySite(c client, args []string) error {
 		return printJSON(raw)
 	}
 	return c.waitDeployment(*site, created.DeploymentID, *timeout)
+}
+
+type siteDeploymentTargetDefaults struct {
+	SiteID           string   `json:"site_id"`
+	SiteExists       bool     `json:"site_exists"`
+	RouteProfile     string   `json:"route_profile"`
+	DeploymentTarget string   `json:"deployment_target"`
+	Source           string   `json:"source"`
+	Domains          []string `json:"domains,omitempty"`
+	DefaultDomain    string   `json:"default_domain,omitempty"`
+}
+
+func (c client) resolveSiteDeploymentTarget(site, routeProfile, target string) (siteDeploymentTargetDefaults, error) {
+	q := url.Values{}
+	if strings.TrimSpace(routeProfile) != "" {
+		q.Set("route_profile", strings.TrimSpace(routeProfile))
+	}
+	if strings.TrimSpace(target) != "" {
+		q.Set("deployment_target", strings.TrimSpace(target))
+	}
+	path := "/api/v1/sites/" + url.PathEscape(site) + "/deployment-target"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	raw, err := c.doRaw(http.MethodGet, path, nil, "")
+	if err != nil {
+		return siteDeploymentTargetDefaults{}, err
+	}
+	var defaults siteDeploymentTargetDefaults
+	if err := json.Unmarshal(raw, &defaults); err != nil {
+		return siteDeploymentTargetDefaults{}, err
+	}
+	return defaults, nil
+}
+
+type cloudflareStaticDeploySiteOptions struct {
+	Site              string
+	Dir               string
+	Environment       string
+	RouteProfile      string
+	DeploymentTarget  string
+	Domains           []string
+	WorkerName        string
+	CompatibilityDate string
+	Message           string
+	CachePolicy       string
+	NotFoundHandling  string
+	Promote           bool
+	Pinned            bool
+}
+
+func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions) error {
+	stats, err := summarizeCloudflareStaticDirectory(opts.Dir)
+	if err != nil {
+		return err
+	}
+	workerName := strings.TrimSpace(opts.WorkerName)
+	if workerName == "" {
+		workerName = "supercdn-" + cleanWorkerName(opts.Site) + "-static"
+	}
+	publish, err := runCloudflareStaticPublish(cloudflareStaticPublishOptions{
+		Site:              opts.Site,
+		WorkerName:        workerName,
+		Dir:               opts.Dir,
+		Domains:           opts.Domains,
+		CompatibilityDate: opts.CompatibilityDate,
+		Message:           firstNonEmpty(opts.Message, "SuperCDN cloudflare_static deploy "+opts.Site),
+		CachePolicy:       opts.CachePolicy,
+		NotFoundHandling:  opts.NotFoundHandling,
+		DryRun:            false,
+		EnvFile:           "configs/private/cloudflare.env",
+		Wrangler:          "npx",
+		WranglerPrefix:    "worker",
+	})
+	if err != nil {
+		raw, _ := json.Marshal(publish)
+		_ = printJSON(raw)
+		return err
+	}
+	req := map[string]any{
+		"environment":        opts.Environment,
+		"route_profile":      opts.RouteProfile,
+		"deployment_target":  "cloudflare_static",
+		"worker_name":        workerName,
+		"version_id":         extractCloudflareVersionID(publish.Output),
+		"domains":            opts.Domains,
+		"compatibility_date": opts.CompatibilityDate,
+		"assets_sha256":      stats.SHA256,
+		"file_count":         stats.FileCount,
+		"total_size":         stats.TotalSize,
+		"cache_policy":       publish.CachePolicy,
+		"headers_generated":  publish.HeadersGenerated,
+		"not_found_handling": publish.NotFoundHandling,
+		"published_at_utc":   time.Now().UTC().Format(time.RFC3339Nano),
+		"promote":            opts.Promote,
+		"pinned":             opts.Pinned,
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/sites/"+url.PathEscape(opts.Site)+"/cloudflare-static/deployments", req)
 }
 
 func inspectSite(args []string) error {
@@ -739,6 +900,645 @@ func getDeployment(c client, args []string) error {
 		return errors.New("-site and -deployment are required")
 	}
 	return c.do(http.MethodGet, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment), nil, "")
+}
+
+func exportEdgeManifest(c client, args []string) error {
+	fs := flag.NewFlagSet("export-edge-manifest", flag.ExitOnError)
+	site := fs.String("site", "", "site id")
+	deployment := fs.String("deployment", "", "deployment id")
+	out := fs.String("out", "", "optional output file; stdout when empty")
+	_ = fs.Parse(args)
+	if *site == "" || *deployment == "" {
+		return errors.New("-site and -deployment are required")
+	}
+	raw, err := c.doRaw(http.MethodGet, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment)+"/edge-manifest", nil, "")
+	if err != nil {
+		return err
+	}
+	if *out == "" {
+		return printJSON(raw)
+	}
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, raw, "", "  ") == nil {
+		raw = append(pretty.Bytes(), '\n')
+	}
+	return os.WriteFile(*out, raw, 0o644)
+}
+
+func publishEdgeManifest(c client, args []string) error {
+	fs := flag.NewFlagSet("publish-edge-manifest", flag.ExitOnError)
+	site := fs.String("site", "", "site id")
+	deployment := fs.String("deployment", "", "deployment id")
+	domains := fs.String("domains", "", "comma-separated bound domains to publish keys for; empty means all site domains")
+	cfAccount := fs.String("cloudflare-account", "", "Cloudflare account name; defaults by domain match")
+	cfLibrary := fs.String("cloudflare-library", "", "Cloudflare library name")
+	kvNamespaceID := fs.String("kv-namespace-id", "", "Cloudflare Workers KV namespace id")
+	kvNamespace := fs.String("kv-namespace", "", "Cloudflare Workers KV namespace title; resolved to id by account")
+	keyPrefix := fs.String("key-prefix", "", "KV key prefix; defaults to sites/")
+	activeKey := fs.Bool("active-key", false, "publish sites/{host}/active/edge-manifest; defaults to true only for active deployments")
+	deploymentKey := fs.Bool("deployment-key", true, "publish sites/{host}/deployments/{deployment}/edge-manifest")
+	dryRun := fs.Bool("dry-run", true, "plan KV writes without modifying Cloudflare; pass -dry-run=false to publish")
+	_ = fs.Parse(args)
+	if *site == "" || *deployment == "" {
+		return errors.New("-site and -deployment are required")
+	}
+	req := map[string]any{
+		"domains":            splitCSV(*domains),
+		"cloudflare_account": *cfAccount,
+		"cloudflare_library": *cfLibrary,
+		"kv_namespace_id":    *kvNamespaceID,
+		"kv_namespace":       *kvNamespace,
+		"key_prefix":         *keyPrefix,
+		"deployment_key":     *deploymentKey,
+		"dry_run":            *dryRun,
+	}
+	if flagWasSet(fs, "active-key") {
+		req["active_key"] = *activeKey
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment)+"/edge-manifest/publish", req)
+}
+
+type cloudflareStaticPublishResponse struct {
+	Status            string   `json:"status"`
+	DryRun            bool     `json:"dry_run"`
+	Worker            string   `json:"worker"`
+	AssetsDir         string   `json:"assets_dir"`
+	SourceDir         string   `json:"source_dir,omitempty"`
+	Domains           []string `json:"domains,omitempty"`
+	CompatibilityDate string   `json:"compatibility_date"`
+	CachePolicy       string   `json:"cache_policy,omitempty"`
+	NotFoundHandling  string   `json:"not_found_handling,omitempty"`
+	WranglerConfig    string   `json:"wrangler_config,omitempty"`
+	HeadersFile       string   `json:"headers_file,omitempty"`
+	HeadersSource     string   `json:"headers_source,omitempty"`
+	HeadersGenerated  bool     `json:"headers_generated,omitempty"`
+	Command           []string `json:"command"`
+	Output            string   `json:"output,omitempty"`
+	ExitCode          int      `json:"exit_code,omitempty"`
+}
+
+type cloudflareStaticPublishOptions struct {
+	Site              string
+	WorkerName        string
+	Dir               string
+	Domains           []string
+	CompatibilityDate string
+	EnvFile           string
+	Wrangler          string
+	WranglerPrefix    string
+	Message           string
+	CachePolicy       string
+	NotFoundHandling  string
+	DryRun            bool
+}
+
+const (
+	cloudflareStaticCachePolicyAuto  = "auto"
+	cloudflareStaticCachePolicyForce = "force"
+	cloudflareStaticCachePolicyNone  = "none"
+
+	cloudflareStaticNotFoundNone = "none"
+	cloudflareStaticNotFound404  = "404-page"
+	cloudflareStaticNotFoundSPA  = "single-page-application"
+
+	cloudflareStaticHTMLCacheControl      = "public, max-age=0, must-revalidate"
+	cloudflareStaticShortCacheControl     = "public, max-age=300, must-revalidate"
+	cloudflareStaticImmutableCacheControl = "public, max-age=31536000, immutable"
+)
+
+func publishCloudflareStatic(args []string) error {
+	fs := flag.NewFlagSet("publish-cloudflare-static", flag.ExitOnError)
+	site := fs.String("site", "", "site id used to derive the default Worker name")
+	worker := fs.String("name", "", "Cloudflare Worker name; defaults to supercdn-{site}-static")
+	dir := fs.String("dir", "", "static asset directory")
+	domains := fs.String("domains", "", "comma-separated custom domains")
+	compatDate := fs.String("compatibility-date", time.Now().UTC().Format("2006-01-02"), "Workers compatibility date")
+	envFile := fs.String("env-file", "configs/private/cloudflare.env", "local env file containing CF_API_TOKEN and CF_ACCOUNT_ID; empty to skip")
+	wrangler := fs.String("wrangler", "npx", "wrangler executable; default uses npx --prefix worker wrangler")
+	wranglerPrefix := fs.String("wrangler-prefix", "worker", "npm package directory when -wrangler is npx")
+	message := fs.String("message", "", "deployment message")
+	cachePolicy := fs.String("static-cache-policy", cloudflareStaticCachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
+	notFoundHandling := fs.String("static-not-found-handling", "", "Cloudflare Static not_found_handling: none, 404-page, or single-page-application")
+	spa := fs.Bool("static-spa", false, "enable Cloudflare Static single-page-application fallback")
+	dryRun := fs.Bool("dry-run", true, "plan deployment without modifying Cloudflare; pass -dry-run=false to deploy")
+	_ = fs.Parse(args)
+	resp, err := runCloudflareStaticPublish(cloudflareStaticPublishOptions{
+		Site:              *site,
+		WorkerName:        *worker,
+		Dir:               *dir,
+		Domains:           splitCSV(*domains),
+		CompatibilityDate: *compatDate,
+		EnvFile:           *envFile,
+		Wrangler:          *wrangler,
+		WranglerPrefix:    *wranglerPrefix,
+		Message:           *message,
+		CachePolicy:       *cachePolicy,
+		NotFoundHandling:  cloudflareStaticNotFoundHandlingFlag(*notFoundHandling, *spa),
+		DryRun:            *dryRun,
+	})
+	if err != nil {
+		raw, _ := json.Marshal(resp)
+		_ = printJSON(raw)
+		return err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	return printJSON(raw)
+}
+
+func runCloudflareStaticPublish(opts cloudflareStaticPublishOptions) (cloudflareStaticPublishResponse, error) {
+	if strings.TrimSpace(opts.Dir) == "" {
+		return cloudflareStaticPublishResponse{}, errors.New("-dir is required")
+	}
+	absDir, err := filepath.Abs(opts.Dir)
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	info, err := os.Stat(absDir)
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	if !info.IsDir() {
+		return cloudflareStaticPublishResponse{}, fmt.Errorf("%s is not a directory", opts.Dir)
+	}
+	preparedDir, cleanup, headers, err := prepareCloudflareStaticAssetsDir(absDir, opts.CachePolicy)
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	workerName := strings.TrimSpace(opts.WorkerName)
+	if workerName == "" {
+		if strings.TrimSpace(opts.Site) == "" {
+			return cloudflareStaticPublishResponse{}, errors.New("-site or -name is required")
+		}
+		workerName = "supercdn-" + cleanWorkerName(opts.Site) + "-static"
+	}
+	notFoundHandling, err := normalizeCloudflareStaticNotFoundHandling(opts.NotFoundHandling)
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	wranglerConfig := ""
+	var configCleanup func()
+	if notFoundHandling != "" {
+		wranglerConfig, configCleanup, err = writeCloudflareStaticWranglerConfig(workerName, preparedDir, opts.CompatibilityDate, notFoundHandling)
+		if err != nil {
+			return cloudflareStaticPublishResponse{}, err
+		}
+		defer configCleanup()
+	}
+	wrangler := firstNonEmpty(strings.TrimSpace(opts.Wrangler), "npx")
+	cmdArgs := wranglerDeployArgs(wrangler, opts.WranglerPrefix, workerName, preparedDir, opts.Domains, opts.CompatibilityDate, opts.Message, opts.DryRun, wranglerConfig)
+	resp := cloudflareStaticPublishResponse{
+		Status:            "planned",
+		DryRun:            opts.DryRun,
+		Worker:            workerName,
+		AssetsDir:         preparedDir,
+		SourceDir:         absDir,
+		Domains:           opts.Domains,
+		CompatibilityDate: strings.TrimSpace(opts.CompatibilityDate),
+		CachePolicy:       headers.Policy,
+		NotFoundHandling:  notFoundHandling,
+		WranglerConfig:    wranglerConfig,
+		HeadersFile:       headers.Path,
+		HeadersSource:     headers.Source,
+		HeadersGenerated:  headers.Generated,
+		Command:           append([]string{wrangler}, cmdArgs...),
+	}
+	env, err := cloudflareStaticEnv(opts.EnvFile)
+	if err != nil {
+		return resp, err
+	}
+	out, exitCode, err := runCommand(wrangler, cmdArgs, env)
+	resp.Output = strings.TrimSpace(out)
+	resp.ExitCode = exitCode
+	if err != nil {
+		resp.Status = "failed"
+		return resp, err
+	}
+	if opts.DryRun {
+		resp.Status = "planned"
+	} else {
+		resp.Status = "ok"
+	}
+	return resp, nil
+}
+
+func wranglerDeployArgs(wrangler, wranglerPrefix, workerName, assetsDir string, domains []string, compatDate, message string, dryRun bool, configPath string) []string {
+	var args []string
+	if filepath.Base(strings.ToLower(strings.TrimSpace(wrangler))) == "npx" && strings.TrimSpace(wranglerPrefix) != "" {
+		args = append(args, "--prefix", wranglerPrefix, "wrangler")
+	}
+	args = append(args, "deploy")
+	if strings.TrimSpace(configPath) != "" {
+		args = append(args, "--config", configPath)
+	} else {
+		args = append(args, "--name", workerName, "--compatibility-date", strings.TrimSpace(compatDate), "--assets", assetsDir)
+	}
+	for _, domain := range domains {
+		args = append(args, "--domain", domain)
+	}
+	if strings.TrimSpace(message) != "" {
+		args = append(args, "--message", strings.TrimSpace(message))
+	}
+	if dryRun {
+		args = append(args, "--dry-run")
+	}
+	return args
+}
+
+type cloudflareStaticHeadersMeta struct {
+	Policy    string
+	Path      string
+	Source    string
+	Generated bool
+}
+
+func prepareCloudflareStaticAssetsDir(sourceDir, policy string) (string, func(), cloudflareStaticHeadersMeta, error) {
+	policy, err := normalizeCloudflareStaticCachePolicy(policy)
+	if err != nil {
+		return "", nil, cloudflareStaticHeadersMeta{}, err
+	}
+	existingHeaders := filepath.Join(sourceDir, "_headers")
+	if policy == cloudflareStaticCachePolicyNone {
+		return sourceDir, nil, cloudflareStaticHeadersMeta{Policy: policy, Path: existingHeaders, Source: "disabled"}, nil
+	}
+	if policy == cloudflareStaticCachePolicyAuto {
+		if info, err := os.Stat(existingHeaders); err == nil && !info.IsDir() {
+			return sourceDir, nil, cloudflareStaticHeadersMeta{Policy: policy, Path: existingHeaders, Source: "existing"}, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", nil, cloudflareStaticHeadersMeta{}, err
+		}
+	}
+	tmp, err := os.MkdirTemp("", "supercdn-cloudflare-static-*")
+	if err != nil {
+		return "", nil, cloudflareStaticHeadersMeta{}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+	if err := copyDirectory(sourceDir, tmp); err != nil {
+		cleanup()
+		return "", nil, cloudflareStaticHeadersMeta{}, err
+	}
+	headersPath := filepath.Join(tmp, "_headers")
+	if err := os.WriteFile(headersPath, []byte(generatedCloudflareStaticHeaders(sourceDir)), 0644); err != nil {
+		cleanup()
+		return "", nil, cloudflareStaticHeadersMeta{}, err
+	}
+	return tmp, cleanup, cloudflareStaticHeadersMeta{Policy: policy, Path: headersPath, Source: "generated", Generated: true}, nil
+}
+
+func normalizeCloudflareStaticCachePolicy(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return cloudflareStaticCachePolicyAuto, nil
+	}
+	switch value {
+	case cloudflareStaticCachePolicyAuto, cloudflareStaticCachePolicyForce, cloudflareStaticCachePolicyNone:
+		return value, nil
+	default:
+		return "", fmt.Errorf("static cache policy must be auto, force or none")
+	}
+}
+
+func cloudflareStaticNotFoundHandlingFlag(value string, spa bool) string {
+	if spa {
+		return cloudflareStaticNotFoundSPA
+	}
+	return value
+}
+
+func normalizeCloudflareStaticNotFoundHandling(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || value == cloudflareStaticNotFoundNone {
+		return "", nil
+	}
+	switch value {
+	case cloudflareStaticNotFound404, cloudflareStaticNotFoundSPA:
+		return value, nil
+	default:
+		return "", fmt.Errorf("static not found handling must be none, 404-page or single-page-application")
+	}
+}
+
+func writeCloudflareStaticWranglerConfig(workerName, assetsDir, compatDate, notFoundHandling string) (string, func(), error) {
+	tmp, err := os.MkdirTemp("", "supercdn-wrangler-config-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+	configPath := filepath.Join(tmp, "wrangler.toml")
+	var b strings.Builder
+	b.WriteString("name = " + strconv.Quote(workerName) + "\n")
+	b.WriteString("compatibility_date = " + strconv.Quote(strings.TrimSpace(compatDate)) + "\n\n")
+	b.WriteString("[assets]\n")
+	b.WriteString("directory = " + strconv.Quote(filepath.ToSlash(assetsDir)) + "\n")
+	b.WriteString("not_found_handling = " + strconv.Quote(notFoundHandling) + "\n")
+	if err := os.WriteFile(configPath, []byte(b.String()), 0644); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return configPath, cleanup, nil
+}
+
+func copyDirectory(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("cloudflare_static assets do not support symlink: %s", p)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		in, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+		if err != nil {
+			_ = in.Close()
+			return err
+		}
+		_, copyErr := io.Copy(out, in)
+		inErr := in.Close()
+		closeErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if inErr != nil {
+			return inErr
+		}
+		return closeErr
+	})
+}
+
+func generatedCloudflareStaticHeaders(root string) string {
+	files := listCloudflareStaticHeaderFiles(root)
+	versionedRefs := versionedAssetReferences(root)
+	var b strings.Builder
+	b.WriteString("# Generated by SuperCDN. Do not edit in-place; change the deploy command or provide your own _headers file.\n")
+	b.WriteString("# HTML stays revalidating. Versioned/build assets get immutable browser caching.\n\n")
+	b.WriteString("/\n")
+	b.WriteString("  Cache-Control: " + cloudflareStaticHTMLCacheControl + "\n\n")
+	for _, rel := range files {
+		publicPath := "/" + filepath.ToSlash(rel)
+		if publicPath == "/_headers" || publicPath == "/_redirects" {
+			continue
+		}
+		b.WriteString(publicPath + "\n")
+		b.WriteString("  Cache-Control: " + cloudflareStaticCacheControlForPath(publicPath, versionedRefs) + "\n\n")
+	}
+	return b.String()
+}
+
+func listCloudflareStaticHeaderFiles(root string) []string {
+	var files []string
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		files = append(files, rel)
+		return nil
+	})
+	sort.Slice(files, func(i, j int) bool {
+		return filepath.ToSlash(files[i]) < filepath.ToSlash(files[j])
+	})
+	return files
+}
+
+func cloudflareStaticCacheControlForPath(publicPath string, versionedRefs map[string]bool) string {
+	ext := strings.ToLower(urlpath.Ext(publicPath))
+	base := strings.ToLower(urlpath.Base(publicPath))
+	switch {
+	case ext == ".html" || ext == ".htm" || base == "sw.js" || base == "service-worker.js":
+		return cloudflareStaticHTMLCacheControl
+	case isCloudflareStaticAssetExtension(ext) && (versionedRefs[publicPath] || isKnownBuildAssetPath(publicPath) || filenameLooksVersioned(base)):
+		return cloudflareStaticImmutableCacheControl
+	default:
+		return cloudflareStaticShortCacheControl
+	}
+}
+
+func isCloudflareStaticAssetExtension(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".js", ".mjs", ".css", ".json", ".wasm", ".map",
+		".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".ico",
+		".woff", ".woff2", ".ttf", ".otf", ".eot",
+		".mp4", ".webm", ".mp3", ".ogg", ".wav",
+		".zip", ".gz", ".br", ".pdf", ".csv":
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownBuildAssetPath(publicPath string) bool {
+	publicPath = strings.ToLower(publicPath)
+	for _, prefix := range []string{"/assets/", "/static/", "/build/", "/_next/static/"} {
+		if strings.HasPrefix(publicPath, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func filenameLooksVersioned(base string) bool {
+	name := strings.TrimSuffix(base, urlpath.Ext(base))
+	for _, part := range filenameVersionSeparatorsRE.Split(name, -1) {
+		if len(part) >= 8 && filenameVersionTokenRE.MatchString(strings.ToLower(part)) {
+			hasLetter, hasDigit := false, false
+			for _, r := range part {
+				if r >= '0' && r <= '9' {
+					hasDigit = true
+				}
+				if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+					hasLetter = true
+				}
+			}
+			if hasLetter && hasDigit {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var (
+	assetRefWithQueryRE         = regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["']([^"']+\?[^"']*)["']`)
+	filenameVersionSeparatorsRE = regexp.MustCompile(`[._-]+`)
+	filenameVersionTokenRE      = regexp.MustCompile(`^[a-z0-9]+$`)
+)
+
+func versionedAssetReferences(root string) map[string]bool {
+	refs := map[string]bool{}
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".html") {
+			return err
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		htmlDir := "/" + strings.Trim(strings.TrimSuffix(filepath.ToSlash(rel), urlpath.Base(filepath.ToSlash(rel))), "/")
+		if htmlDir == "/" {
+			htmlDir = ""
+		}
+		for _, match := range assetRefWithQueryRE.FindAllStringSubmatch(string(raw), -1) {
+			ref := strings.TrimSpace(match[1])
+			u, err := url.Parse(ref)
+			if err != nil || u.IsAbs() || u.Path == "" || strings.HasPrefix(u.Path, "//") {
+				continue
+			}
+			if !isCloudflareStaticAssetExtension(strings.ToLower(urlpath.Ext(u.Path))) {
+				continue
+			}
+			var publicPath string
+			if strings.HasPrefix(u.Path, "/") {
+				publicPath = urlpath.Clean(u.Path)
+			} else {
+				publicPath = urlpath.Clean(urlpath.Join("/", htmlDir, u.Path))
+			}
+			if !strings.HasPrefix(publicPath, "/") {
+				publicPath = "/" + publicPath
+			}
+			refs[publicPath] = true
+		}
+		return nil
+	})
+	return refs
+}
+
+func cloudflareStaticEnv(path string) ([]string, error) {
+	env := os.Environ()
+	values, err := readSimpleEnvFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if token := firstNonEmpty(os.Getenv("CLOUDFLARE_API_TOKEN"), values["CLOUDFLARE_API_TOKEN"], values["CF_API_TOKEN"]); token != "" {
+		env = append(env, "CLOUDFLARE_API_TOKEN="+token)
+	}
+	if accountID := firstNonEmpty(os.Getenv("CLOUDFLARE_ACCOUNT_ID"), values["CLOUDFLARE_ACCOUNT_ID"], values["CF_ACCOUNT_ID"]); accountID != "" {
+		env = append(env, "CLOUDFLARE_ACCOUNT_ID="+accountID)
+	}
+	for key, value := range values {
+		if strings.HasPrefix(key, "CF_") || strings.HasPrefix(key, "CLOUDFLARE_") {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env, nil
+}
+
+func readSimpleEnvFile(path string) (map[string]string, error) {
+	values := map[string]string{}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return values, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return values, nil
+		}
+		return nil, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if key != "" {
+			values[key] = value
+		}
+	}
+	return values, nil
+}
+
+func runCommand(name string, args, env []string) (string, int, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Env = env
+	raw, err := cmd.CombinedOutput()
+	if err == nil {
+		return string(raw), 0, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return string(raw), exitErr.ExitCode(), err
+	}
+	return string(raw), -1, err
+}
+
+func cleanWorkerName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func deploymentTargetAlias(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "cloudflare", "cloudflare_static", "workers_static", "workers_assets", "pages":
+		return "cloudflare_static"
+	case "hybrid", "hybrid_edge", "edge":
+		return "hybrid_edge"
+	case "origin", "go_origin", "origin_assisted":
+		return "origin_assisted"
+	default:
+		return value
+	}
+}
+
+func extractCloudflareVersionID(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if value, ok := strings.CutPrefix(line, "Current Version ID:"); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func promoteDeployment(c client, args []string) error {
@@ -1347,9 +2147,21 @@ type directorySummary struct {
 	FileCount       int
 	TotalSize       int64
 	LargestFileSize int64
+	SHA256          string
 }
 
 func summarizeDirectory(dir string) (directorySummary, error) {
+	return summarizeDirectoryFiltered(dir, nil)
+}
+
+func summarizeCloudflareStaticDirectory(dir string) (directorySummary, error) {
+	return summarizeDirectoryFiltered(dir, func(rel string) bool {
+		rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
+		return rel == "_headers" || rel == "_redirects"
+	})
+}
+
+func summarizeDirectoryFiltered(dir string, skip func(rel string) bool) (directorySummary, error) {
 	root, err := filepath.Abs(dir)
 	if err != nil {
 		return directorySummary{}, err
@@ -1362,11 +2174,19 @@ func summarizeDirectory(dir string) (directorySummary, error) {
 		return directorySummary{}, fmt.Errorf("%s is not a directory", dir)
 	}
 	var summary directorySummary
+	var files []string
 	err = filepath.WalkDir(root, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		if skip != nil && skip(rel) {
 			return nil
 		}
 		info, err := d.Info()
@@ -1378,6 +2198,7 @@ func summarizeDirectory(dir string) (directorySummary, error) {
 		if info.Size() > summary.LargestFileSize {
 			summary.LargestFileSize = info.Size()
 		}
+		files = append(files, p)
 		return nil
 	})
 	if err != nil {
@@ -1386,6 +2207,23 @@ func summarizeDirectory(dir string) (directorySummary, error) {
 	if summary.FileCount == 0 {
 		return directorySummary{}, fmt.Errorf("%s contains no files", dir)
 	}
+	sort.Strings(files)
+	h := sha256.New()
+	for _, file := range files {
+		rel, err := filepath.Rel(root, file)
+		if err != nil {
+			return directorySummary{}, err
+		}
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			return directorySummary{}, err
+		}
+		_, _ = h.Write([]byte(filepath.ToSlash(rel)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(raw)
+		_, _ = h.Write([]byte{0})
+	}
+	summary.SHA256 = hex.EncodeToString(h.Sum(nil))
 	return summary, nil
 }
 
@@ -1427,13 +2265,16 @@ func usage() {
   supercdnctl [global flags] provision-cloudflare-r2 -cloudflare-library overseas_accel -dry-run
   supercdnctl [global flags] create-r2-credentials -cloudflare-account cf_business_main -write-config .\configs\config.local.json -dry-run=false
   supercdnctl set-r2-credentials -config .\configs\config.local.json -cloudflare-account cf_business_main -access-key-id <id> -secret-access-key <secret>
-  supercdnctl [global flags] deploy-site -site blog -dir ./dist -profile china_all
+  supercdnctl [global flags] deploy-site -site blog -dir ./dist -profile china_all -target hybrid_edge
   supercdnctl [global flags] deploy-site -site blog -bundle ./dist.zip -env preview
   supercdnctl inspect-site -dir ./dist
   supercdnctl [global flags] probe-site -site blog -spa-path /movie/123
   supercdnctl probe-site -url https://blog.example.com/ -max-assets 20
   supercdnctl [global flags] list-deployments -site blog
   supercdnctl [global flags] deployment -site blog -deployment dpl-abc
+  supercdnctl [global flags] export-edge-manifest -site blog -deployment dpl-abc -out .\edge-manifest.json
+  supercdnctl [global flags] publish-edge-manifest -site blog -deployment dpl-abc -kv-namespace supercdn-edge-manifest -dry-run
+  supercdnctl publish-cloudflare-static -site blog -dir ./dist -domains blog-static-test.example.com -dry-run=false
   supercdnctl [global flags] promote-deployment -site blog -deployment dpl-abc
   supercdnctl [global flags] delete-deployment -site blog -deployment dpl-abc
   supercdnctl [global flags] gc-site -site blog

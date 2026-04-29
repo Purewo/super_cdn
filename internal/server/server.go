@@ -139,14 +139,18 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("POST /sites/{id}/dns", s.handleSyncSiteDNS)
 	s.apiMux.HandleFunc("POST /sites/{id}/worker-routes", s.handleSyncSiteWorkerRoutes)
 	s.apiMux.HandleFunc("POST /sites/{id}/purge", s.handlePurgeSiteCache)
+	s.apiMux.HandleFunc("GET /sites/{id}/deployment-target", s.handleResolveSiteDeploymentTarget)
 	s.apiMux.HandleFunc("GET /domains/{host}/status", s.handleDomainStatus)
 	s.apiMux.HandleFunc("GET /cloudflare/status", s.handleCloudflareStatus)
 	s.apiMux.HandleFunc("POST /cloudflare/r2/sync", s.handleSyncCloudflareR2)
 	s.apiMux.HandleFunc("POST /cloudflare/r2/provision", s.handleProvisionCloudflareR2)
 	s.apiMux.HandleFunc("POST /cloudflare/r2/credentials", s.handleCreateCloudflareR2Credentials)
 	s.apiMux.HandleFunc("POST /sites/{id}/deployments", s.handleCreateSiteDeployment)
+	s.apiMux.HandleFunc("POST /sites/{id}/cloudflare-static/deployments", s.handleRecordCloudflareStaticDeployment)
 	s.apiMux.HandleFunc("GET /sites/{id}/deployments", s.handleListSiteDeployments)
 	s.apiMux.HandleFunc("GET /sites/{id}/deployments/{deployment}", s.handleGetSiteDeployment)
+	s.apiMux.HandleFunc("GET /sites/{id}/deployments/{deployment}/edge-manifest", s.handleExportSiteEdgeManifest)
+	s.apiMux.HandleFunc("POST /sites/{id}/deployments/{deployment}/edge-manifest/publish", s.handlePublishSiteEdgeManifest)
 	s.apiMux.HandleFunc("POST /sites/{id}/deployments/{deployment}/promote", s.handlePromoteSiteDeployment)
 	s.apiMux.HandleFunc("POST /sites/{id}/deployments/{deployment}/purge", s.handlePurgeSiteDeploymentCache)
 	s.apiMux.HandleFunc("DELETE /sites/{id}/deployments/{deployment}", s.handleDeleteSiteDeployment)
@@ -497,11 +501,42 @@ type createSiteRequest struct {
 	Name                  string   `json:"name"`
 	Mode                  string   `json:"mode"`
 	RouteProfile          string   `json:"route_profile"`
+	DeploymentTarget      string   `json:"deployment_target"`
 	Domains               []string `json:"domains"`
 	DefaultDomainID       string   `json:"default_domain_id"`
 	RandomDefaultDomain   bool     `json:"random_default_domain"`
 	SkipDefaultDomain     bool     `json:"skip_default_domain"`
 	AllocateDefaultDomain *bool    `json:"allocate_default_domain,omitempty"`
+}
+
+type recordCloudflareStaticDeploymentRequest struct {
+	Environment       string   `json:"environment"`
+	RouteProfile      string   `json:"route_profile"`
+	DeploymentTarget  string   `json:"deployment_target"`
+	Mode              string   `json:"mode"`
+	WorkerName        string   `json:"worker_name"`
+	VersionID         string   `json:"version_id"`
+	Domains           []string `json:"domains"`
+	CompatibilityDate string   `json:"compatibility_date"`
+	AssetsSHA256      string   `json:"assets_sha256"`
+	CachePolicy       string   `json:"cache_policy"`
+	HeadersGenerated  bool     `json:"headers_generated"`
+	NotFoundHandling  string   `json:"not_found_handling"`
+	FileCount         int      `json:"file_count"`
+	TotalSize         int64    `json:"total_size"`
+	PublishedAtUTC    string   `json:"published_at_utc"`
+	Promote           bool     `json:"promote"`
+	Pinned            bool     `json:"pinned"`
+}
+
+type siteDeploymentTargetResponse struct {
+	SiteID           string   `json:"site_id"`
+	SiteExists       bool     `json:"site_exists"`
+	RouteProfile     string   `json:"route_profile"`
+	DeploymentTarget string   `json:"deployment_target"`
+	Source           string   `json:"source"`
+	Domains          []string `json:"domains,omitempty"`
+	DefaultDomain    string   `json:"default_domain,omitempty"`
 }
 
 type bindSiteDomainsRequest struct {
@@ -618,21 +653,24 @@ type deploySitePayload struct {
 }
 
 type siteDeployManifest struct {
-	Version         int                      `json:"version"`
-	StorageLayout   string                   `json:"storage_layout,omitempty"`
-	SiteID          string                   `json:"site_id"`
-	DeploymentID    string                   `json:"deployment_id"`
-	Environment     string                   `json:"environment"`
-	RouteProfile    string                   `json:"route_profile"`
-	CreatedAtUTC    string                   `json:"created_at_utc"`
-	FileCount       int                      `json:"file_count"`
-	TotalSize       int64                    `json:"total_size"`
-	Files           []siteDeployManifestFile `json:"files"`
-	Rules           siteRules                `json:"rules,omitempty"`
-	Inspect         *siteinspect.Report      `json:"inspect,omitempty"`
-	DeliverySummary map[string]int           `json:"delivery_summary,omitempty"`
-	ArtifactSHA256  string                   `json:"artifact_sha256,omitempty"`
-	ArtifactSize    int64                    `json:"artifact_size,omitempty"`
+	Version          int                               `json:"version"`
+	Kind             string                            `json:"kind,omitempty"`
+	StorageLayout    string                            `json:"storage_layout,omitempty"`
+	SiteID           string                            `json:"site_id"`
+	DeploymentID     string                            `json:"deployment_id"`
+	Environment      string                            `json:"environment"`
+	RouteProfile     string                            `json:"route_profile"`
+	DeploymentTarget string                            `json:"deployment_target"`
+	CreatedAtUTC     string                            `json:"created_at_utc"`
+	FileCount        int                               `json:"file_count"`
+	TotalSize        int64                             `json:"total_size"`
+	Files            []siteDeployManifestFile          `json:"files"`
+	Rules            siteRules                         `json:"rules,omitempty"`
+	Inspect          *siteinspect.Report               `json:"inspect,omitempty"`
+	DeliverySummary  map[string]int                    `json:"delivery_summary,omitempty"`
+	ArtifactSHA256   string                            `json:"artifact_sha256,omitempty"`
+	ArtifactSize     int64                             `json:"artifact_size,omitempty"`
+	CloudflareStatic *model.CloudflareStaticDeployment `json:"cloudflare_static,omitempty"`
 }
 
 type siteDeployManifestFile struct {
@@ -643,6 +681,83 @@ type siteDeployManifestFile struct {
 	CacheControl string `json:"cache_control"`
 	Delivery     string `json:"delivery"`
 	ObjectID     int64  `json:"object_id"`
+}
+
+type edgeManifest struct {
+	Version          int                          `json:"version"`
+	Kind             string                       `json:"kind"`
+	SiteID           string                       `json:"site_id"`
+	DeploymentID     string                       `json:"deployment_id"`
+	Environment      string                       `json:"environment"`
+	Status           string                       `json:"status"`
+	RouteProfile     string                       `json:"route_profile"`
+	DeploymentTarget string                       `json:"deployment_target"`
+	Mode             string                       `json:"mode"`
+	GeneratedAtUTC   string                       `json:"generated_at_utc"`
+	Rules            siteRules                    `json:"rules,omitempty"`
+	Routes           map[string]edgeManifestRoute `json:"routes"`
+	Fallback         *edgeManifestRoute           `json:"fallback,omitempty"`
+	NotFound         *edgeManifestRoute           `json:"not_found,omitempty"`
+	Warnings         []string                     `json:"warnings,omitempty"`
+}
+
+type edgeManifestRoute struct {
+	Type               string            `json:"type"`
+	Delivery           string            `json:"delivery"`
+	File               string            `json:"file"`
+	Status             int               `json:"status"`
+	Location           string            `json:"location,omitempty"`
+	ContentType        string            `json:"content_type,omitempty"`
+	CacheControl       string            `json:"cache_control,omitempty"`
+	ObjectCacheControl string            `json:"object_cache_control,omitempty"`
+	Size               int64             `json:"size"`
+	SHA256             string            `json:"sha256,omitempty"`
+	ObjectID           int64             `json:"object_id"`
+	ObjectKey          string            `json:"object_key,omitempty"`
+	Headers            map[string]string `json:"headers,omitempty"`
+}
+
+type publishEdgeManifestRequest struct {
+	Domains           []string `json:"domains"`
+	CloudflareAccount string   `json:"cloudflare_account"`
+	CloudflareLibrary string   `json:"cloudflare_library"`
+	KVNamespaceID     string   `json:"kv_namespace_id"`
+	KVNamespace       string   `json:"kv_namespace"`
+	KeyPrefix         string   `json:"key_prefix"`
+	ActiveKey         *bool    `json:"active_key,omitempty"`
+	DeploymentKey     *bool    `json:"deployment_key,omitempty"`
+	DryRun            *bool    `json:"dry_run,omitempty"`
+}
+
+type publishEdgeManifestResponse struct {
+	SiteID            string                `json:"site_id"`
+	DeploymentID      string                `json:"deployment_id"`
+	Active            bool                  `json:"active"`
+	CloudflareAccount string                `json:"cloudflare_account"`
+	CloudflareLibrary string                `json:"cloudflare_library,omitempty"`
+	KVNamespaceID     string                `json:"kv_namespace_id,omitempty"`
+	KVNamespace       string                `json:"kv_namespace,omitempty"`
+	KeyPrefix         string                `json:"key_prefix"`
+	Domains           []string              `json:"domains"`
+	DryRun            bool                  `json:"dry_run"`
+	Status            string                `json:"status"`
+	ManifestSize      int                   `json:"manifest_size"`
+	ManifestSHA256    string                `json:"manifest_sha256"`
+	Writes            []edgeManifestKVWrite `json:"writes"`
+	ManifestWarnings  []string              `json:"manifest_warnings,omitempty"`
+	Warnings          []string              `json:"warnings,omitempty"`
+	Errors            []string              `json:"errors,omitempty"`
+}
+
+type edgeManifestKVWrite struct {
+	Domain string `json:"domain"`
+	Key    string `json:"key"`
+	Kind   string `json:"kind"`
+	Action string `json:"action"`
+	DryRun bool   `json:"dry_run,omitempty"`
+	Size   int    `json:"size"`
+	SHA256 string `json:"sha256"`
+	Error  string `json:"error,omitempty"`
 }
 
 type siteRules struct {
@@ -1210,16 +1325,25 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "mode must be standard or spa")
 		return
 	}
-	if _, ok := s.cfg.Profile(req.RouteProfile); !ok {
+	profile, ok := s.cfg.Profile(req.RouteProfile)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "unknown route_profile")
 		return
+	}
+	deploymentTarget, err := normalizeDeploymentTarget(req.DeploymentTarget)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if deploymentTarget == "" {
+		deploymentTarget = defaultDeploymentTarget(profile)
 	}
 	domains, err := s.siteDomainsFromRequest(req.ID, req.Domains, req.DefaultDomainID, req.RandomDefaultDomain, req.SkipDefaultDomain, req.AllocateDefaultDomain)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	site, err := s.db.CreateSite(r.Context(), req.ID, strings.TrimSpace(req.Name), req.Mode, req.RouteProfile, domains)
+	site, err := s.db.CreateSite(r.Context(), req.ID, strings.TrimSpace(req.Name), req.Mode, req.RouteProfile, deploymentTarget, domains)
 	if err != nil {
 		if strings.Contains(err.Error(), "already bound") {
 			writeError(w, http.StatusConflict, err.Error())
@@ -1268,6 +1392,68 @@ func (s *Server) handleBindSiteDomains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.siteView(site))
+}
+
+func (s *Server) handleResolveSiteDeploymentTarget(w http.ResponseWriter, r *http.Request) {
+	siteID := cleanID(r.PathValue("id"))
+	if siteID == "" {
+		writeError(w, http.StatusBadRequest, "site id is required")
+		return
+	}
+	resp, err := s.resolveSiteDeploymentTarget(r.Context(), siteID, r.URL.Query().Get("route_profile"), firstNonEmpty(r.URL.Query().Get("deployment_target"), r.URL.Query().Get("target")))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) resolveSiteDeploymentTarget(ctx context.Context, siteID, requestedProfile, requestedTarget string) (siteDeploymentTargetResponse, error) {
+	profileName := strings.TrimSpace(requestedProfile)
+	target, err := normalizeDeploymentTarget(requestedTarget)
+	if err != nil {
+		return siteDeploymentTargetResponse{}, err
+	}
+	source := ""
+	site, err := s.db.GetSite(ctx, siteID)
+	siteExists := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return siteDeploymentTargetResponse{}, err
+	}
+	if siteExists && profileName == "" {
+		profileName = site.RouteProfile
+	}
+	profileName = firstNonEmpty(profileName, "overseas")
+	profile, ok := s.cfg.Profile(profileName)
+	if !ok {
+		return siteDeploymentTargetResponse{}, fmt.Errorf("unknown route_profile")
+	}
+	if target != "" {
+		source = "request"
+	} else if siteExists && strings.TrimSpace(site.DeploymentTarget) != "" {
+		target = site.DeploymentTarget
+		source = "site"
+	} else {
+		target = defaultDeploymentTarget(profile)
+		source = "route_profile"
+	}
+	resp := siteDeploymentTargetResponse{
+		SiteID:           siteID,
+		SiteExists:       siteExists,
+		RouteProfile:     profileName,
+		DeploymentTarget: target,
+		Source:           source,
+	}
+	if siteExists && len(site.Domains) > 0 {
+		resp.Domains = append([]string(nil), site.Domains...)
+		resp.DefaultDomain = site.Domains[0]
+	} else if target == model.SiteDeploymentTargetCloudflareStatic {
+		if domain, err := s.defaultCloudflareStaticDomain(siteID); err == nil {
+			resp.Domains = []string{domain}
+			resp.DefaultDomain = domain
+		}
+	}
+	return resp, nil
 }
 
 func (s *Server) handleSyncSiteWorkerRoutes(w http.ResponseWriter, r *http.Request) {
@@ -1417,6 +1603,24 @@ func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Reque
 	}))
 }
 
+func (s *Server) handleRecordCloudflareStaticDeployment(w http.ResponseWriter, r *http.Request) {
+	siteID := cleanID(r.PathValue("id"))
+	if siteID == "" {
+		writeError(w, http.StatusBadRequest, "site id is required")
+		return
+	}
+	var req recordCloudflareStaticDeploymentRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.recordCloudflareStaticDeployment(r.Context(), siteID, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
 func (s *Server) handleListSiteDeployments(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	if siteID == "" {
@@ -1445,6 +1649,60 @@ func (s *Server) handleGetSiteDeployment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.siteDeploymentView(r.Context(), dep))
+}
+
+func (s *Server) handleExportSiteEdgeManifest(w http.ResponseWriter, r *http.Request) {
+	siteID := cleanID(r.PathValue("id"))
+	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
+	site, err := s.db.GetSite(r.Context(), siteID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "site not found")
+		return
+	}
+	dep, err := s.db.GetSiteDeployment(r.Context(), deploymentID)
+	if err != nil || dep.SiteID != site.ID {
+		writeError(w, http.StatusNotFound, "deployment not found")
+		return
+	}
+	if dep.Status != model.SiteDeploymentReady && dep.Status != model.SiteDeploymentActive {
+		writeError(w, http.StatusBadRequest, "deployment is not ready")
+		return
+	}
+	manifest, err := s.buildSiteEdgeManifest(r.Context(), site, dep)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, manifest)
+}
+
+func (s *Server) handlePublishSiteEdgeManifest(w http.ResponseWriter, r *http.Request) {
+	siteID := cleanID(r.PathValue("id"))
+	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
+	site, err := s.db.GetSite(r.Context(), siteID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "site not found")
+		return
+	}
+	dep, err := s.db.GetSiteDeployment(r.Context(), deploymentID)
+	if err != nil || dep.SiteID != site.ID {
+		writeError(w, http.StatusNotFound, "deployment not found")
+		return
+	}
+	if dep.Status != model.SiteDeploymentReady && dep.Status != model.SiteDeploymentActive {
+		writeError(w, http.StatusBadRequest, "deployment is not ready")
+		return
+	}
+	var req publishEdgeManifestRequest
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.publishSiteEdgeManifest(r.Context(), site, dep, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handlePurgeSiteCache(w http.ResponseWriter, r *http.Request) {
@@ -1576,20 +1834,35 @@ func (s *Server) createSiteDeploymentFromRequest(w http.ResponseWriter, r *http.
 		return nil, deploySitePayload{}, err
 	}
 	profileName := strings.TrimSpace(r.FormValue("route_profile"))
+	deploymentTarget, err := normalizeDeploymentTarget(firstNonEmpty(r.FormValue("deployment_target"), r.FormValue("target")))
+	if err != nil {
+		return nil, deploySitePayload{}, err
+	}
 	site, err := s.db.GetSite(r.Context(), siteID)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return nil, deploySitePayload{}, err
 		}
 		profileName = firstNonEmpty(profileName, "overseas")
-		site, err = s.db.CreateSite(r.Context(), siteID, "", "standard", profileName, nil)
+		profile, ok := s.cfg.Profile(profileName)
+		if !ok {
+			return nil, deploySitePayload{}, fmt.Errorf("unknown route_profile")
+		}
+		if deploymentTarget == "" {
+			deploymentTarget = defaultDeploymentTarget(profile)
+		}
+		site, err = s.db.CreateSite(r.Context(), siteID, "", "standard", profileName, deploymentTarget, nil)
 		if err != nil {
 			return nil, deploySitePayload{}, err
 		}
 	}
 	profileName = firstNonEmpty(profileName, site.RouteProfile, "overseas")
-	if _, ok := s.cfg.Profile(profileName); !ok {
+	profile, ok := s.cfg.Profile(profileName)
+	if !ok {
 		return nil, deploySitePayload{}, fmt.Errorf("unknown route_profile")
+	}
+	if deploymentTarget == "" {
+		deploymentTarget = firstNonEmpty(site.DeploymentTarget, defaultDeploymentTarget(profile))
 	}
 	file, header, err := firstFormFile(r, "artifact", "bundle", "file")
 	if err != nil {
@@ -1614,14 +1887,15 @@ func (s *Server) createSiteDeploymentFromRequest(w http.ResponseWriter, r *http.
 		expiresAt = time.Now().UTC().Add(7 * 24 * time.Hour)
 	}
 	dep, err := s.db.CreateSiteDeployment(r.Context(), model.SiteDeployment{
-		ID:           deploymentID,
-		SiteID:       siteID,
-		Environment:  environment,
-		Status:       model.SiteDeploymentQueued,
-		RouteProfile: profileName,
-		Version:      deploymentID,
-		Pinned:       pinned,
-		ExpiresAt:    expiresAt,
+		ID:               deploymentID,
+		SiteID:           siteID,
+		Environment:      environment,
+		Status:           model.SiteDeploymentQueued,
+		RouteProfile:     profileName,
+		DeploymentTarget: deploymentTarget,
+		Version:          deploymentID,
+		Pinned:           pinned,
+		ExpiresAt:        expiresAt,
 	})
 	if err != nil {
 		_ = os.Remove(stagedPath)
@@ -1659,6 +1933,138 @@ func (s *Server) processSiteDeployment(ctx context.Context, payload deploySitePa
 	}
 	view := s.siteDeploymentView(ctx, ready)
 	return &view, nil
+}
+
+func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID string, req recordCloudflareStaticDeploymentRequest) (model.SiteDeployment, error) {
+	req.WorkerName = strings.TrimSpace(req.WorkerName)
+	if req.WorkerName == "" {
+		return model.SiteDeployment{}, fmt.Errorf("worker_name is required")
+	}
+	if req.FileCount < 0 {
+		return model.SiteDeployment{}, fmt.Errorf("file_count must be non-negative")
+	}
+	if req.TotalSize < 0 {
+		return model.SiteDeployment{}, fmt.Errorf("total_size must be non-negative")
+	}
+	rawEnvironment := strings.TrimSpace(req.Environment)
+	environment := normalizeSiteEnvironment(rawEnvironment)
+	if environment == "" {
+		if rawEnvironment != "" {
+			return model.SiteDeployment{}, fmt.Errorf("environment must be production or preview")
+		}
+		environment = model.SiteEnvironmentProduction
+	}
+	target, err := normalizeDeploymentTarget(req.DeploymentTarget)
+	if err != nil {
+		return model.SiteDeployment{}, err
+	}
+	if target == "" {
+		target = model.SiteDeploymentTargetCloudflareStatic
+	}
+	if target != model.SiteDeploymentTargetCloudflareStatic {
+		return model.SiteDeployment{}, fmt.Errorf("cloudflare static deployment requires deployment_target cloudflare_static")
+	}
+	site, err := s.db.GetSite(ctx, siteID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return model.SiteDeployment{}, err
+	}
+	profileName := firstNonEmpty(strings.TrimSpace(req.RouteProfile), "overseas")
+	if site != nil {
+		profileName = firstNonEmpty(strings.TrimSpace(req.RouteProfile), site.RouteProfile, "overseas")
+	}
+	if _, ok := s.cfg.Profile(profileName); !ok {
+		return model.SiteDeployment{}, fmt.Errorf("unknown route_profile")
+	}
+	mode := normalizeSiteMode(req.Mode)
+	if mode == "" {
+		if strings.TrimSpace(req.Mode) != "" {
+			return model.SiteDeployment{}, fmt.Errorf("mode must be standard or spa")
+		}
+		mode = "standard"
+		if site != nil {
+			mode = firstNonEmpty(site.Mode, "standard")
+		}
+	}
+	requestedDomains, err := s.siteDomainsFromRequest(siteID, req.Domains, "", false, true, boolPtr(false))
+	if err != nil {
+		return model.SiteDeployment{}, err
+	}
+	if site == nil {
+		site, err = s.db.CreateSite(ctx, siteID, "", mode, profileName, target, requestedDomains)
+		if err != nil {
+			return model.SiteDeployment{}, err
+		}
+	} else {
+		domains := mergeDomains(site.Domains, requestedDomains)
+		site, err = s.db.CreateSite(ctx, siteID, site.Name, mode, profileName, target, domains)
+		if err != nil {
+			return model.SiteDeployment{}, err
+		}
+	}
+	publishedAt := time.Now().UTC()
+	if strings.TrimSpace(req.PublishedAtUTC) != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.PublishedAtUTC))
+		if err != nil {
+			return model.SiteDeployment{}, fmt.Errorf("published_at_utc must be RFC3339: %w", err)
+		}
+		publishedAt = parsed.UTC()
+	}
+	static := model.CloudflareStaticDeployment{
+		WorkerName:        req.WorkerName,
+		VersionID:         strings.TrimSpace(req.VersionID),
+		Domains:           requestedDomains,
+		URLs:              httpsDomainURLs(requestedDomains),
+		CompatibilityDate: strings.TrimSpace(req.CompatibilityDate),
+		AssetsSHA256:      strings.TrimSpace(req.AssetsSHA256),
+		CachePolicy:       strings.TrimSpace(req.CachePolicy),
+		HeadersGenerated:  req.HeadersGenerated,
+		NotFoundHandling:  strings.TrimSpace(req.NotFoundHandling),
+		PublishedAt:       publishedAt,
+	}
+	deploymentID := newDeploymentID()
+	manifest := siteDeployManifest{
+		Version:          3,
+		Kind:             "supercdn-cloudflare-static-deployment",
+		StorageLayout:    "cloudflare_static",
+		SiteID:           siteID,
+		DeploymentID:     deploymentID,
+		Environment:      environment,
+		RouteProfile:     profileName,
+		DeploymentTarget: target,
+		CreatedAtUTC:     publishedAt.Format(time.RFC3339Nano),
+		FileCount:        req.FileCount,
+		TotalSize:        req.TotalSize,
+		CloudflareStatic: &static,
+		DeliverySummary:  map[string]int{"cloudflare_static": req.FileCount},
+	}
+	raw, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return model.SiteDeployment{}, err
+	}
+	dep, err := s.db.CreateSiteDeployment(ctx, model.SiteDeployment{
+		ID:               deploymentID,
+		SiteID:           siteID,
+		Environment:      environment,
+		Status:           model.SiteDeploymentReady,
+		RouteProfile:     profileName,
+		DeploymentTarget: target,
+		Version:          deploymentID,
+		Pinned:           req.Pinned,
+		FileCount:        req.FileCount,
+		TotalSize:        req.TotalSize,
+		ManifestJSON:     string(raw),
+		ReadyAt:          publishedAt,
+	})
+	if err != nil {
+		return model.SiteDeployment{}, err
+	}
+	if req.Promote {
+		dep, err = s.db.ActivateSiteDeployment(ctx, siteID, dep.ID)
+		if err != nil {
+			return model.SiteDeployment{}, err
+		}
+	}
+	return s.siteDeploymentView(ctx, dep), nil
 }
 
 type siteZipEntry struct {
@@ -1732,18 +2138,19 @@ func (s *Server) buildSiteDeployment(ctx context.Context, dep *model.SiteDeploym
 		return nil, err
 	}
 	manifest := siteDeployManifest{
-		Version:         2,
-		StorageLayout:   "verbatim",
-		SiteID:          dep.SiteID,
-		DeploymentID:    dep.ID,
-		Environment:     dep.Environment,
-		RouteProfile:    dep.RouteProfile,
-		CreatedAtUTC:    time.Now().UTC().Format(time.RFC3339Nano),
-		Rules:           rules,
-		Inspect:         &inspect,
-		DeliverySummary: map[string]int{},
-		ArtifactSHA256:  artifact.SHA256,
-		ArtifactSize:    artifact.Size,
+		Version:          2,
+		StorageLayout:    "verbatim",
+		SiteID:           dep.SiteID,
+		DeploymentID:     dep.ID,
+		Environment:      dep.Environment,
+		RouteProfile:     dep.RouteProfile,
+		DeploymentTarget: dep.DeploymentTarget,
+		CreatedAtUTC:     time.Now().UTC().Format(time.RFC3339Nano),
+		Rules:            rules,
+		Inspect:          &inspect,
+		DeliverySummary:  map[string]int{},
+		ArtifactSHA256:   artifact.SHA256,
+		ArtifactSize:     artifact.Size,
 	}
 	rulesRaw, _ := json.Marshal(rules)
 	for _, entry := range entries {
@@ -3471,6 +3878,18 @@ func (s *Server) defaultSiteDomain(siteID, requestedID string, randomDefault boo
 	return label + "." + suffix, nil
 }
 
+func (s *Server) defaultCloudflareStaticDomain(siteID string) (string, error) {
+	root := cleanHost(s.cfg.Cloudflare.RootDomain)
+	if root == "" {
+		return s.defaultSiteDomain(siteID, "", false)
+	}
+	label := cleanDomainLabel(siteID)
+	if label == "" {
+		return "", fmt.Errorf("default domain id is required")
+	}
+	return label + "." + root, nil
+}
+
 func (s *Server) domainStatus(ctx context.Context, host string) domainStatusResponse {
 	account, library, accountOK := s.cloudflareAccountForHost(host, "", "")
 	cf := s.cloudflareClientForAccount(account)
@@ -4484,6 +4903,279 @@ func (s *Server) siteDeploymentFilePaths(ctx context.Context, dep *model.SiteDep
 	return out, nil
 }
 
+func (s *Server) buildSiteEdgeManifest(ctx context.Context, site *model.Site, dep *model.SiteDeployment) (*edgeManifest, error) {
+	if site == nil || dep == nil {
+		return nil, fmt.Errorf("site and deployment are required")
+	}
+	files, err := s.db.ListSiteDeploymentFiles(ctx, dep.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("deployment has no files")
+	}
+	rules := deploymentRules(dep, site)
+	mode := firstNonEmpty(rules.Mode, site.Mode, "standard")
+	manifest := &edgeManifest{
+		Version:          1,
+		Kind:             "supercdn-edge-manifest",
+		SiteID:           site.ID,
+		DeploymentID:     dep.ID,
+		Environment:      dep.Environment,
+		Status:           dep.Status,
+		RouteProfile:     dep.RouteProfile,
+		DeploymentTarget: dep.DeploymentTarget,
+		Mode:             mode,
+		GeneratedAtUTC:   time.Now().UTC().Format(time.RFC3339Nano),
+		Rules:            rules,
+		Routes:           map[string]edgeManifestRoute{},
+	}
+	objects := map[string]*model.Object{}
+	fileByPath := map[string]model.SiteDeploymentFile{}
+	for _, file := range files {
+		obj, err := s.db.GetObject(ctx, file.ObjectID)
+		if err != nil {
+			return nil, fmt.Errorf("load object for %s: %w", file.Path, err)
+		}
+		objects[file.Path] = obj
+		fileByPath[file.Path] = file
+		route, warnings := s.edgeManifestRouteForFile(ctx, rules, file, obj, http.StatusOK)
+		manifest.Warnings = append(manifest.Warnings, warnings...)
+		addEdgeManifestRoute(manifest.Routes, edgeRoutePathForFile(file.Path), route, true)
+	}
+	for _, file := range files {
+		route, ok := manifest.Routes[edgeRoutePathForFile(file.Path)]
+		if !ok {
+			continue
+		}
+		for _, alias := range edgeRouteAliasesForFile(file.Path) {
+			addEdgeManifestRoute(manifest.Routes, alias, route, false)
+		}
+	}
+	if mode == "spa" {
+		if file, ok := fileByPath["index.html"]; ok {
+			route, warnings := s.edgeManifestRouteForFile(ctx, rules, file, objects[file.Path], http.StatusOK)
+			manifest.Warnings = append(manifest.Warnings, warnings...)
+			manifest.Fallback = &route
+		} else {
+			manifest.Warnings = append(manifest.Warnings, "spa mode is enabled but index.html is not present")
+		}
+	}
+	notFoundPath := firstNonEmpty(rules.NotFound, "404.html")
+	if file, ok := fileByPath[notFoundPath]; ok {
+		route, warnings := s.edgeManifestRouteForFile(ctx, rules, file, objects[file.Path], http.StatusNotFound)
+		manifest.Warnings = append(manifest.Warnings, warnings...)
+		manifest.NotFound = &route
+	}
+	return manifest, nil
+}
+
+func (s *Server) publishSiteEdgeManifest(ctx context.Context, site *model.Site, dep *model.SiteDeployment, req publishEdgeManifestRequest) (publishEdgeManifestResponse, error) {
+	dryRun := true
+	if req.DryRun != nil {
+		dryRun = *req.DryRun
+	}
+	domains, err := s.siteBoundDomains(site, req.Domains)
+	if err != nil {
+		return publishEdgeManifestResponse{}, err
+	}
+	account, library, err := s.cloudflareAccountForDomains(domains, req.CloudflareAccount, req.CloudflareLibrary)
+	if err != nil {
+		return publishEdgeManifestResponse{}, err
+	}
+	manifest, err := s.buildSiteEdgeManifest(ctx, site, dep)
+	if err != nil {
+		return publishEdgeManifestResponse{}, err
+	}
+	raw, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return publishEdgeManifestResponse{}, err
+	}
+	raw = append(raw, '\n')
+	sum := sha256.Sum256(raw)
+	hash := hex.EncodeToString(sum[:])
+	keyPrefix := edgeManifestKVKeyPrefix(req.KeyPrefix)
+	publishActive := boolPtrValue(req.ActiveKey, dep.Active)
+	publishDeployment := boolPtrValue(req.DeploymentKey, true)
+	if !publishActive && !publishDeployment {
+		return publishEdgeManifestResponse{}, fmt.Errorf("at least one of active_key or deployment_key must be enabled")
+	}
+	resp := publishEdgeManifestResponse{
+		SiteID:            site.ID,
+		DeploymentID:      dep.ID,
+		Active:            dep.Active,
+		CloudflareAccount: account.Name,
+		CloudflareLibrary: library.Name,
+		KVNamespaceID:     strings.TrimSpace(req.KVNamespaceID),
+		KVNamespace:       strings.TrimSpace(req.KVNamespace),
+		KeyPrefix:         keyPrefix,
+		Domains:           domains,
+		DryRun:            dryRun,
+		Status:            "planned",
+		ManifestSize:      len(raw),
+		ManifestSHA256:    hash,
+		ManifestWarnings:  manifest.Warnings,
+	}
+	for _, domain := range domains {
+		if publishDeployment {
+			resp.Writes = append(resp.Writes, edgeManifestKVWrite{
+				Domain: domain,
+				Key:    edgeManifestDeploymentKVKey(keyPrefix, domain, dep.ID),
+				Kind:   "deployment",
+				DryRun: dryRun,
+				Size:   len(raw),
+				SHA256: hash,
+			})
+		}
+		if publishActive {
+			resp.Writes = append(resp.Writes, edgeManifestKVWrite{
+				Domain: domain,
+				Key:    edgeManifestActiveKVKey(keyPrefix, domain),
+				Kind:   "active",
+				DryRun: dryRun,
+				Size:   len(raw),
+				SHA256: hash,
+			})
+		}
+	}
+	if len(resp.Writes) == 0 {
+		return publishEdgeManifestResponse{}, fmt.Errorf("no edge manifest KV keys generated")
+	}
+	cf := s.cloudflareClientForAccount(account)
+	if resp.KVNamespaceID == "" && resp.KVNamespace != "" {
+		if !cf.AccountConfigured() {
+			resp.Warnings = append(resp.Warnings, "cloudflare account_id/api_token not configured; KV namespace title cannot be resolved")
+		} else if namespace, err := cf.FindKVNamespace(ctx, resp.KVNamespace); err != nil {
+			resp.Warnings = append(resp.Warnings, err.Error())
+		} else {
+			resp.KVNamespaceID = namespace.ID
+			resp.KVNamespace = namespace.Title
+		}
+	}
+	if resp.KVNamespaceID == "" {
+		message := "kv_namespace_id is required to publish; pass -kv-namespace-id or -kv-namespace"
+		if dryRun {
+			resp.Warnings = append(resp.Warnings, message)
+		} else {
+			resp.Errors = append(resp.Errors, message)
+			resp.Status = "skipped"
+		}
+	}
+	if !dryRun && resp.KVNamespaceID != "" {
+		resp.Status = "ok"
+		for i := range resp.Writes {
+			if err := cf.PutKVValue(ctx, resp.KVNamespaceID, resp.Writes[i].Key, raw); err != nil {
+				resp.Writes[i].Action = "error"
+				resp.Writes[i].Error = err.Error()
+				resp.Errors = append(resp.Errors, resp.Writes[i].Key+": "+err.Error())
+				resp.Status = "partial"
+				continue
+			}
+			resp.Writes[i].Action = "put"
+		}
+	} else {
+		for i := range resp.Writes {
+			if resp.Status == "skipped" {
+				resp.Writes[i].Action = "skipped"
+			} else {
+				resp.Writes[i].Action = "planned"
+			}
+		}
+	}
+	if dryRun && resp.Status == "planned" {
+		return resp, nil
+	}
+	if len(resp.Errors) > 0 && resp.Status == "ok" {
+		resp.Status = "partial"
+	}
+	return resp, nil
+}
+
+func (s *Server) edgeManifestRouteForFile(ctx context.Context, rules siteRules, file model.SiteDeploymentFile, obj *model.Object, status int) (edgeManifestRoute, []string) {
+	headers := siteHeadersForPath(rules, "/"+file.Path)
+	cacheControl := firstNonEmpty(file.CacheControl, obj.CacheControl)
+	for key, value := range headers {
+		if strings.EqualFold(key, "Cache-Control") {
+			cacheControl = value
+			delete(headers, key)
+		}
+	}
+	if len(headers) == 0 {
+		headers = nil
+	}
+	delivery := siteDeliveryMode(rules, file.Path)
+	route := edgeManifestRoute{
+		Type:               "origin",
+		Delivery:           delivery,
+		File:               file.Path,
+		Status:             status,
+		ContentType:        firstNonEmpty(file.ContentType, obj.ContentType),
+		CacheControl:       cacheControl,
+		ObjectCacheControl: firstNonEmpty(file.CacheControl, obj.CacheControl),
+		Size:               file.Size,
+		SHA256:             file.SHA256,
+		ObjectID:           file.ObjectID,
+		ObjectKey:          obj.Key,
+		Headers:            headers,
+	}
+	if status != http.StatusOK || delivery != "redirect" {
+		return route, nil
+	}
+	target, err := s.objectRedirectURL(ctx, obj)
+	if err != nil || target == "" {
+		if err == nil {
+			err = fmt.Errorf("direct storage URL is empty")
+		}
+		return route, []string{fmt.Sprintf("redirect URL unavailable for %s: %v; route will use origin delivery", file.Path, err)}
+	}
+	route.Type = "redirect"
+	route.Status = http.StatusFound
+	route.Location = target
+	route.CacheControl = "no-store"
+	return route, nil
+}
+
+func addEdgeManifestRoute(routes map[string]edgeManifestRoute, routePath string, route edgeManifestRoute, overwrite bool) {
+	routePath = cleanRequestPath(routePath)
+	if _, ok := routes[routePath]; ok && !overwrite {
+		return
+	}
+	routes[routePath] = route
+}
+
+func edgeRoutePathForFile(filePath string) string {
+	return "/" + strings.TrimPrefix(filePath, "/")
+}
+
+func edgeRouteAliasesForFile(filePath string) []string {
+	clean := strings.TrimPrefix(path.Clean("/"+strings.TrimPrefix(filePath, "/")), "/")
+	switch {
+	case clean == "index.html":
+		return []string{"/"}
+	case strings.HasSuffix(clean, "/index.html"):
+		dir := strings.TrimSuffix(clean, "/index.html")
+		return []string{"/" + dir, "/" + dir + "/"}
+	default:
+		return nil
+	}
+}
+
+func edgeManifestKVKeyPrefix(value string) string {
+	value = strings.Trim(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"), "/")
+	if value == "" {
+		return "sites/"
+	}
+	return value + "/"
+}
+
+func edgeManifestActiveKVKey(prefix, domain string) string {
+	return edgeManifestKVKeyPrefix(prefix) + cleanHost(domain) + "/active/edge-manifest"
+}
+
+func edgeManifestDeploymentKVKey(prefix, domain, deploymentID string) string {
+	return edgeManifestKVKeyPrefix(prefix) + cleanHost(domain) + "/deployments/" + cleanDeploymentID(deploymentID) + "/edge-manifest"
+}
+
 func (s *Server) cloudflareClient() *cloudflare.Client {
 	account, _ := s.cfg.DefaultCloudflareAccount()
 	return s.cloudflareClientForAccount(account)
@@ -4637,6 +5329,9 @@ func (s *Server) siteView(site *model.Site) model.Site {
 		return model.Site{}
 	}
 	view := *site
+	if view.DeploymentTarget == "" {
+		view.DeploymentTarget = model.SiteDeploymentTargetOriginAssisted
+	}
 	view.URLs = s.siteDomainURLs(site.Domains)
 	if len(view.URLs) > 0 {
 		view.URL = view.URLs[0]
@@ -4649,18 +5344,26 @@ func (s *Server) siteDeploymentView(ctx context.Context, dep *model.SiteDeployme
 		return model.SiteDeployment{}
 	}
 	view := *dep
+	if view.DeploymentTarget == "" {
+		view.DeploymentTarget = model.SiteDeploymentTargetOriginAssisted
+	}
 	view.PreviewURL = s.absolutePublicURL("/p/" + dep.SiteID + "/" + dep.ID + "/")
 	if dep.ManifestJSON != "" {
 		var manifest siteDeployManifest
 		if json.Unmarshal([]byte(dep.ManifestJSON), &manifest) == nil {
 			view.Inspect = manifest.Inspect
 			view.DeliverySummary = manifest.DeliverySummary
+			view.CloudflareStatic = manifest.CloudflareStatic
 		}
 	}
 	if site, err := s.db.GetSite(ctx, dep.SiteID); err == nil {
 		view.SiteDomains = site.Domains
 		if dep.Environment == model.SiteEnvironmentProduction && dep.Active {
-			view.ProductionURLs = s.siteDomainURLs(site.Domains)
+			if view.CloudflareStatic != nil && len(view.CloudflareStatic.URLs) > 0 {
+				view.ProductionURLs = view.CloudflareStatic.URLs
+			} else {
+				view.ProductionURLs = s.siteDomainURLs(site.Domains)
+			}
 			if len(view.ProductionURLs) > 0 {
 				view.ProductionURL = view.ProductionURLs[0]
 			}
@@ -4677,6 +5380,18 @@ func (s *Server) siteDomainURLs(domains []string) []string {
 			continue
 		}
 		urls = append(urls, s.publicScheme()+"://"+domain+"/")
+	}
+	return urls
+}
+
+func httpsDomainURLs(domains []string) []string {
+	urls := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		domain = cleanHost(domain)
+		if domain == "" {
+			continue
+		}
+		urls = append(urls, "https://"+domain+"/")
 	}
 	return urls
 }
@@ -5180,6 +5895,30 @@ func normalizeSiteMode(v string) string {
 	}
 }
 
+func normalizeDeploymentTarget(v string) (string, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return "", nil
+	}
+	switch v {
+	case "origin", "go_origin", model.SiteDeploymentTargetOriginAssisted:
+		return model.SiteDeploymentTargetOriginAssisted, nil
+	case "cloudflare", "cloudflare_static", "workers_static", "workers_assets", "pages":
+		return model.SiteDeploymentTargetCloudflareStatic, nil
+	case "hybrid", "hybrid_edge", "edge":
+		return model.SiteDeploymentTargetHybridEdge, nil
+	default:
+		return "", fmt.Errorf("deployment_target must be origin_assisted, cloudflare_static or hybrid_edge")
+	}
+}
+
+func defaultDeploymentTarget(profile config.RouteProfile) string {
+	if profile.DeploymentTarget != "" {
+		return profile.DeploymentTarget
+	}
+	return model.SiteDeploymentTargetOriginAssisted
+}
+
 func parseFormBool(r *http.Request, key string, fallback bool) (bool, error) {
 	raw := strings.TrimSpace(r.FormValue(key))
 	if raw == "" {
@@ -5537,6 +6276,33 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func boolPtrValue(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func mergeDomains(groups ...[]string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, group := range groups {
+		for _, domain := range group {
+			domain = cleanHost(domain)
+			if domain == "" || seen[domain] {
+				continue
+			}
+			seen[domain] = true
+			out = append(out, domain)
+		}
+	}
+	return out
 }
 
 func closeErr(c io.Closer, previous error) error {

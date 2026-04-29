@@ -36,10 +36,13 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `create-project` | `POST /api/v1/projects` | 创建普通静态资源项目 |
 | `upload` | `POST /api/v1/preflight/upload` + `POST /api/v1/assets` | 上传普通静态资源 |
 | `create-site` | `POST /api/v1/sites` | 创建静态站点 |
-| `deploy-site` | `POST /api/v1/sites/{id}/deployments` | 部署静态站点产物包或目录 |
+| `deploy-site` | `GET /api/v1/sites/{id}/deployment-target` + deploy API | 部署静态站点产物包或目录 |
 | `probe-site` | 本地 HTTP 探测 + 可选部署查询 | 验证线上 HTML、重定向 JS/CSS 的 MIME/CORS，以及可选 SPA fallback |
 | `list-deployments` | `GET /api/v1/sites/{id}/deployments` | 列出站点部署历史 |
 | `deployment` | `GET /api/v1/sites/{id}/deployments/{deployment}` | 查询单个部署 |
+| `export-edge-manifest` | `GET /api/v1/sites/{id}/deployments/{deployment}/edge-manifest` | 导出可用于边缘路由的部署 manifest |
+| `publish-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 发布边缘 manifest 到 Cloudflare Workers KV |
+| `publish-cloudflare-static` | 本地 Wrangler 调用 | 发布本地目录到 Cloudflare Workers Static Assets |
 | `promote-deployment` | `POST /api/v1/sites/{id}/deployments/{deployment}/promote` | 将部署提升为当前生产版本 |
 | `delete-deployment` | `DELETE /api/v1/sites/{id}/deployments/{deployment}` | 删除未激活且未 pinned 的部署 |
 | `gc-site` | `POST /api/v1/sites/{id}/gc` | 站点内容清理入口 |
@@ -142,6 +145,8 @@ multipart 字段：
 .\bin\supercdnctl.exe create-site -site blog -profile china_all -mode spa -domains example.com,www.example.com
 ```
 
+`create-site` also accepts `-target origin_assisted|cloudflare_static|hybrid_edge`. When omitted, the route profile default is used.
+
 HTTP:
 
 ```http
@@ -166,7 +171,19 @@ POST /api/v1/sites
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -profile china_all
 .\bin\supercdnctl.exe deploy-site -site blog -bundle .\dist.zip -env preview
 .\bin\supercdnctl.exe deploy-site -site blog -bundle .\dist.zip -env production -promote
+.\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target cloudflare_static -domains blog-static.example.com -static-name supercdn-blog-static
+.\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -profile overseas
 ```
+
+`deploy-site` also accepts `-target origin_assisted|cloudflare_static|hybrid_edge`. `deployment_target` is the website hosting target, not the storage route profile. For ordinary overseas static sites use `cloudflare_static`; keep R2 for large objects such as video, images and archives; use `hybrid_edge` when Worker/KV routing should split resources between Cloudflare and AList/OpenList.
+
+When `-target` is omitted, `deploy-site` calls `GET /api/v1/sites/{id}/deployment-target` to resolve the existing site target or the route-profile default. If the resolved target is `cloudflare_static` and `-domains` is empty, the server returns existing site domains or a one-level subdomain under `cloudflare.root_domain`, and the CLI passes them to Wrangler automatically. This keeps Cloudflare Static custom domains on hosts like `blog.qwk.ccwu.cc`; the nested `cloudflare.site_domain_suffix` pattern is kept for Go-origin default site domains.
+
+When `-target cloudflare_static` is used, the CLI publishes `-dir` with local Wrangler Workers Static Assets, then records the resulting Worker/domain/version metadata through the Super CDN API. This path does not upload a zip artifact to R2 or the Go-origin storage chain.
+
+Cloudflare Static deploys default to `-static-cache-policy auto`. If the source already contains `_headers`, the CLI uses it. Otherwise it publishes from a temporary copy with a generated `_headers` file. The generated policy keeps `/`, HTML and service-worker files revalidating, gives versioned or common build assets long immutable browser caching, and gives other files a short revalidating cache. The source directory is not modified.
+
+For SPAs, pass `-static-spa`. The CLI generates a temporary `wrangler.toml` with `assets.not_found_handling = "single-page-application"` so deep links return `index.html` from Cloudflare Static Assets. `-static-not-found-handling` can also be set directly to `none`、`404-page` or `single-page-application`.
 
 本地检查产物但不上传：
 
@@ -178,7 +195,9 @@ POST /api/v1/sites
 HTTP:
 
 ```http
+GET /api/v1/sites/{id}/deployment-target
 POST /api/v1/sites/{id}/deployments
+POST /api/v1/sites/{id}/cloudflare-static/deployments
 ```
 
 参数：
@@ -194,11 +213,24 @@ POST /api/v1/sites/{id}/deployments
 | `-wait` | 否 | `true` | 等待异步部署完成 |
 | `-timeout` | 否 | `30m` | 等待超时时间 |
 | `-profile` | 否 | 站点默认线路 | 覆盖站点默认路由 |
+| `-target` | 否 | 线路默认值 | `origin_assisted`、`cloudflare_static` 或 `hybrid_edge` |
+| `-domains` | 否 | 空 | `cloudflare_static` 自定义域名，逗号分隔 |
+| `-static-name` | 否 | `supercdn-{site}-static` | `cloudflare_static` Worker 名称 |
+| `-compatibility-date` | 否 | 当前 UTC 日期 | `cloudflare_static` Worker compatibility date |
+| `-message` | 否 | 空 | `cloudflare_static` Cloudflare 部署说明 |
+| `-static-cache-policy` | 否 | `auto` | `cloudflare_static` 缓存头策略：`auto`、`force` 或 `none` |
+| `-static-spa` | 否 | `false` | 为 `cloudflare_static` 启用 SPA fallback |
+| `-static-not-found-handling` | 否 | `none` | Cloudflare Static `not_found_handling`：`none`、`404-page` 或 `single-page-application` |
 
 限制：
 
 - preview 默认最多 300 个文件，production 默认最多 1000 个文件。
 - 上传 zip 会作为 artifact 保存到资源库；站点文件按原始目录结构写入 `sites/{site}/deployments/{deployment}/root/...`。
+- `-target` 省略时由控制面解析：已有站点优先使用站点配置，其次使用 route profile 的 `deployment_target`，最后回退为 `origin_assisted`。
+- `cloudflare_static` 的自动默认域名使用 `cloudflare.root_domain` 下的一层子域，避免嵌套默认域名在 Cloudflare Static 自定义域 TLS 上失败。
+- `cloudflare_static` 需要 `-dir`，不支持 `-bundle`；它发布到 Cloudflare Workers Static Assets 并写入 Super CDN deployment 记录，不经过 R2。
+- `cloudflare_static` 的 `auto` 缓存策略会生成临时 `_headers`，不会修改源目录；如果源目录已有 `_headers`，默认尊重已有文件。
+- `cloudflare_static` 的 SPA fallback 通过临时 Wrangler 配置文件实现，不会写入源目录。
 - 公共访问使用当前 active deployment；preview 访问自动加 `X-Robots-Tag: noindex`。
 - 站点公开访问时，根目录 `index.html` 由 Go origin 直出；其他成功命中的站点文件（非 Range、非 404）会 `302` 到可用的存储直链。普通 `/o/...` 资产仍按 route profile 的 `allow_redirect` 策略处理。
 - deployment 响应包含 `inspect`，只提示 module script、dynamic import、CSS 相对资源、字体、wasm、service worker 等风险，不阻止部署。
@@ -239,6 +271,10 @@ POST /api/v1/sites/{id}/deployments
 ```powershell
 .\bin\supercdnctl.exe list-deployments -site blog
 .\bin\supercdnctl.exe deployment -site blog -deployment dpl-abc
+.\bin\supercdnctl.exe export-edge-manifest -site blog -deployment dpl-abc -out .\edge-manifest.json
+.\bin\supercdnctl.exe publish-edge-manifest -site blog -deployment dpl-abc -kv-namespace supercdn-edge-manifest -dry-run
+.\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target cloudflare_static -domains blog-static-test.example.com
+.\bin\supercdnctl.exe publish-cloudflare-static -site blog -dir .\dist -domains blog-static-test.example.com -dry-run=false
 .\bin\supercdnctl.exe promote-deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe gc-site -site blog
@@ -249,6 +285,10 @@ POST /api/v1/sites/{id}/deployments
 - rollback 等价于 `promote-deployment` 一个旧 deployment；preview deployment 也可以被提升为 production。
 - active production deployment 不能删除。
 - pinned deployment 不能删除。
+- `export-edge-manifest` 是只读旁路导出，用于后续 Cloudflare Worker/KV/Pages 边缘路由改造；不会改变当前线上 Go-origin + storage 302 交付链路。
+- `publish-edge-manifest` 默认 dry-run；真实写入 KV 需要 `-dry-run=false`，默认会写 deployment key，并且仅当该 deployment 当前 active 时写 `sites/{host}/active/edge-manifest`。
+- `deploy-site -target cloudflare_static` 是正式的 Cloudflare-native 静态托管入口：它本地调用 Wrangler 发布 Workers Static Assets，然后把部署记录写回 Super CDN。
+- `publish-cloudflare-static` 是更底层的 Cloudflare canary/诊断入口，只发布本地目录，不写 Super CDN deployment 记录；默认 dry-run，真实发布需要 `-dry-run=false`。它读取 `configs/private/cloudflare.env` 中的 `CF_API_TOKEN` / `CF_ACCOUNT_ID`，不会读取或打印密钥值。
 - `gc-site` 当前是保守入口，不做破坏性清理；后续可按 manifest 引用计数清理未引用对象。
 
 ### supercdn.site.json

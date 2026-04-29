@@ -87,6 +87,7 @@ type RouteProfile struct {
 	Backups             []string `json:"backups"`
 	DefaultCacheControl string   `json:"default_cache_control"`
 	AllowRedirect       bool     `json:"allow_redirect"`
+	DeploymentTarget    string   `json:"deployment_target"`
 }
 
 type StorageConfig struct {
@@ -155,6 +156,8 @@ type R2Config struct {
 type AListConfig struct {
 	BaseURL       string `json:"base_url"`
 	Token         string `json:"token"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
 	Root          string `json:"root"`
 	UseProxyURL   bool   `json:"use_proxy_url"`
 	PublicBaseURL string `json:"public_base_url"`
@@ -309,7 +312,8 @@ func (c *Config) ApplyDefaults(baseDir string) error {
 			stores[library.Name] = true
 		}
 	}
-	for _, p := range c.RouteProfiles {
+	for i := range c.RouteProfiles {
+		p := &c.RouteProfiles[i]
 		if p.Name == "" {
 			return errors.New("route profile name is required")
 		}
@@ -321,8 +325,30 @@ func (c *Config) ApplyDefaults(baseDir string) error {
 				return fmt.Errorf("route profile %q references missing backup storage %q", p.Name, b)
 			}
 		}
+		target, err := normalizeDeploymentTarget(p.DeploymentTarget)
+		if err != nil {
+			return fmt.Errorf("route profile %q deployment_target: %w", p.Name, err)
+		}
+		p.DeploymentTarget = target
 	}
 	return os.MkdirAll(c.Server.DataDir, 0o755)
+}
+
+func normalizeDeploymentTarget(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "", nil
+	}
+	switch value {
+	case "origin", "go_origin", "origin_assisted":
+		return "origin_assisted", nil
+	case "cloudflare", "cloudflare_static", "workers_static", "workers_assets", "pages":
+		return "cloudflare_static", nil
+	case "hybrid", "hybrid_edge", "edge":
+		return "hybrid_edge", nil
+	default:
+		return "", fmt.Errorf("must be origin_assisted, cloudflare_static or hybrid_edge")
+	}
 }
 
 func (c *Config) Profile(name string) (RouteProfile, bool) {

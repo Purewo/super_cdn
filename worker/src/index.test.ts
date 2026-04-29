@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import worker, { isStorageRedirect, originRequest, storageHeaders, type Env } from "./index";
+import worker, {
+  isStorageRedirect,
+  originRequest,
+  resolveEdgeManifestDecision,
+  storageHeaders,
+  type EdgeManifest,
+  type Env,
+} from "./index";
 
 class MemoryCache {
   private readonly items = new Map<string, Response>();
@@ -13,6 +20,32 @@ class MemoryCache {
   }
 }
 
+class HeaderRewritingMemoryCache {
+  private readonly items = new Map<string, Response>();
+
+  async match(request: Request): Promise<Response | undefined> {
+    const response = this.items.get(request.url)?.clone();
+    if (!response) {
+      return undefined;
+    }
+    const out = new Response(response.body, response);
+    out.headers.set("Cache-Control", "public, max-age=14400");
+    return out;
+  }
+
+  async put(request: Request, response: Response): Promise<void> {
+    this.items.set(request.url, response.clone());
+  }
+}
+
+class MemoryKV {
+  constructor(private readonly items: Record<string, string>) {}
+
+  async get(key: string): Promise<string | null> {
+    return this.items[key] ?? null;
+  }
+}
+
 function ctx(): ExecutionContext {
   return {
     waitUntil(promise: Promise<unknown>) {
@@ -20,6 +53,21 @@ function ctx(): ExecutionContext {
     },
     passThroughOnException() {},
   } as ExecutionContext;
+}
+
+function trackedCtx(): { ctx: ExecutionContext; wait: () => Promise<void> } {
+  const waits: Promise<unknown>[] = [];
+  return {
+    ctx: {
+      waitUntil(promise: Promise<unknown>) {
+        waits.push(promise);
+      },
+      passThroughOnException() {},
+    } as ExecutionContext,
+    async wait() {
+      await Promise.all(waits);
+    },
+  };
 }
 
 function env(overrides: Partial<Env> = {}): Env {
@@ -30,11 +78,125 @@ function env(overrides: Partial<Env> = {}): Env {
   };
 }
 
+function manifest(overrides: Partial<EdgeManifest> = {}): EdgeManifest {
+  return {
+    version: 1,
+    kind: "supercdn-edge-manifest",
+    site_id: "demo",
+    deployment_id: "dpl-test",
+    mode: "spa",
+    routes: {
+      "/": {
+        type: "origin",
+        delivery: "origin",
+        file: "index.html",
+        status: 200,
+        content_type: "text/html; charset=utf-8",
+        cache_control: "public, max-age=60",
+      },
+      "/index.html": {
+        type: "origin",
+        delivery: "origin",
+        file: "index.html",
+        status: 200,
+      },
+      "/assets/app.js": {
+        type: "redirect",
+        delivery: "redirect",
+        file: "assets/app.js",
+        status: 302,
+        location: "https://storage.example.com/assets/app.js?sign=fresh",
+        content_type: "text/javascript; charset=utf-8",
+        cache_control: "no-store",
+        headers: { "X-Test-Asset": "yes" },
+      },
+    },
+    fallback: {
+      type: "origin",
+      delivery: "origin",
+      file: "index.html",
+      status: 200,
+    },
+    not_found: {
+      type: "origin",
+      delivery: "redirect",
+      file: "404.html",
+      status: 404,
+    },
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("edge proxy", () => {
+  it("returns manifest dry-run decisions from KV without contacting origin", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called for manifest dry-run");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const key = "sites/site.example.com/active/edge-manifest";
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js?__supercdn_edge_manifest=dry-run"),
+      env({
+        EDGE_MANIFEST_DRY_RUN: "true",
+        EDGE_MANIFEST: new MemoryKV({ [key]: JSON.stringify(manifest()) }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-SuperCDN-Edge-Manifest-Dry-Run")).toBe("true");
+    const body = (await res.json()) as {
+      ok: boolean;
+      key: string;
+      decision: {
+        action: string;
+        route_type: string;
+        delivery: string;
+        file: string;
+        status: number;
+        location: string;
+        cache_control: string;
+        headers: Record<string, string>;
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.key).toBe(key);
+    expect(body.decision.action).toBe("route");
+    expect(body.decision.route_type).toBe("redirect");
+    expect(body.decision.delivery).toBe("redirect");
+    expect(body.decision.file).toBe("assets/app.js");
+    expect(body.decision.status).toBe(302);
+    expect(body.decision.location).toBe("https://storage.example.com/assets/app.js?sign=fresh");
+    expect(body.decision.cache_control).toBe("no-store");
+    expect(body.decision.headers["X-Test-Asset"]).toBe("yes");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not enter manifest dry-run unless explicitly enabled", async () => {
+    vi.stubGlobal("caches", { default: new MemoryCache() });
+    const fetchSpy = vi.fn(async () => new Response("origin", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js?__supercdn_edge_manifest=dry-run"),
+      env({
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(manifest()),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("origin");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("follows marked storage redirects and returns same-origin-safe content", async () => {
     const seen: { url: string; headers: Headers }[] = [];
     vi.stubGlobal("caches", { default: new MemoryCache() });
@@ -143,6 +305,75 @@ describe("edge proxy", () => {
 
     expect(res.status).toBe(206);
     expect(res.headers.get("X-SuperCDN-Cache")).toBe("BYPASS");
+  });
+
+  it("preserves response Cache-Control on cache hits", async () => {
+    vi.stubGlobal("caches", { default: new HeaderRewritingMemoryCache() });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("<html></html>", {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "public, max-age=300",
+        },
+      })),
+    );
+
+    const execution = trackedCtx();
+    const req = new Request("https://site.example.com/");
+    const miss = await worker.fetch(req, env(), execution.ctx);
+    expect(miss.headers.get("X-SuperCDN-Cache")).toBe("MISS");
+    expect(miss.headers.get("Cache-Control")).toBe("public, max-age=300");
+    await execution.wait();
+
+    const hit = await worker.fetch(req, env(), ctx());
+    expect(hit.headers.get("X-SuperCDN-Cache")).toBe("HIT");
+    expect(hit.headers.get("Cache-Control")).toBe("public, max-age=300");
+    expect(hit.headers.get("X-SuperCDN-Cached-Cache-Control")).toBeNull();
+  });
+});
+
+describe("edge manifest routing", () => {
+  it("matches redirects, rewrites, SPA fallback and not_found in Go-origin order", () => {
+    const base = manifest({
+      rules: {
+        redirects: [{ from: "/old", to: "/new", status: 301 }],
+        rewrites: [{ from: "/docs/*", to: "/index.html" }],
+      },
+      not_found: {
+        type: "origin",
+        delivery: "redirect",
+        file: "404.html",
+        status: 404,
+      },
+    });
+
+    expect(resolveEdgeManifestDecision(new Request("https://site.example.com/old"), base)).toMatchObject({
+      action: "site_redirect",
+      status: 301,
+      location: "/new",
+      reason: "matched_redirect_rule",
+    });
+    expect(resolveEdgeManifestDecision(new Request("https://site.example.com/docs/page"), base)).toMatchObject({
+      action: "route",
+      serve_path: "/index.html",
+      file: "index.html",
+      reason: "matched_route",
+    });
+    expect(resolveEdgeManifestDecision(new Request("https://site.example.com/movie/123"), base)).toMatchObject({
+      action: "fallback",
+      file: "index.html",
+      reason: "spa_fallback",
+    });
+
+    const standard = manifest({ fallback: undefined });
+    expect(resolveEdgeManifestDecision(new Request("https://site.example.com/missing"), standard)).toMatchObject({
+      action: "not_found",
+      file: "404.html",
+      status: 404,
+      reason: "not_found",
+    });
   });
 });
 

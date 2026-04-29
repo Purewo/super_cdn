@@ -130,15 +130,34 @@ func (s *ResourceLibraryStore) PreflightPut(_ context.Context, opts PreflightOpt
 }
 
 func (s *ResourceLibraryStore) Get(ctx context.Context, key string, opts GetOptions) (*ObjectStream, error) {
+	var lastErr error
 	if opts.Locator != "" {
 		if bindingName, innerLocator, ok := decodeResourceLocator(opts.Locator); ok {
 			if binding := s.binding(bindingName); binding != nil {
-				opts.Locator = innerLocator
-				return binding.Store.Get(ctx, key, opts)
+				targetOpts := opts
+				targetOpts.Locator = innerLocator
+				stream, err := binding.Store.Get(ctx, key, targetOpts)
+				if err == nil {
+					return stream, nil
+				}
+				lastErr = err
+
+				fallbackOpts := opts
+				fallbackOpts.Locator = ""
+				for _, fallback := range s.bindings {
+					if fallback.Name == bindingName {
+						continue
+					}
+					stream, err := fallback.Store.Get(ctx, key, fallbackOpts)
+					if err == nil {
+						return stream, nil
+					}
+					lastErr = err
+				}
+				return nil, lastErr
 			}
 		}
 	}
-	var lastErr error
 	for _, binding := range s.bindings {
 		stream, err := binding.Store.Get(ctx, key, opts)
 		if err == nil {

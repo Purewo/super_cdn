@@ -2,6 +2,20 @@
 
 Windows-first MVP for static asset acceleration and static site hosting.
 
+## Product target
+
+Super CDN is a website hosting and CDN orchestration platform. It should use Cloudflare's native static-site surfaces where they already fit, instead of rebuilding that layer from R2 and KV alone.
+
+The target architecture is:
+
+- Overseas website hosting: Workers Static Assets first, with Cloudflare Pages as a supported alternative for entry HTML and ordinary static sites. For overseas-only acceleration, do not involve R2 when Cloudflare-native static hosting fits the site.
+- Overseas object acceleration: Cloudflare R2 for large objects such as video, images, archives and other reusable downloads, plus account-isolated overseas acceleration nodes.
+- Domestic acceleration: AList/OpenList-backed resource libraries for China-facing static resources.
+- Edge routing: a Worker reads a KV-backed edge manifest and chooses whether a path should stay on Cloudflare-native hosting, redirect to R2, or redirect/proxy to a domestic AList/OpenList URL.
+- Future global acceleration: routing policy can choose AList or R2 by site, path, asset class, health, region and availability, so one deployment can be optimized for domestic and overseas visitors without duplicating the user-facing workflow.
+
+The Go service remains the control plane: deploy intake, inspection, health checks, manifest generation, Cloudflare automation, storage synchronization and rollback. Public website delivery should move away from depending on the Go origin at runtime.
+
 ## What is included
 
 - Go origin/control service with REST API.
@@ -73,15 +87,51 @@ For local testing without DNS, use `http://127.0.0.1:8080/s/demo/`.
 
 Static site deploys use immutable deployments. The CLI uploads a zip artifact, the server unpacks it locally, saves the original zip, writes a manifest, and uploads site files with the original directory layout under `sites/{site}/deployments/{deployment}/root/...`. Preview deployments are available at `/p/{site}/{deployment}/`; production is an atomic promote to the active deployment and can be rolled back by promoting an older deployment.
 
+Sites and deployments carry a separate `deployment_target` so website hosting strategy is not overloaded onto `route_profile`. Supported target values are:
+
+- `cloudflare_static`: Cloudflare-native website hosting, backed by Workers Static Assets or Pages. This is the intended default for ordinary overseas static sites.
+- `hybrid_edge`: Cloudflare-hosted entry HTML plus Worker/KV routing to R2 or domestic AList/OpenList resource libraries.
+- `origin_assisted`: current Go-origin serving with storage redirects.
+
+`route_profiles[].deployment_target` can define the default target for new sites and deployments; `create-site -target` and `deploy-site -target` can override it explicitly. When `deploy-site` omits `-target`, the CLI asks the control plane for the site/profile default. If that resolves to `cloudflare_static` and `-domains` is empty, the control plane suggests a one-level subdomain under `cloudflare.root_domain`, for example `demo.qwk.ccwu.cc`; the `cloudflare.site_domain_suffix` default remains reserved for Go-origin site domains such as `demo.sites.qwk.ccwu.cc`.
+
+For `cloudflare_static`, `deploy-site` uses the local Wrangler Workers Static Assets publisher and then records the deployment metadata in the Super CDN control plane. This path requires `-dir`, custom domains are passed with `-domains`, and R2 is not involved:
+
+```powershell
+go run .\cmd\supercdnctl -- deploy-site -site demo -dir .\dist -target cloudflare_static -domains demo-static-test.example.com -static-name supercdn-demo-static
+go run .\cmd\supercdnctl -- deploy-site -site demo -dir .\dist -profile overseas
+```
+
+By default, Super CDN uses `-static-cache-policy auto` for Cloudflare Static deploys. If the source already contains `_headers`, it is respected. Otherwise the CLI publishes from a temporary copy with a generated `_headers` file: HTML and service-worker files stay revalidating, while versioned or common build assets get long immutable browser caching. The source directory is not modified. Use `-static-cache-policy none` to disable this, or `force` to replace an existing `_headers` during publish.
+
+For SPAs, pass `-static-spa`. The CLI generates a temporary `wrangler.toml` with `assets.not_found_handling = "single-page-application"`, so deep links such as `/movie/123` return `index.html` directly from Cloudflare Static Assets. Use `-static-not-found-handling 404-page|single-page-application|none` when you need the explicit Cloudflare mode.
+
+The lower-level canary command is still available when you only want to publish to Cloudflare without recording a Super CDN deployment:
+
+```powershell
+go run .\cmd\supercdnctl -- publish-cloudflare-static -site demo -dir .\dist -domains demo-static-test.example.com -dry-run
+go run .\cmd\supercdnctl -- publish-cloudflare-static -site demo -dir .\dist -domains demo-static-test.example.com -dry-run=false
+```
+
+This command uses Workers Static Assets and reads Cloudflare credentials from `configs/private/cloudflare.env` or the process environment. It is intentionally separate from R2; use it for ordinary overseas static sites.
+
 Deployment responses include direct access URLs when the site has bound domains:
 
 - `production_url` / `production_urls` for the active production deployment.
 - `preview_url` for the immutable deployment preview route.
 - `site_domains` for the domains currently bound to the site.
+- `deployment_target` for the intended website hosting target.
 - `inspect` for non-blocking bundle warnings such as module scripts, dynamic chunks, CSS relative assets, fonts, wasm and service workers.
 - `delivery_summary` for how many files are planned as origin or redirect delivery.
 
 For hosted sites, the Go origin serves the root `index.html` directly. Other successful site file requests return `302 Found` to the freshest direct storage URL when one is available, so Cloudflare carries the cache/fetch traffic instead of forcing the Go origin to stream every asset. Range requests, 404 responses, and SPA fallbacks that resolve to root `index.html` stay on the origin. Generic `/o/...` asset redirects still follow the route profile `allow_redirect` policy.
+
+Export an edge manifest for a ready deployment when preparing the zero-origin edge path. This is a read-only sidecar export; it does not change the current production delivery path.
+
+```powershell
+go run .\cmd\supercdnctl -- export-edge-manifest -site demo -deployment dpl-abc -out .\edge-manifest.json
+go run .\cmd\supercdnctl -- publish-edge-manifest -site demo -deployment dpl-abc -kv-namespace supercdn-edge-manifest -dry-run
+```
 
 Run a local-only bundle inspection before uploading:
 
@@ -163,7 +213,7 @@ The purge planner expands `index.html` to both `/` and `/index.html`, expands ne
 Use `configs/config.full.example.json` as a template and fill environment variables for:
 
 - `CF_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, optional `CF_R2_API_TOKEN` when R2 control-plane permissions use a separate token
-- `ALIST_TOKEN`
+- `ALIST_TOKEN`, optional `ALIST_USERNAME` / `ALIST_PASSWORD` for automatic token refresh
 - `PINATA_JWT`
 - `CF_ZONE_ID`, `CF_API_TOKEN`
 - `SUPERCDN_ADMIN_TOKEN`
@@ -194,11 +244,13 @@ A resource library is the logical storage target used by route profiles. It bind
 
 Route profiles can reference normal storage targets such as `r2_global` or logical resource libraries such as `repo_china_telecom`.
 
+Reads are failover-capable when more than one ready source exists. Object delivery tries ready replicas in order, and resource-library reads can fall back to another binding when the binding encoded in an older locator is unavailable. This only protects content that actually exists on the alternate binding or has a ready backup replica; configure `route_profiles[].backups` and backfill old objects when a storage line must survive a full provider outage.
+
 Cloudflare libraries behave like resource libraries backed by per-account R2 stores. A route profile can point directly at a Cloudflare library such as `overseas_accel`, and uploads will land in the first storage-capable binding. Reads, public URLs, health checks and directory initialization work through the library binding path inside each account bucket.
 
 For the overseas acceleration line, each R2 account is treated as an independent acceleration node. Super CDN does not shard objects across R2 accounts by default; Cloudflare/R2 is expected to carry the performance load without striping. Extra accounts are for isolation, redundancy, migration, and future routing policy, not for performance sharding.
 
-The long-term website delivery direction is zero-origin serving: the Go service remains the deployment/control plane, while public delivery moves toward Cloudflare Pages for entry HTML plus Worker/KV edge manifests for path lookup and `302` storage redirects for heavy resources. The current Go-origin HTML plus Go-origin 302 model is an intermediate stage.
+The long-term website delivery direction is Cloudflare-native overseas hosting plus Super CDN routing policy. Workers Static Assets should be the default overseas website host when the site fits native limits, with Cloudflare Pages kept as a supported alternative. R2 should not be the default website deployment surface for overseas-only static sites; keep it as the overseas object/CDN line for large files, media, archives and reusable downloads. Worker/KV edge manifests should route non-entry resources to the best storage line, including domestic AList/OpenList libraries when China acceleration is preferred. The current Go-origin HTML plus Go-origin 302 model is an intermediate stage.
 
 Resource-library policy lives under `resource_libraries[].policy`. It describes the logical library as a whole: `max_bindings`, `total_capacity_bytes`, `available_bytes`, `reserve_bytes`, and `notes`. If `total_capacity_bytes` is omitted and all binding capacities are known, preflight derives a binding capacity sum. If `available_bytes` is unknown, preflight reports capacity metadata but does not enforce remaining capacity.
 
@@ -348,7 +400,7 @@ Prepare these values when enabling real backends:
 - Cloudflare cache purge, DNS and Worker routes: `CF_ZONE_ID`, `CF_API_TOKEN`, `cloudflare.site_dns_target`, `cloudflare.worker_script`
 - Cloudflare DNS automation: `cloudflare.root_domain`, `cloudflare.site_domain_suffix`, and an API token with Zone Read, DNS Edit and Workers Routes Write
 - Cloudflare R2 diagnostics: an API token with account-level R2 bucket read access, plus R2 bucket CORS/domain read access when those checks are needed
-- AList/OpenList mount point: token, internal `base_url`, public `public_base_url`, optional mount `root`, explicit `proxy_url`
+- AList/OpenList mount point: token, optional username/password for `/api/auth/login` refresh, internal `base_url`, public `public_base_url`, optional mount `root`, explicit `proxy_url`
 - Resource libraries: library name, mount point name, and exactly one path per binding
 - Pinata/IPFS: `PINATA_JWT`, gateway URL such as `https://gateway.pinata.cloud`, optional `proxy_url`
 - Domain routing: origin domain for Worker `ORIGIN_BASE_URL`, site domains to bind with `create-site -domains`
@@ -371,6 +423,8 @@ Runtime behavior:
 - `Range` requests bypass the edge cache and preserve range delivery.
 - Storage requests only forward safe headers such as `Accept`, `Accept-Language`, `Range`, validators and `User-Agent`.
 - If storage fetch fails and `EDGE_BYPASS_SECRET` is configured, the Worker asks the origin to stream the file directly.
+
+Zero-origin migration diagnostics are available as an explicit dry-run path. Bind a KV namespace as `EDGE_MANIFEST`, publish a deployment manifest with `publish-edge-manifest`, then set `EDGE_MANIFEST_DRY_RUN=true`. Requests with `?__supercdn_edge_manifest=dry-run` or `X-SuperCDN-Edge-Manifest-Dry-Run: true` return the Worker route decision as JSON without fetching origin or storage.
 
 For production fallback, set a shared secret in both places:
 

@@ -59,12 +59,13 @@ type Job struct {
 }
 
 type Site struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Mode         string    `json:"mode"`
-	RouteProfile string    `json:"route_profile"`
-	Domains      []string  `json:"domains,omitempty"`
-	URL          string    `json:"url,omitempty"`
-	URLs         []string  `json:"urls,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Mode             string    `json:"mode"`
+	RouteProfile     string    `json:"route_profile"`
+	DeploymentTarget string    `json:"deployment_target"`
+	Domains          []string  `json:"domains,omitempty"`
+	URL              string    `json:"url,omitempty"`
+	URLs             []string  `json:"urls,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }

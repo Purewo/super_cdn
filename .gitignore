@@ -21,6 +21,7 @@ bin/
 
 # Node/Worker generated files
 **/node_modules/
+.wrangler/
 worker/.wrangler/
 
 # Python cache

@@ -11,13 +11,17 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
 
 type AListStore struct {
 	name          string
 	baseURL       string
+	tokenMu       sync.Mutex
 	token         string
+	username      string
+	password      string
 	root          string
 	useProxyURL   bool
 	publicBaseURL string
@@ -28,6 +32,8 @@ type AListOptions struct {
 	Name          string
 	BaseURL       string
 	Token         string
+	Username      string
+	Password      string
 	Root          string
 	UseProxyURL   bool
 	PublicBaseURL string
@@ -45,6 +51,8 @@ func NewAListStore(opts AListOptions) (*AListStore, error) {
 		name:          opts.Name,
 		baseURL:       base,
 		token:         opts.Token,
+		username:      opts.Username,
+		password:      opts.Password,
 		root:          "/" + strings.Trim(strings.ReplaceAll(opts.Root, "\\", "/"), "/"),
 		useProxyURL:   opts.UseProxyURL,
 		publicBaseURL: public,
@@ -128,14 +136,15 @@ func (s *AListStore) Delete(ctx context.Context, key string) error {
 		"names": []string{path.Base(key)},
 	}
 	raw, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/fs/remove", bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", s.token)
-	req.Header.Set("Content-Type", "application/json")
 	var resp aListEnvelope[any]
-	if err := s.doJSON(req, &resp); err != nil {
+	if err := s.doAuthorizedJSON(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/fs/remove", bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, &resp); err != nil {
 		return err
 	}
 	if resp.Code != 200 {
@@ -245,14 +254,15 @@ func (s *AListStore) InitDirs(ctx context.Context, opts InitOptions) (*InitResul
 func (s *AListStore) getInfo(ctx context.Context, key string) (aListFileInfo, error) {
 	payload := map[string]any{"path": s.remotePath(key), "password": ""}
 	raw, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/fs/get", bytes.NewReader(raw))
-	if err != nil {
-		return aListFileInfo{}, err
-	}
-	req.Header.Set("Authorization", s.token)
-	req.Header.Set("Content-Type", "application/json")
 	var resp aListEnvelope[aListFileInfo]
-	if err := s.doJSON(req, &resp); err != nil {
+	if err := s.doAuthorizedJSON(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/fs/get", bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, &resp); err != nil {
 		return aListFileInfo{}, err
 	}
 	if resp.Code == 404 {
@@ -268,19 +278,31 @@ func (s *AListStore) putReader(ctx context.Context, key string, body io.Reader, 
 	if _, err := CleanObjectPath(key); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.baseURL+"/api/fs/put", body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", s.token)
-	req.Header.Set("File-Path", s.remotePath(key))
-	req.Header.Set("As-Task", "false")
-	req.Header.Set("Content-Type", firstNonEmpty(contentType, "application/octet-stream"))
-	if size > 0 {
-		req.ContentLength = size
-	}
+	var buildCount int
 	var resp aListEnvelope[any]
-	if err := s.doJSON(req, &resp); err != nil {
+	if err := s.doAuthorizedJSON(ctx, func() (*http.Request, error) {
+		if buildCount > 0 {
+			seeker, ok := body.(io.Seeker)
+			if !ok {
+				return nil, fmt.Errorf("alist upload cannot be retried because request body is not seekable")
+			}
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				return nil, err
+			}
+		}
+		buildCount++
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.baseURL+"/api/fs/put", body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("File-Path", s.remotePath(key))
+		req.Header.Set("As-Task", "false")
+		req.Header.Set("Content-Type", firstNonEmpty(contentType, "application/octet-stream"))
+		if size > 0 {
+			req.ContentLength = size
+		}
+		return req, nil
+	}, &resp); err != nil {
 		return err
 	}
 	if resp.Code != 200 {
@@ -298,14 +320,15 @@ func (s *AListStore) dirExists(ctx context.Context, remote string) (bool, error)
 		"refresh":  false,
 	}
 	raw, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/fs/list", bytes.NewReader(raw))
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Authorization", s.token)
-	req.Header.Set("Content-Type", "application/json")
 	var resp aListEnvelope[json.RawMessage]
-	if err := s.doJSON(req, &resp); err != nil {
+	if err := s.doAuthorizedJSON(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/fs/list", bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, &resp); err != nil {
 		return false, err
 	}
 	if resp.Code == 200 {
@@ -320,14 +343,15 @@ func (s *AListStore) dirExists(ctx context.Context, remote string) (bool, error)
 func (s *AListStore) mkdir(ctx context.Context, remote string) (string, error) {
 	payload := map[string]any{"path": remote}
 	raw, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/fs/mkdir", bytes.NewReader(raw))
-	if err != nil {
-		return "error", err
-	}
-	req.Header.Set("Authorization", s.token)
-	req.Header.Set("Content-Type", "application/json")
 	var resp aListEnvelope[any]
-	if err := s.doJSON(req, &resp); err != nil {
+	if err := s.doAuthorizedJSON(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/fs/mkdir", bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, &resp); err != nil {
 		return "error", err
 	}
 	if resp.Code == 200 {
@@ -409,6 +433,120 @@ func (s *AListStore) doJSON(req *http.Request, out any) error {
 		return nil
 	}
 	return json.Unmarshal(body, out)
+}
+
+func (s *AListStore) doAuthorizedJSON(ctx context.Context, build func() (*http.Request, error), out any) error {
+	token := s.currentToken()
+	if err := s.doAuthorizedJSONOnce(build, token, out); err != nil {
+		if !s.canRefreshToken() || !isAListAuthExpiredError(err) {
+			return err
+		}
+		if refreshErr := s.refreshToken(ctx, token); refreshErr != nil {
+			return fmt.Errorf("%w; alist token refresh failed: %v", err, refreshErr)
+		}
+		return s.doAuthorizedJSONOnce(build, s.currentToken(), out)
+	}
+	if !aListResponseAuthExpired(out) {
+		return nil
+	}
+	if !s.canRefreshToken() {
+		return nil
+	}
+	if err := s.refreshToken(ctx, token); err != nil {
+		return fmt.Errorf("alist token expired and refresh failed: %w", err)
+	}
+	return s.doAuthorizedJSONOnce(build, s.currentToken(), out)
+}
+
+func (s *AListStore) doAuthorizedJSONOnce(build func() (*http.Request, error), token string, out any) error {
+	req, err := build()
+	if err != nil {
+		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", token)
+	}
+	return s.doJSON(req, out)
+}
+
+func (s *AListStore) currentToken() string {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	return s.token
+}
+
+func (s *AListStore) canRefreshToken() bool {
+	return s.username != "" && s.password != ""
+}
+
+func (s *AListStore) refreshToken(ctx context.Context, expiredToken string) error {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	if s.token != "" && s.token != expiredToken {
+		return nil
+	}
+	payload := map[string]string{
+		"username": s.username,
+		"password": s.password,
+	}
+	raw, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/auth/login", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	var resp aListEnvelope[struct {
+		Token string `json:"token"`
+	}]
+	if err := s.doJSON(req, &resp); err != nil {
+		return err
+	}
+	if resp.Code != 200 {
+		return fmt.Errorf("login failed: code=%d message=%s", resp.Code, resp.Message)
+	}
+	if resp.Data.Token == "" {
+		return fmt.Errorf("login response did not include token")
+	}
+	s.token = resp.Data.Token
+	return nil
+}
+
+func aListResponseAuthExpired(out any) bool {
+	resp, ok := out.(interface {
+		aListStatus() (int, string)
+	})
+	if !ok {
+		return false
+	}
+	code, message := resp.aListStatus()
+	return isAListAuthExpired(code, message)
+}
+
+func (e *aListEnvelope[T]) aListStatus() (int, string) {
+	return e.Code, e.Message
+}
+
+func isAListAuthExpired(code int, message string) bool {
+	message = strings.ToLower(message)
+	if code == http.StatusUnauthorized {
+		return true
+	}
+	return strings.Contains(message, "token is expired") ||
+		strings.Contains(message, "token expired") ||
+		strings.Contains(message, "invalid token") ||
+		strings.Contains(message, "unauthorized")
+}
+
+func isAListAuthExpiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "status=401") ||
+		strings.Contains(message, "token is expired") ||
+		strings.Contains(message, "token expired") ||
+		strings.Contains(message, "invalid token") ||
+		strings.Contains(message, "unauthorized")
 }
 
 func (s *AListStore) remotePath(key string) string {

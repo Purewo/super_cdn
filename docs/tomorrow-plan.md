@@ -25,9 +25,27 @@ reverse proxy: nginx on 80/443
 origin bind: 127.0.0.1:8080
 TLS: Let's Encrypt via certbot, certificate expires 2026-07-26
 admin token: stored locally in configs/private/prod_admin_token.txt and remotely in /opt/supercdn/config.json
+previous binary update: 2026-04-29 Asia/Shanghai, backed up under /opt/supercdn/backups/20260428T223529Z
+latest binary update: 2026-04-29 Asia/Shanghai, backed up under /opt/supercdn/backups/20260428T225418Z
+last config merge: 2026-04-29 Asia/Shanghai, Cloudflare account/library merge backed up at /opt/supercdn/backups/config.cloudflare-merge-20260428T224341Z.json
+previous deployed binary hashes: supercdn 4304ce8c8ed9c948aa69d04de9720ad47e335609ef9cb5b822e02bed5f12c3f1, supercdnctl 6096b5b308e875f223e7dff0b3236c34af17bbf99c0a3589c09373f3bc9fa6c6
+current deployed binary hashes: supercdn a5e4753c33f6ee3fbf5085ba7ca9e038901f6a255313af838755f18a921b504b, supercdnctl 0f6d4c0514d2296feea98f7ca68ac5d7d7c2f14a213c535cdc39085d2c0431e3
+SPA fallback binary update: 2026-04-29 Asia/Shanghai, backed up under /opt/supercdn/backups/20260428T230417Z
+SPA fallback deployed binary hashes: supercdn 4fc4e63c1f519a4c0ca10c82d944ec9ca1cec278d47379464f320bdf15d18180, supercdnctl 9479492af07bcc0757306ccdc38d45dec814a517b942bcec3a3810e323a23c86
 ```
 
 Latest live validation:
+
+```text
+server health: https://qwk.ccwu.cc/healthz returns 200
+cloudflare_static canary: path2agi-static-canary deployment dpl-di55pwokt51k returns https://path2agi-static-test.qwk.ccwu.cc/
+cloudflare_static cache headers: `/` returns `Cache-Control: public, max-age=0, must-revalidate`; `/path2agi-data.js?v=escape-fix-20260428` returns `Cache-Control: public, max-age=31536000, immutable`
+cyberstream cloudflare_static milestone: deployment dpl-di55wdod7eqh returns https://cyberstream-static-test.qwk.ccwu.cc/ with direct JS/CSS, immutable asset cache, SPA fallback for /movie/123, and browser screenshots in data/cyberstream-static-canary-home.png plus data/cyberstream-static-canary-spa.png
+overseas default cloudflare_static milestone: deployment dpl-di5fkfplv0yg returns https://cyberstream-default-root-canary.qwk.ccwu.cc/ from a `deploy-site -profile overseas` command without `-target` or `-domains`; probe-site passed for HTML, JS/CSS, immutable asset cache, and SPA fallback /movie/123.
+legacy R2 site probe: cyberstream still passes HTML, JS/CSS redirect MIME/CORS, and /movie/123 SPA fallback checks
+```
+
+Latest legacy R2 site validation:
 
 ```text
 site_id: cyberstream
@@ -52,6 +70,7 @@ wildcard DNS: *.qwk.ccwu.cc and *.sites.qwk.ccwu.cc -> 166.0.198.218, DNS-only
 wildcard TLS: qwk.ccwu.cc, *.qwk.ccwu.cc and *.sites.qwk.ccwu.cc
 status: API token is configured locally and on the server; DNS create/delete was verified
 code status: create-site auto allocates the default site domain, bind-domain appends/replaces domains, domain-status checks local binding and Cloudflare DNS records, deployment responses include production_url/production_urls/preview_url
+multi-account status: production config now loads cf_business_main and cf_business_secondary; `cloudflare-status -all` verifies both tokens/zones and R2 buckets.
 ```
 
 The user-provided `5c...` identifier is stored privately as `CF_ACCOUNT_ID`, but it is not the zone id for `qwk.ccwu.cc`.
@@ -65,6 +84,12 @@ bucket: supercdn-overseas-accel
 public base URL: https://overseas-accel.r2.qwk.ccwu.cc
 current bucket CORS: GET/HEAD, origins *, allowed headers *, exposed ETag/Content-Length/Content-Type/Cache-Control, max-age 86400
 reason: module scripts redirected from site domains to the R2 custom domain require cross-origin JavaScript/CSS reads
+
+secondary account label: cf_business_secondary
+secondary root domain: cloudflare.pics
+secondary bucket: aawadmortetl
+secondary public base URL: https://image.cloudflare.pics
+secondary status: token, zone, R2 bucket, CORS and custom domain all verified by production `cloudflare-status -all`
 ```
 
 Current test site:
@@ -104,6 +129,24 @@ URL: https://path2agi.sites.qwk.ccwu.cc/?v=escape-fix-20260428
 status: path2agi-data.js escaping fixed locally, deployed, and verified through 302 -> R2
 ```
 
+Cloudflare-native static hosting canary:
+
+```text
+source: G:\AI\AI_private\Codex_projects\Super_CDN\test_file\path2agi
+worker: supercdn-path2agi-static-test
+custom domain: https://path2agi-static-test.qwk.ccwu.cc/
+latest worker version: cc489b82-a0d0-4975-82ec-7973de3573ae
+cache policy worker version: e35d2118-222a-4765-9506-15bc3e0e5a9f
+local control-plane deployment: dpl-di5544cdc5uo
+production control-plane deployment: dpl-di55dq96wt0z
+cache policy production deployment: dpl-di55pwokt51k
+deployment target: Workers Static Assets
+status: deployed and verified; index.html and path2agi-data.js are served directly by Cloudflare with no R2 redirect and no Go origin dependency
+comparison: existing https://path2agi.sites.qwk.ccwu.cc/ still works through Go origin HTML plus 302 -> R2 for path2agi-data.js
+cache note: Workers Static Assets defaulted to `Cache-Control: public, max-age=0, must-revalidate`; SuperCDN `-static-cache-policy auto` now injects a temporary `_headers` file for Cloudflare Static deploys while keeping the source directory unchanged. Verified live: HTML stays revalidating and query-versioned `path2agi-data.js` is immutable for one year.
+automation: `supercdnctl deploy-site -target cloudflare_static` now publishes through local Wrangler Workers Static Assets and records Super CDN deployment metadata; `publish-cloudflare-static` remains the lower-level canary/diagnostic publisher.
+```
+
 ```text
 site_id: cyberstream
 active deployment: dpl-di49qyrhf5y0
@@ -111,6 +154,24 @@ URL: https://cyberstream.sites.qwk.ccwu.cc/?v=dpl-di49qyrhf5y0
 local source: test_file/cyberstream
 local build output: test_file/cyberstream/dist
 status: complex frontend smoke test passed
+```
+
+CyberStream Cloudflare-native milestone:
+
+```text
+site_id: cyberstream-static-canary
+deployment: dpl-di55wdod7eqh
+worker: supercdn-cyberstream-static-test
+worker version: b7fe743f-0033-4de7-aa09-915cb4a414dc
+URL: https://cyberstream-static-test.qwk.ccwu.cc/
+source: G:\AI\AI_private\Codex_projects\Super_CDN\test_file\cyberstream\dist
+deployment target: Workers Static Assets
+file_count: 4
+total_size: 613166
+cache_policy: auto
+headers_generated: true
+not_found_handling: single-page-application
+status: milestone passed. HTML, JS, CSS and /movie/123 are served by Cloudflare Static Assets with no R2 redirect and no Go origin dependency. Playwright screenshots confirm nonblank rendered UI for both root and SPA deep link.
 ```
 
 CyberStream notes:
@@ -255,6 +316,7 @@ Current redirect policy:
 - Site-file `302` responses use `Cache-Control: no-store` so browser caches do not pin old deployment asset redirects.
 - Range requests and 404 responses stay on the Go origin.
 - Direct storage URLs are refreshed through `Stat` first, so AList/OpenList signed links are not served stale.
+- Resource-library reads fall back to another binding when the binding encoded in an old locator is unavailable. This is a read-path guardrail; real outage tolerance still requires `route_profiles[].backups` or multiple resource-library bindings with backfilled objects.
 
 Overclock mode was added as `limits.overclock_mode`. Keep it off by default. When enabled, it skips configured upload-size, file-count, resource-library capacity/file-size/batch/daily-upload, resource-health, asset-bucket capacity/file-size/type and transfer-slot limits, and API responses include a risk warning. This can cause unpredictable or catastrophic results if the remote drive policy tightens or the server accepts too much work.
 
@@ -266,16 +328,23 @@ Do not reintroduce runtime HTML rewriting unless there is a very narrow, explici
 
 ## Architecture Direction
 
-The next major direction is a qualitative shift toward zero-origin delivery:
+The product goal is website hosting plus CDN acceleration, with Cloudflare-native hosting used as the overseas static-site layer rather than rebuilding that whole layer ourselves.
 
-- Keep the Go service as the deployment/control plane, health checker, manifest builder and synchronization tool.
-- Move public website serving toward Cloudflare edge surfaces: Pages for immutable entry HTML where appropriate, Worker for request routing, and KV or another edge-readable manifest store for `virtual path -> storage locator` lookups.
-- Keep large file delivery as `302` redirects to storage backends. Worker should not proxy heavy object bodies by default.
-- Treat the current Go-origin HTML plus Go-origin 302 flow as an intermediate, origin-assisted CDN stage. New features should avoid deepening runtime dependency on the Go origin when an edge-manifest path is plausible.
+Target shape:
+
+- Go service: deployment/control plane, site inspection, health checks, manifest builder, Cloudflare automation, storage synchronization and rollback.
+- Overseas website hosting: Workers Static Assets first, with Cloudflare Pages as a supported alternative for entry HTML and ordinary static sites when the site fits native Cloudflare limits. For overseas-only acceleration, do not involve R2 when Cloudflare-native static hosting fits the site.
+- Overseas object acceleration: Cloudflare R2 for large objects such as video, images, archives and other reusable downloads, plus account-isolated overseas acceleration nodes.
+- Domestic acceleration: AList/OpenList-backed resource libraries for China-facing static resources.
+- Edge routing: Worker reads KV or another edge-readable manifest store for `virtual path -> storage locator` lookups, then keeps the request on Cloudflare-native hosting, redirects to R2, or redirects/proxies to domestic AList/OpenList based on route policy.
+- Future global acceleration: routing policy should choose AList or R2 by site, path, asset class, health, region and availability, so one deployment can be optimized for domestic and overseas users.
+
+The current Go-origin HTML plus Go-origin 302 flow is only an intermediate, origin-assisted CDN stage. New features should avoid deepening runtime dependency on the Go origin when a Cloudflare-native or edge-manifest path is plausible.
 
 Current overseas R2 decision:
 
 - Each Cloudflare/R2 account remains an independent acceleration node.
+- R2 is not the default website deployment surface. Use it for large objects, media, archives, reusable downloads and object-level acceleration, not ordinary static-site hosting when Workers Static Assets or Pages can host the site directly.
 - Do not introduce object sharding across R2 accounts for now. Cloudflare/R2 performance is strong enough that extra sharding complexity is not worth the operational cost.
 - Use multiple R2 accounts for account isolation, redundancy, migration and future policy/routing choices, not for performance striping.
 
@@ -283,6 +352,17 @@ Current overseas R2 decision:
 
 - Codify the live R2 static-site CORS lesson: change the default `sync-cloudflare-r2` / `provision-cloudflare-r2` CORS origin from the R2 `public_base_url` origin to `*`, update tests/help/docs, run `go test ./...`, rebuild, and redeploy the server/CLI. Done locally.
 - Add a live static-site probe. Done locally as `supercdnctl probe-site`: it fetches the active deployment HTML, follows redirected JS/CSS with an `Origin` header, checks MIME/CORS, and can verify a configured SPA fallback path. Remaining optional enhancement: headless browser white-screen detection.
+- Add the first zero-origin sidecar primitive. Done locally as `GET /api/v1/sites/{id}/deployments/{deployment}/edge-manifest` and `supercdnctl export-edge-manifest`; it exports exact file routes, directory index aliases, SPA fallback, 404 behavior, storage redirect locations and delivery-rule overrides without changing production traffic.
+- Add Worker-side edge manifest dry-run consumption. Done locally: when `EDGE_MANIFEST_DRY_RUN=true` and `EDGE_MANIFEST` KV is bound, `?__supercdn_edge_manifest=dry-run` returns the route decision JSON from the edge manifest without fetching origin or storage.
+- Add control-plane KV publication. Done locally as `supercdnctl publish-edge-manifest`; it plans or writes deployment and active manifest keys to Cloudflare Workers KV, defaulting to dry-run and avoiding active-key writes for non-active deployments.
+- Add a deployment target model before pushing deeper into custom R2/KV routing. Done locally: sites, deployments, deployment manifests and edge manifests now carry `deployment_target`; route profiles can set the default. First-class targets are `cloudflare_static` for Workers Static Assets/Pages, `hybrid_edge` for Cloudflare entry HTML plus Worker/KV path routing, and `origin_assisted` for the current Go-origin fallback path.
+- Add the first formal Cloudflare Static deployment flow. Done locally and live-tested with path2agi: `deploy-site -target cloudflare_static` publishes Workers Static Assets, captures Worker/domain/version metadata, creates an active Super CDN deployment, and returns the HTTPS production URL. Remaining: production cache-header policy before using it as the default overseas website path.
+- Add Cloudflare Static cache-header automation. Done locally and live-tested with path2agi: `deploy-site -target cloudflare_static` and `publish-cloudflare-static` accept `-static-cache-policy auto|force|none`; auto respects an existing `_headers` file or injects a generated one from a temporary assets copy. Production deployment `dpl-di55pwokt51k` records `cache_policy:auto` and `headers_generated:true`.
+- Add Cloudflare Static SPA fallback automation. Done locally and live-tested with CyberStream: `-static-spa` generates a temporary Wrangler config with `assets.not_found_handling = "single-page-application"`; production deployment `dpl-di55wdod7eqh` records the setting and `/movie/123` returns HTML directly from Cloudflare Static Assets.
+- Run a real Cloudflare-native static hosting canary with CyberStream, then compare it with the current R2/KV canary on deployment complexity, SPA fallback, custom domain handling, cache behavior and rollback. Done as milestone canary `cyberstream-static-canary`; remaining follow-up is rollback ergonomics and possibly promoting the pattern as the default overseas site path.
+- Promote Cloudflare Static to the ordinary overseas site default path. Done locally: `deploy-site` now resolves the site/profile deployment target through `GET /api/v1/sites/{id}/deployment-target`; if `overseas.deployment_target=cloudflare_static` and no `-domains` are passed, the CLI uses existing site domains or a one-level `cloudflare.root_domain` default domain for Wrangler. Important live lesson: nested `*.sites.qwk.ccwu.cc` is fine for Go-origin DNS defaults, but Cloudflare Static custom domains should use one-level `*.qwk.ccwu.cc` hosts to avoid TLS handshake failure.
+- Teach the edge manifest to express route intent, not only route mechanics: `entry_html`, `overseas_static`, `overseas_r2`, `domestic_alist`, `fallback_origin`, plus cache/CORS expectations.
+- Keep `qwk.ccwu.cc` / ai-learning-map as a legacy domestic-chain compatibility sample. Its normal script path currently works through the AList/OpenList chain, but the final drive stream is not a clean CORS-capable module/fetch target, so probes must distinguish classic scripts from resources that actually require CORS.
 - Add a preflight warning when a built `index.html` references root-absolute files that are not present in the artifact, because SPA fallback can turn missing CSS/JS into HTML and produce browser MIME errors.
 - Add a deployment-level file policy field in the manifest, for example `delivery: origin | redirect`.
 - Add site deployment cleanup that can delete remote deployment files, artifact, manifest, and local object rows together.

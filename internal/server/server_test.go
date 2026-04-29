@@ -97,6 +97,155 @@ func TestDeploySiteAndServeIndexAnd404(t *testing.T) {
 	}
 }
 
+func TestSiteDeploymentTargetComesFromRouteProfileAndManifest(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.RouteProfiles[0].DeploymentTarget = model.SiteDeploymentTargetCloudflareStatic
+	raw, _ := json.Marshal(map[string]any{
+		"id":            "demo",
+		"route_profile": "overseas",
+		"mode":          "spa",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"deployment_target":"cloudflare_static"`) {
+		t.Fatalf("create site response missing deployment target: %s", rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{"index.html": "home"}, map[string]string{"environment": "production", "promote": "true"})
+	depReq := httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID, nil)
+	depReq.Header.Set("Authorization", "Bearer test-token")
+	depRec := httptest.NewRecorder()
+	app.ServeHTTP(depRec, depReq)
+	if depRec.Code != http.StatusOK {
+		t.Fatalf("deployment status = %d body=%s", depRec.Code, depRec.Body.String())
+	}
+	if !strings.Contains(depRec.Body.String(), `"deployment_target":"cloudflare_static"`) {
+		t.Fatalf("deployment response missing deployment target: %s", depRec.Body.String())
+	}
+
+	manifestReq := httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest", nil)
+	manifestReq.Header.Set("Authorization", "Bearer test-token")
+	manifestRec := httptest.NewRecorder()
+	app.ServeHTTP(manifestRec, manifestReq)
+	if manifestRec.Code != http.StatusOK {
+		t.Fatalf("edge manifest status = %d body=%s", manifestRec.Code, manifestRec.Body.String())
+	}
+	if !strings.Contains(manifestRec.Body.String(), `"deployment_target":"cloudflare_static"`) {
+		t.Fatalf("edge manifest missing deployment target: %s", manifestRec.Body.String())
+	}
+}
+
+func TestResolveSiteDeploymentTargetUsesRouteProfileAndSuggestsDomain(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.RouteProfiles[0].DeploymentTarget = model.SiteDeploymentTargetCloudflareStatic
+	app.cfg.Cloudflare.RootDomain = "example.com"
+	app.cfg.Cloudflare.SiteDomainSuffix = "sites.example.com"
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployment-target?route_profile=overseas", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve target status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{
+		`"site_exists":false`,
+		`"route_profile":"overseas"`,
+		`"deployment_target":"cloudflare_static"`,
+		`"source":"route_profile"`,
+		`"default_domain":"demo.example.com"`,
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("resolve response missing %s: %s", want, rec.Body.String())
+		}
+	}
+}
+
+func TestResolveSiteDeploymentTargetUsesExistingSiteDomains(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.RouteProfiles[0].DeploymentTarget = model.SiteDeploymentTargetCloudflareStatic
+	_, err := app.db.CreateSite(context.Background(), "demo", "Demo", "spa", "overseas", model.SiteDeploymentTargetCloudflareStatic, []string{"demo.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployment-target", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve target status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{
+		`"site_exists":true`,
+		`"deployment_target":"cloudflare_static"`,
+		`"source":"site"`,
+		`"domains":["demo.example.com"]`,
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("resolve response missing %s: %s", want, rec.Body.String())
+		}
+	}
+}
+
+func TestRecordCloudflareStaticDeployment(t *testing.T) {
+	app := newTestServer(t)
+	raw, _ := json.Marshal(map[string]any{
+		"environment":        "production",
+		"route_profile":      "overseas",
+		"deployment_target":  "cloudflare_static",
+		"mode":               "standard",
+		"worker_name":        "supercdn-demo-static",
+		"version_id":         "ver-123",
+		"domains":            []string{"demo-static.example.com"},
+		"compatibility_date": "2026-04-29",
+		"cache_policy":       "auto",
+		"headers_generated":  true,
+		"not_found_handling": "single-page-application",
+		"file_count":         2,
+		"total_size":         1200,
+		"published_at_utc":   "2026-04-29T00:00:00Z",
+		"promote":            true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites/demo/cloudflare-static/deployments", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("record static deployment status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"deployment_target":"cloudflare_static"`,
+		`"status":"active"`,
+		`"production_url":"https://demo-static.example.com/"`,
+		`"worker_name":"supercdn-demo-static"`,
+		`"version_id":"ver-123"`,
+		`"cache_policy":"auto"`,
+		`"headers_generated":true`,
+		`"not_found_handling":"single-page-application"`,
+		`"delivery_summary":{"cloudflare_static":2}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("response missing %s: %s", want, body)
+		}
+	}
+	site, err := app.db.GetSite(context.Background(), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(site.Domains, "demo-static.example.com") {
+		t.Fatalf("site domains = %+v", site.Domains)
+	}
+}
+
 func TestCreateSiteAllocatesDefaultDomainAndPreventsSteal(t *testing.T) {
 	app := newTestServer(t)
 	app.cfg.Server.PublicBaseURL = "https://origin.example.com"
@@ -652,6 +801,203 @@ func TestSiteNonIndexFilesRedirectToStorage(t *testing.T) {
 	app.ServeHTTP(missingOut, missing)
 	if missingOut.Code != http.StatusNotFound || missingOut.Header().Get("Location") != "" || missingOut.Body.String() != "missing" {
 		t.Fatalf("missing status=%d location=%q body=%q", missingOut.Code, missingOut.Header().Get("Location"), missingOut.Body.String())
+	}
+}
+
+func TestExportEdgeManifestBuildsRoutesAndStorageRedirects(t *testing.T) {
+	app := newTestServer(t)
+	create := map[string]any{
+		"id":            "demo",
+		"route_profile": "overseas",
+		"mode":          "spa",
+		"domains":       []string{"demo.local"},
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":         "home",
+		"404.html":           "missing",
+		"assets/app.js":      "console.log('ok')",
+		"docs/index.html":    "docs",
+		"supercdn.site.json": `{"headers":[{"path":"/assets/*","headers":{"X-Test-Asset":"yes"}}]}`,
+	}, map[string]string{"environment": "production", "promote": "true"})
+	ctx := context.Background()
+	for filePath, locator := range map[string]string{
+		"404.html":        "http://storage.example/404.html?sign=fresh",
+		"assets/app.js":   "http://storage.example/assets/app.js?sign=fresh",
+		"docs/index.html": "http://storage.example/docs/index.html?sign=fresh",
+	} {
+		obj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, filePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.db.UpsertReplica(ctx, obj.ID, obj.PrimaryTarget, model.ReplicaReady, locator, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edge manifest status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var manifest edgeManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Version != 1 || manifest.Kind != "supercdn-edge-manifest" || manifest.Mode != "spa" || manifest.DeploymentID != deploymentID {
+		t.Fatalf("unexpected manifest metadata: %+v", manifest)
+	}
+	root := manifest.Routes["/"]
+	if root.Type != "origin" || root.File != "index.html" || root.Status != http.StatusOK || root.Location != "" {
+		t.Fatalf("unexpected root route: %+v", root)
+	}
+	if got := manifest.Routes["/index.html"]; got.File != "index.html" || got.Type != "origin" {
+		t.Fatalf("unexpected index route: %+v", got)
+	}
+	asset := manifest.Routes["/assets/app.js"]
+	if asset.Type != "redirect" || asset.Delivery != "redirect" || asset.Status != http.StatusFound || asset.Location != "http://storage.example/assets/app.js?sign=fresh" {
+		t.Fatalf("unexpected asset route: %+v", asset)
+	}
+	if asset.CacheControl != "no-store" || asset.Headers["X-Test-Asset"] != "yes" {
+		t.Fatalf("unexpected asset response metadata: %+v", asset)
+	}
+	for _, routePath := range []string{"/docs", "/docs/", "/docs/index.html"} {
+		route := manifest.Routes[routePath]
+		if route.File != "docs/index.html" || route.Type != "redirect" || route.Location != "http://storage.example/docs/index.html?sign=fresh" {
+			t.Fatalf("unexpected docs route %s: %+v", routePath, route)
+		}
+	}
+	if manifest.Fallback == nil || manifest.Fallback.File != "index.html" || manifest.Fallback.Type != "origin" || manifest.Fallback.Status != http.StatusOK {
+		t.Fatalf("unexpected fallback: %+v", manifest.Fallback)
+	}
+	if manifest.NotFound == nil || manifest.NotFound.File != "404.html" || manifest.NotFound.Type != "origin" || manifest.NotFound.Status != http.StatusNotFound {
+		t.Fatalf("unexpected not_found: %+v", manifest.NotFound)
+	}
+	if len(manifest.Warnings) != 0 {
+		t.Fatalf("unexpected manifest warnings: %+v", manifest.Warnings)
+	}
+}
+
+func TestExportEdgeManifestHonorsOriginDeliveryRules(t *testing.T) {
+	app := newTestServer(t)
+	create := map[string]any{
+		"id":            "demo",
+		"route_profile": "overseas",
+		"mode":          "standard",
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":         "home",
+		"assets/app.js":      "console.log('ok')",
+		"supercdn.site.json": `{"delivery":[{"path":"/assets/*","mode":"origin"}]}`,
+	}, map[string]string{"environment": "production", "promote": "true"})
+	assetObj, err := app.db.SiteDeploymentFileObject(context.Background(), deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(context.Background(), assetObj.ID, assetObj.PrimaryTarget, model.ReplicaReady, "http://storage.example/assets/app.js?sign=fresh", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edge manifest status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var manifest edgeManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	asset := manifest.Routes["/assets/app.js"]
+	if asset.Type != "origin" || asset.Delivery != "origin" || asset.Status != http.StatusOK || asset.Location != "" {
+		t.Fatalf("unexpected asset route: %+v", asset)
+	}
+	if len(manifest.Warnings) != 0 {
+		t.Fatalf("unexpected manifest warnings: %+v", manifest.Warnings)
+	}
+}
+
+func TestPublishEdgeManifestDryRunPlansKVKeys(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.Cloudflare.RootDomain = "example.com"
+	app.cfg.Cloudflare.SiteDomainSuffix = "sites.example.com"
+
+	create := map[string]any{
+		"id":                  "demo",
+		"route_profile":       "overseas",
+		"mode":                "standard",
+		"domains":             []string{"demo.sites.example.com"},
+		"skip_default_domain": true,
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true"})
+
+	raw, _ = json.Marshal(map[string]any{"dry_run": true})
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest/publish", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish manifest status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp publishEdgeManifestResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "planned" || !resp.DryRun || resp.CloudflareAccount != "default" || resp.ManifestSize == 0 || resp.ManifestSHA256 == "" {
+		t.Fatalf("unexpected publish response: %+v", resp)
+	}
+	for _, want := range []string{
+		"sites/demo.sites.example.com/deployments/" + deploymentID + "/edge-manifest",
+		"sites/demo.sites.example.com/active/edge-manifest",
+	} {
+		found := false
+		for _, write := range resp.Writes {
+			if write.Key == want && write.Action == "planned" && write.DryRun {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing planned write %q in %+v", want, resp.Writes)
+		}
+	}
+	if len(resp.Warnings) == 0 {
+		t.Fatalf("expected namespace warning: %+v", resp)
 	}
 }
 

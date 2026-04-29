@@ -40,6 +40,8 @@
       "alist": {
         "base_url": "http://localhost:5244",
         "token": "${ALIST_TOKEN}",
+        "username": "${ALIST_USERNAME}",
+        "password": "${ALIST_PASSWORD}",
         "root": "/",
         "use_proxy_url": true,
         "public_base_url": "https://alist.example.com",
@@ -52,6 +54,8 @@
       "alist": {
         "base_url": "http://gameuniverse.top:82",
         "token": "${OPENLIST_TOKEN}",
+        "username": "${OPENLIST_USERNAME}",
+        "password": "${OPENLIST_PASSWORD}",
         "root": "/",
         "use_proxy_url": true,
         "public_base_url": "http://gameuniverse.top:82",
@@ -157,35 +161,40 @@
       "primary": "overseas_accel",
       "backups": ["ipfs_pinata", "repo_overseas"],
       "default_cache_control": "public, max-age=3600, s-maxage=86400",
-      "allow_redirect": false
+      "allow_redirect": false,
+      "deployment_target": "cloudflare_static"
     },
     {
       "name": "china_all",
       "primary": "repo_china_all",
       "backups": ["overseas_accel", "ipfs_pinata"],
       "default_cache_control": "public, max-age=600, s-maxage=3600",
-      "allow_redirect": false
+      "allow_redirect": false,
+      "deployment_target": "hybrid_edge"
     },
     {
       "name": "china_telecom",
       "primary": "repo_china_telecom",
       "backups": ["overseas_accel", "ipfs_pinata"],
       "default_cache_control": "public, max-age=600, s-maxage=3600",
-      "allow_redirect": false
+      "allow_redirect": false,
+      "deployment_target": "hybrid_edge"
     },
     {
       "name": "china_mobile",
       "primary": "repo_china_mobile",
       "backups": ["overseas_accel", "ipfs_pinata"],
       "default_cache_control": "public, max-age=600, s-maxage=3600",
-      "allow_redirect": false
+      "allow_redirect": false,
+      "deployment_target": "hybrid_edge"
     },
     {
       "name": "china_unicom",
       "primary": "repo_china_unicom",
       "backups": ["overseas_accel", "ipfs_pinata"],
       "default_cache_control": "public, max-age=600, s-maxage=3600",
-      "allow_redirect": false
+      "allow_redirect": false,
+      "deployment_target": "hybrid_edge"
     }
   ],
   "cloudflare": {

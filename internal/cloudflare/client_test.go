@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -655,6 +656,50 @@ func TestSyncWorkerRoutesCreatesUpdatesAndReportsConflicts(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Action != "update" || results[1].Action != "create" || !updated || !created {
 		t.Fatalf("unexpected sync results updated=%v created=%v results=%+v", updated, created, results)
+	}
+}
+
+func TestKVNamespaceLookupAndPutValue(t *testing.T) {
+	var gotBody, gotContentType string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/accounts/acct-1/storage/kv/namespaces", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected namespace method %s", r.Method)
+		}
+		writeCF(t, w, []KVNamespace{{ID: "ns-1", Title: "supercdn-edge-manifest"}})
+	})
+	mux.HandleFunc("/accounts/acct-1/storage/kv/namespaces/ns-1/values/sites%2Fdemo.example.com%2Factive%2Fedge-manifest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Fatalf("unexpected put method %s", r.Method)
+		}
+		gotContentType = r.Header.Get("Content-Type")
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotBody = string(raw)
+		writeCF(t, w, map[string]any{"key": "ok"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := New(config.CloudflareConfig{AccountID: "acct-1", APIToken: "token"}, server.Client())
+	client.baseURL = server.URL
+	namespace, err := client.FindKVNamespace(context.Background(), "supercdn-edge-manifest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if namespace.ID != "ns-1" {
+		t.Fatalf("namespace = %+v", namespace)
+	}
+	if err := client.PutKVValue(context.Background(), namespace.ID, "sites/demo.example.com/active/edge-manifest", []byte(`{"ok":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if gotBody != `{"ok":true}` {
+		t.Fatalf("body = %q", gotBody)
+	}
+	if !strings.Contains(gotContentType, "application/json") {
+		t.Fatalf("content-type = %q", gotContentType)
 	}
 }
 

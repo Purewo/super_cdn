@@ -136,6 +136,11 @@ type WorkerRouteSyncResult struct {
 	Error          string       `json:"error,omitempty"`
 }
 
+type KVNamespace struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
 type R2Status struct {
 	Configured  bool                `json:"configured"`
 	OK          bool                `json:"ok"`
@@ -414,6 +419,10 @@ func New(cfg config.CloudflareConfig, httpClient *http.Client) *Client {
 
 func (c *Client) Configured() bool {
 	return c != nil && c.zoneID != "" && c.apiToken != ""
+}
+
+func (c *Client) AccountConfigured() bool {
+	return c != nil && c.accountID != "" && c.apiToken != ""
 }
 
 func (c *Client) ZoneID() string {
@@ -724,6 +733,50 @@ func (c *Client) SyncWorkerRoutes(ctx context.Context, patterns []string, script
 		out = append(out, result)
 	}
 	return out, nil
+}
+
+func (c *Client) ListKVNamespaces(ctx context.Context) ([]KVNamespace, error) {
+	if c.accountID == "" {
+		return nil, fmt.Errorf("cloudflare account_id is not configured")
+	}
+	var namespaces []KVNamespace
+	if err := c.get(ctx, "/accounts/"+url.PathEscape(c.accountID)+"/storage/kv/namespaces", url.Values{"per_page": {"100"}}, &namespaces); err != nil {
+		return nil, err
+	}
+	return namespaces, nil
+}
+
+func (c *Client) FindKVNamespace(ctx context.Context, title string) (KVNamespace, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return KVNamespace{}, fmt.Errorf("cloudflare kv namespace title is required")
+	}
+	namespaces, err := c.ListKVNamespaces(ctx)
+	if err != nil {
+		return KVNamespace{}, err
+	}
+	for _, namespace := range namespaces {
+		if namespace.Title == title {
+			return namespace, nil
+		}
+	}
+	return KVNamespace{}, fmt.Errorf("cloudflare kv namespace %q not found", title)
+}
+
+func (c *Client) PutKVValue(ctx context.Context, namespaceID, key string, value []byte) error {
+	if c.accountID == "" {
+		return fmt.Errorf("cloudflare account_id is not configured")
+	}
+	namespaceID = strings.TrimSpace(namespaceID)
+	key = strings.TrimSpace(strings.ReplaceAll(key, "\\", "/"))
+	if namespaceID == "" {
+		return fmt.Errorf("cloudflare kv namespace id is required")
+	}
+	if key == "" {
+		return fmt.Errorf("cloudflare kv key is required")
+	}
+	headers := http.Header{"Content-Type": []string{"application/json; charset=utf-8"}}
+	return c.doWithHeaders(ctx, http.MethodPut, "/accounts/"+url.PathEscape(c.accountID)+"/storage/kv/namespaces/"+url.PathEscape(namespaceID)+"/values/"+url.PathEscape(key), nil, value, headers, nil)
 }
 
 func (c *Client) ListR2Buckets(ctx context.Context) ([]R2Bucket, error) {
@@ -1856,7 +1909,7 @@ func (c *Client) doWithHeaders(ctx context.Context, method, pathValue string, q 
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiToken)
-	if body != nil {
+	if body != nil && headers.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	for key, values := range headers {

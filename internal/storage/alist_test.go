@@ -181,3 +181,74 @@ func TestAListStatPrefersSignedProxyURLWhenConfigured(t *testing.T) {
 		t.Fatalf("locator = %q, want %q", stat.Locator, want)
 	}
 }
+
+func TestAListRefreshesExpiredTokenAndRetriesStat(t *testing.T) {
+	var getCalls int
+	var loginCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/login":
+			loginCalls++
+			var req struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req.Username != "admin" || req.Password != "password" {
+				t.Fatalf("unexpected login payload")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code":    200,
+				"message": "success",
+				"data": map[string]any{
+					"token": "fresh-token",
+				},
+			})
+		case "/api/fs/get":
+			getCalls++
+			switch r.Header.Get("Authorization") {
+			case "old-token":
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 401, "message": "token is expired"})
+			case "fresh-token":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"code":    200,
+					"message": "success",
+					"data": map[string]any{
+						"name":    "file.txt",
+						"size":    7,
+						"raw_url": "http://raw.example/file.txt",
+					},
+				})
+			default:
+				t.Fatalf("unexpected authorization header")
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store, err := NewAListStore(AListOptions{
+		Name:     "alist",
+		BaseURL:  server.URL,
+		Token:    "old-token",
+		Username: "admin",
+		Password: "password",
+		Root:     "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, err := store.Stat(context.Background(), "dir/file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat.Size != 7 {
+		t.Fatalf("stat size = %d", stat.Size)
+	}
+	if loginCalls != 1 || getCalls != 2 {
+		t.Fatalf("login calls = %d, get calls = %d", loginCalls, getCalls)
+	}
+}

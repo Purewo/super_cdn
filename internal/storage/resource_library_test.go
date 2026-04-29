@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,6 +48,48 @@ func TestResourceLibraryWritesOnlyFirstBinding(t *testing.T) {
 	}
 	if _, err := second.Stat(ctx, "objects/a.txt"); err == nil {
 		t.Fatal("second binding should not receive batch write")
+	}
+}
+
+func TestResourceLibraryGetFallsBackWhenLocatorBindingFails(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	first, err := NewLocalStore("first", filepath.Join(root, "first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewLocalStore("second", filepath.Join(root, "second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "source.txt")
+	if err := os.WriteFile(source, []byte("from-backup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Put(ctx, PutOptions{Key: "objects/a.txt", FilePath: source, Size: 11}); err != nil {
+		t.Fatal(err)
+	}
+	library, err := NewResourceLibraryStore("repo", []ResourceLibraryBindingStore{
+		{Name: "first_path", Store: first},
+		{Name: "second_path", Store: second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stream, err := library.Get(ctx, "objects/a.txt", GetOptions{
+		Locator: encodeResourceLocator("first_path", first.PublicURL("objects/a.txt")),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	raw, err := io.ReadAll(stream.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "from-backup" {
+		t.Fatalf("body = %q", raw)
 	}
 }
 

@@ -2,10 +2,86 @@ export interface Env {
   ORIGIN_BASE_URL: string;
   EDGE_BYPASS_SECRET?: string;
   EDGE_DEFAULT_CACHE_CONTROL?: string;
+  EDGE_MANIFEST?: KVNamespace;
+  EDGE_MANIFEST_DRY_RUN?: string;
+  EDGE_MANIFEST_JSON?: string;
+  EDGE_MANIFEST_KEY?: string;
+  EDGE_MANIFEST_KEY_PREFIX?: string;
+}
+
+export interface EdgeManifest {
+  version: number;
+  kind?: string;
+  site_id?: string;
+  deployment_id?: string;
+  deployment_target?: string;
+  route_profile?: string;
+  mode?: string;
+  rules?: SiteRules;
+  routes: Record<string, EdgeManifestRoute>;
+  fallback?: EdgeManifestRoute;
+  not_found?: EdgeManifestRoute;
+  warnings?: string[];
+}
+
+export interface EdgeManifestRoute {
+  type: string;
+  delivery?: string;
+  file?: string;
+  status?: number;
+  location?: string;
+  content_type?: string;
+  cache_control?: string;
+  object_cache_control?: string;
+  size?: number;
+  sha256?: string;
+  object_id?: number;
+  object_key?: string;
+  headers?: Record<string, string>;
+}
+
+interface SiteRules {
+  mode?: string;
+  redirects?: SiteRedirectRule[];
+  rewrites?: SiteRewriteRule[];
+}
+
+interface SiteRedirectRule {
+  from?: string;
+  to?: string;
+  status?: number;
+}
+
+interface SiteRewriteRule {
+  from?: string;
+  to?: string;
+}
+
+export interface EdgeManifestDecision {
+  action: "site_redirect" | "route" | "fallback" | "not_found" | "miss";
+  request_path: string;
+  serve_path: string;
+  route_type?: string;
+  delivery?: string;
+  file?: string;
+  status: number;
+  location?: string;
+  content_type?: string;
+  cache_control?: string;
+  object_cache_control?: string;
+  headers?: Record<string, string>;
+  reason?: string;
+}
+
+interface LoadedEdgeManifest {
+  key: string;
+  manifest?: EdgeManifest;
+  error?: string;
 }
 
 const cacheableStatus = new Set([200, 404]);
 const storageRedirectStatus = new Set([301, 302, 303, 307, 308]);
+const cachedCacheControlHeader = "X-SuperCDN-Cached-Cache-Control";
 const hopByHopHeaders = new Set([
   "connection",
   "keep-alive",
@@ -19,6 +95,10 @@ const hopByHopHeaders = new Set([
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    if (edgeManifestDryRunRequested(request, env)) {
+      return edgeManifestDryRunResponse(request, env);
+    }
+
     if (request.method !== "GET" && request.method !== "HEAD") {
       return fetch(originRequest(request, env));
     }
@@ -31,17 +111,126 @@ export default {
     const cacheKey = edgeCacheKey(request);
     const cached = await caches.default.match(cacheKey);
     if (cached) {
-      return markCache(cached, "HIT", request.method);
+      return markCache(restoreCachedCacheControl(cached), "HIT", request.method);
     }
 
     const response = await resolveOriginResponse(request, env);
     const output = markCache(response, "MISS", request.method);
     if (request.method === "GET" && shouldStore(output)) {
-      ctx.waitUntil(caches.default.put(cacheKey, output.clone()));
+      ctx.waitUntil(caches.default.put(cacheKey, responseForCache(output.clone())));
     }
     return output;
   },
 };
+
+export function edgeManifestDryRunRequested(request: Request, env: Env): boolean {
+  if (!enabled(env.EDGE_MANIFEST_DRY_RUN)) {
+    return false;
+  }
+  const url = new URL(request.url);
+  const query = (url.searchParams.get("__supercdn_edge_manifest") || "").toLowerCase();
+  const header = (request.headers.get("X-SuperCDN-Edge-Manifest-Dry-Run") || "").toLowerCase();
+  return query === "dry-run" || query === "1" || enabled(header);
+}
+
+export async function edgeManifestDryRunResponse(request: Request, env: Env): Promise<Response> {
+  const loaded = await loadEdgeManifest(request, env);
+  if (!loaded.manifest) {
+    return edgeManifestJSON(
+      {
+        ok: false,
+        source: "edge_manifest",
+        key: loaded.key,
+        error: loaded.error || "edge manifest unavailable",
+      },
+      503,
+    );
+  }
+  const decision = resolveEdgeManifestDecision(request, loaded.manifest);
+  return edgeManifestJSON({
+    ok: true,
+    source: "edge_manifest",
+    key: loaded.key,
+    site_id: loaded.manifest.site_id,
+    deployment_id: loaded.manifest.deployment_id,
+    deployment_target: loaded.manifest.deployment_target,
+    route_profile: loaded.manifest.route_profile,
+    manifest_version: loaded.manifest.version,
+    manifest_kind: loaded.manifest.kind,
+    manifest_mode: loaded.manifest.mode,
+    route_count: Object.keys(loaded.manifest.routes || {}).length,
+    decision,
+    warnings: loaded.manifest.warnings || [],
+  });
+}
+
+export async function loadEdgeManifest(request: Request, env: Env): Promise<LoadedEdgeManifest> {
+  const key = edgeManifestKey(request, env);
+  if (env.EDGE_MANIFEST_JSON?.trim()) {
+    return parseEdgeManifest(env.EDGE_MANIFEST_JSON, key);
+  }
+  if (!env.EDGE_MANIFEST) {
+    return { key, error: "EDGE_MANIFEST KV binding is not configured" };
+  }
+  const raw = await env.EDGE_MANIFEST.get(key);
+  if (!raw) {
+    return { key, error: "edge manifest not found" };
+  }
+  return parseEdgeManifest(raw, key);
+}
+
+export function edgeManifestKey(request: Request, env: Env): string {
+  const explicit = env.EDGE_MANIFEST_KEY?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const host = new URL(request.url).hostname.toLowerCase();
+  const prefix = env.EDGE_MANIFEST_KEY_PREFIX ?? "sites/";
+  return `${prefix}${host}/active/edge-manifest`;
+}
+
+export function resolveEdgeManifestDecision(request: Request, manifest: EdgeManifest): EdgeManifestDecision {
+  const requestPath = cleanEdgePath(new URL(request.url).pathname);
+  const rules = manifest.rules || {};
+  for (const rule of rules.redirects || []) {
+    if (siteRuleMatch(rule.from || "", requestPath)) {
+      return {
+        action: "site_redirect",
+        request_path: requestPath,
+        serve_path: requestPath,
+        status: rule.status || 302,
+        location: rule.to || "/",
+        reason: "matched_redirect_rule",
+      };
+    }
+  }
+
+  let servePath = requestPath;
+  for (const rule of rules.rewrites || []) {
+    if (rule.to && siteRuleMatch(rule.from || "", requestPath)) {
+      servePath = cleanEdgePath(rule.to);
+      break;
+    }
+  }
+
+  const route = manifest.routes?.[servePath];
+  if (route) {
+    return decisionFromRoute("route", requestPath, servePath, route, "matched_route");
+  }
+  if (manifest.fallback) {
+    return decisionFromRoute("fallback", requestPath, servePath, manifest.fallback, "spa_fallback");
+  }
+  if (manifest.not_found) {
+    return decisionFromRoute("not_found", requestPath, servePath, manifest.not_found, "not_found");
+  }
+  return {
+    action: "miss",
+    request_path: requestPath,
+    serve_path: servePath,
+    status: 404,
+    reason: "manifest_route_not_found",
+  };
+}
 
 export async function resolveOriginResponse(request: Request, env: Env): Promise<Response> {
   const originResponse = await fetch(originRequest(request, env));
@@ -215,6 +404,26 @@ function markCache(response: Response, value: string, method: string): Response 
   return out;
 }
 
+function responseForCache(response: Response): Response {
+  const out = new Response(response.body, response);
+  const cacheControl = response.headers.get("Cache-Control");
+  if (cacheControl) {
+    out.headers.set(cachedCacheControlHeader, cacheControl);
+  }
+  return out;
+}
+
+function restoreCachedCacheControl(response: Response): Response {
+  const cacheControl = response.headers.get(cachedCacheControlHeader);
+  if (!cacheControl) {
+    return response;
+  }
+  const out = new Response(response.body, response);
+  out.headers.set("Cache-Control", cacheControl);
+  out.headers.delete(cachedCacheControlHeader);
+  return out;
+}
+
 function withEdgeHeader(response: Response, name: string, value: string): Response {
   const out = new Response(response.body, response);
   out.headers.set(name, value);
@@ -245,6 +454,107 @@ function defaultCacheControl(request: Request, env?: Env): string {
     return "public, max-age=60";
   }
   return "public, max-age=300";
+}
+
+function parseEdgeManifest(raw: string, key: string): LoadedEdgeManifest {
+  try {
+    const manifest = JSON.parse(raw) as EdgeManifest;
+    if (!manifest || typeof manifest !== "object" || !manifest.routes || typeof manifest.routes !== "object") {
+      return { key, error: "edge manifest is missing routes" };
+    }
+    return { key, manifest };
+  } catch (error) {
+    return { key, error: `invalid edge manifest json: ${errorMessage(error)}` };
+  }
+}
+
+function decisionFromRoute(
+  action: EdgeManifestDecision["action"],
+  requestPath: string,
+  servePath: string,
+  route: EdgeManifestRoute,
+  reason: string,
+): EdgeManifestDecision {
+  return {
+    action,
+    request_path: requestPath,
+    serve_path: servePath,
+    route_type: route.type,
+    delivery: route.delivery,
+    file: route.file,
+    status: route.status || (route.type === "redirect" ? 302 : 200),
+    location: route.location,
+    content_type: route.content_type,
+    cache_control: route.cache_control,
+    object_cache_control: route.object_cache_control,
+    headers: route.headers,
+    reason,
+  };
+}
+
+function cleanEdgePath(value: string): string {
+  const raw = `/${value.replace(/\\/g, "/").replace(/^\/+/, "")}`;
+  const trailingSlash = raw.length > 1 && raw.endsWith("/");
+  const parts: string[] = [];
+  for (const part of raw.split("/")) {
+    if (part === "" || part === ".") {
+      continue;
+    }
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  const cleaned = `/${parts.join("/")}`;
+  return trailingSlash && cleaned !== "/" ? `${cleaned}/` : cleaned;
+}
+
+function cleanSiteRulePath(value: string): string {
+  let rule = value.trim().replace(/\\/g, "/");
+  if (rule === "" || rule === "*") {
+    return "/*";
+  }
+  if (!rule.startsWith("/")) {
+    rule = `/${rule}`;
+  }
+  if (rule.endsWith("*")) {
+    const prefix = rule.slice(0, -1);
+    const cleaned = cleanEdgePath(prefix).replace(/\/+$/, "") || "/";
+    if (prefix.endsWith("/") && cleaned !== "/") {
+      return `${cleaned}/*`;
+    }
+    return `${cleaned}*`;
+  }
+  return cleanEdgePath(rule);
+}
+
+function siteRuleMatch(pattern: string, requestPath: string): boolean {
+  const rule = cleanSiteRulePath(pattern);
+  const path = cleanEdgePath(requestPath);
+  if (rule === "/*") {
+    return true;
+  }
+  if (rule.endsWith("*")) {
+    return path.startsWith(rule.slice(0, -1));
+  }
+  return rule === path;
+}
+
+function edgeManifestJSON(body: unknown, status = 200): Response {
+  return new Response(`${JSON.stringify(body, null, 2)}\n`, {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-SuperCDN-Edge-Manifest-Dry-Run": "true",
+    },
+  });
+}
+
+function enabled(value: string | undefined): boolean {
+  const normalized = (value || "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
 function contentTypeByPath(pathname: string): string {

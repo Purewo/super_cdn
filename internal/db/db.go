@@ -135,6 +135,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			name TEXT NOT NULL DEFAULT '',
 			mode TEXT NOT NULL,
 			route_profile TEXT NOT NULL,
+			deployment_target TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS site_deployments (
@@ -143,6 +144,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			environment TEXT NOT NULL,
 			status TEXT NOT NULL,
 			route_profile TEXT NOT NULL,
+			deployment_target TEXT NOT NULL DEFAULT '',
 			version TEXT NOT NULL,
 			active INTEGER NOT NULL DEFAULT 0,
 			pinned INTEGER NOT NULL DEFAULT 0,
@@ -188,6 +190,12 @@ func (d *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := d.ensureColumn(ctx, "sites", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn(ctx, "sites", "deployment_target", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn(ctx, "site_deployments", "deployment_target", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	return nil
@@ -697,15 +705,15 @@ func (d *DB) DeleteAssetBucket(ctx context.Context, slug string) error {
 	return nil
 }
 
-func (d *DB) CreateSite(ctx context.Context, id, name, mode, routeProfile string, domains []string) (*model.Site, error) {
+func (d *DB) CreateSite(ctx context.Context, id, name, mode, routeProfile, deploymentTarget string, domains []string) (*model.Site, error) {
 	if mode == "" {
 		mode = "standard"
 	}
 	now := nowString()
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO sites(id, name, mode, route_profile, created_at)
-		VALUES(?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET name = excluded.name, mode = excluded.mode, route_profile = excluded.route_profile`, id, name, mode, routeProfile, now)
+		INSERT INTO sites(id, name, mode, route_profile, deployment_target, created_at)
+		VALUES(?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET name = excluded.name, mode = excluded.mode, route_profile = excluded.route_profile, deployment_target = excluded.deployment_target`, id, name, mode, routeProfile, deploymentTarget, now)
 	if err != nil {
 		return nil, err
 	}
@@ -718,10 +726,13 @@ func (d *DB) CreateSite(ctx context.Context, id, name, mode, routeProfile string
 func (d *DB) GetSite(ctx context.Context, id string) (*model.Site, error) {
 	var s model.Site
 	var created string
-	err := d.sql.QueryRowContext(ctx, `SELECT id, name, mode, route_profile, created_at FROM sites WHERE id = ?`, id).
-		Scan(&s.ID, &s.Name, &s.Mode, &s.RouteProfile, &created)
+	err := d.sql.QueryRowContext(ctx, `SELECT id, name, mode, route_profile, deployment_target, created_at FROM sites WHERE id = ?`, id).
+		Scan(&s.ID, &s.Name, &s.Mode, &s.RouteProfile, &s.DeploymentTarget, &created)
 	if err != nil {
 		return nil, err
+	}
+	if s.DeploymentTarget == "" {
+		s.DeploymentTarget = model.SiteDeploymentTargetOriginAssisted
 	}
 	s.CreatedAt = parseTime(created)
 	domains, err := d.DomainsForSite(ctx, id)
