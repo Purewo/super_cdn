@@ -110,6 +110,10 @@ func main() {
 		err = createBucket(c, args[1:])
 	case "create-cdn-bucket":
 		err = createCDNBucket(c, args[1:])
+	case "create-domestic-cdn-bucket":
+		err = createDomesticCDNBucket(c, args[1:])
+	case "create-mobile-cdn-bucket":
+		err = createMobileCDNBucket(c, args[1:])
 	case "init-bucket":
 		err = initBucket(c, args[1:])
 	case "upload-bucket":
@@ -1875,6 +1879,61 @@ func createCDNBucket(c client, args []string) error {
 	return createBucketWithDefaults(c, args, "create-cdn-bucket", "overseas_r2", "public, max-age=31536000, immutable")
 }
 
+func createMobileCDNBucket(c client, args []string) error {
+	return createBucketWithDefaults(c, args, "create-mobile-cdn-bucket", "china_mobile", "public, max-age=86400")
+}
+
+func createDomesticCDNBucket(c client, args []string) error {
+	fs := flag.NewFlagSet("create-domestic-cdn-bucket", flag.ExitOnError)
+	slug := fs.String("slug", "", "bucket slug")
+	name := fs.String("name", "", "bucket display name")
+	description := fs.String("description", "", "bucket description")
+	line := fs.String("line", "mobile", "domestic line: mobile, telecom, unicom, or all")
+	profile := fs.String("profile", "", "explicit route profile; overrides -line")
+	types := fs.String("types", "", "comma-separated asset types: image,video,document,archive,other")
+	maxCapacity := fs.Int64("max-capacity", 0, "bucket capacity limit in bytes; 0 means unlimited")
+	maxFileSize := fs.Int64("max-file-size", 0, "single file limit in bytes; 0 means unlimited")
+	cacheControl := fs.String("cache-control", "public, max-age=86400", "default Cache-Control value")
+	_ = fs.Parse(args)
+	if *slug == "" {
+		return errors.New("-slug is required")
+	}
+	routeProfile := strings.TrimSpace(*profile)
+	if routeProfile == "" {
+		var err error
+		routeProfile, err = domesticLineProfile(*line)
+		if err != nil {
+			return err
+		}
+	}
+	req := map[string]any{
+		"slug":                  *slug,
+		"name":                  *name,
+		"description":           *description,
+		"route_profile":         routeProfile,
+		"allowed_types":         splitCSV(*types),
+		"max_capacity_bytes":    *maxCapacity,
+		"max_file_size_bytes":   *maxFileSize,
+		"default_cache_control": *cacheControl,
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/asset-buckets", req)
+}
+
+func domesticLineProfile(line string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "", "mobile", "cmcc", "china_mobile":
+		return "china_mobile", nil
+	case "telecom", "ctcc", "china_telecom":
+		return "china_telecom", nil
+	case "unicom", "cucc", "china_unicom":
+		return "china_unicom", nil
+	case "all", "china_all":
+		return "china_all", nil
+	default:
+		return "", fmt.Errorf("line must be mobile, telecom, unicom, or all")
+	}
+}
+
 func createBucketWithDefaults(c client, args []string, commandName, defaultProfile, defaultCacheControl string) error {
 	fs := flag.NewFlagSet(commandName, flag.ExitOnError)
 	slug := fs.String("slug", "", "bucket slug")
@@ -2554,6 +2613,7 @@ func usage() {
   supercdnctl [global flags] e2e-probe -profile china_all
   supercdnctl [global flags] create-bucket -slug movie-posters -name 影视海报桶 -profile china_all -types image
   supercdnctl [global flags] create-cdn-bucket -slug movie-posters -name movie-posters -types image
+  supercdnctl [global flags] create-domestic-cdn-bucket -slug mobile-posters -line mobile -types image
   supercdnctl [global flags] init-bucket -bucket movie-posters
   supercdnctl [global flags] upload-bucket -bucket movie-posters -file poster.jpg -path posters/poster.jpg -warmup
   supercdnctl [global flags] list-bucket -bucket movie-posters

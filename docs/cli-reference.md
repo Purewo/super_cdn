@@ -53,6 +53,8 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `e2e-probe` | `POST /api/v1/resource-libraries/e2e-probe` | 执行真实上传/读取/清理探针 |
 | `create-bucket` | `POST /api/v1/asset-buckets` | 创建静态资源桶 |
 | `create-cdn-bucket` | `POST /api/v1/asset-buckets` | 创建海外 CDN 资源桶快捷命令 |
+| `create-domestic-cdn-bucket` | `POST /api/v1/asset-buckets` | 创建国内 AList/OpenList CDN 资源桶快捷命令 |
+| `create-mobile-cdn-bucket` | `POST /api/v1/asset-buckets` | 创建移动线路 CDN 资源桶快捷命令 |
 | `init-bucket` | `POST /api/v1/asset-buckets/{slug}/init` | 初始化桶目录结构 |
 | `upload-bucket` | `POST /api/v1/asset-buckets/{slug}/objects` | 上传桶对象 |
 | `list-bucket` | `GET /api/v1/asset-buckets/{slug}/objects` | 列出桶对象 |
@@ -513,6 +515,24 @@ POST /api/v1/asset-buckets
 
 注意：默认 immutable 缓存适合带版本号或内容 hash 的逻辑路径，例如 `images/v1/poster.jpg` 或 `archives/app-20260429.zip`。会覆盖的固定路径请显式降低 `-cache-control`。
 
+### create-domestic-cdn-bucket
+
+创建面向国内 AList/OpenList 线路的资源桶。默认使用移动线路 `china_mobile`，适合先单线验证；后续可通过 `-line` 切到其它国内线路，或用 `-profile` 显式指定 route profile。
+
+```powershell
+.\bin\supercdnctl.exe create-domestic-cdn-bucket -slug mobile-assets -line mobile -types image,document
+.\bin\supercdnctl.exe create-domestic-cdn-bucket -slug telecom-downloads -line telecom -types archive -cache-control "public, max-age=86400"
+.\bin\supercdnctl.exe create-mobile-cdn-bucket -slug mobile-posters -types image
+```
+
+默认值：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-line` | `mobile` | `mobile` -> `china_mobile`，`telecom` -> `china_telecom`，`unicom` -> `china_unicom`，`all` -> `china_all` |
+| `-profile` | 空 | 显式 route profile；传入后覆盖 `-line` |
+| `-cache-control` | `public, max-age=86400` | 国内桶默认缓存 1 天，固定路径误缓存风险低于 immutable |
+
 ### init-bucket
 
 初始化桶目录结构。
@@ -582,6 +602,8 @@ CLI 额外参数：
 | `urls` | 可直接复制的公开链接数组 |
 
 使用 `-warmup` 时输出为 `{ "upload": {...}, "warmup": {...} }`，其中 `upload.public_url` 是上传后的可访问链接。
+
+国内 AList/OpenList 桶会返回稳定的 Super CDN `/a/...` `public_url`。当底层存储能生成签名直链时也会返回 `cdn_url` / `storage_url`；部分下游网盘对重定向后的 `HEAD` 返回 403，直接链路验证应使用 `GET` 或 Range `GET`。
 
 ### list-bucket
 

@@ -206,6 +206,81 @@ func TestCreateCDNBucketUsesOverseasDefaults(t *testing.T) {
 	}
 }
 
+func TestCreateDomesticCDNBucketDefaultsToMobile(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/asset-buckets" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"slug":"mobile"}`))
+	}))
+	defer srv.Close()
+
+	err := createDomesticCDNBucket(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+		"-slug", "mobile",
+		"-types", "image,document",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["route_profile"] != "china_mobile" {
+		t.Fatalf("route_profile = %#v", got["route_profile"])
+	}
+	if got["default_cache_control"] != "public, max-age=86400" {
+		t.Fatalf("default_cache_control = %#v", got["default_cache_control"])
+	}
+}
+
+func TestCreateDomesticCDNBucketLineMapping(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want string
+	}{
+		{"mobile", "china_mobile"},
+		{"telecom", "china_telecom"},
+		{"unicom", "china_unicom"},
+		{"all", "china_all"},
+	} {
+		got, err := domesticLineProfile(tc.line)
+		if err != nil {
+			t.Fatalf("line %q: %v", tc.line, err)
+		}
+		if got != tc.want {
+			t.Fatalf("line %q = %q want %q", tc.line, got, tc.want)
+		}
+	}
+	if _, err := domesticLineProfile("satellite"); err == nil {
+		t.Fatal("expected invalid line error")
+	}
+}
+
+func TestCreateMobileCDNBucketUsesMobileDefaults(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"slug":"mobile"}`))
+	}))
+	defer srv.Close()
+
+	err := createMobileCDNBucket(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+		"-slug", "mobile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["route_profile"] != "china_mobile" {
+		t.Fatalf("route_profile = %#v", got["route_profile"])
+	}
+	if got["default_cache_control"] != "public, max-age=86400" {
+		t.Fatalf("default_cache_control = %#v", got["default_cache_control"])
+	}
+}
+
 func TestUploadBucketWarmupCallsWarmupEndpoint(t *testing.T) {
 	var uploadSeen, warmupSeen bool
 	var warmupReq map[string]any

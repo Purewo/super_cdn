@@ -361,20 +361,26 @@ Create and initialize a bucket:
 ```powershell
 go run .\cmd\supercdnctl -- create-bucket -slug movie-posters -name 影视海报桶 -profile china_all -types image
 go run .\cmd\supercdnctl -- create-cdn-bucket -slug overseas-posters -name overseas-posters -types image,archive
+go run .\cmd\supercdnctl -- create-domestic-cdn-bucket -slug mobile-posters -line mobile -types image,document
 go run .\cmd\supercdnctl -- init-bucket -bucket movie-posters
 ```
 
 `create-cdn-bucket` is the overseas object-CDN shortcut. It defaults to route profile `overseas_r2` and `Cache-Control: public, max-age=31536000, immutable`; use versioned logical paths or override `-cache-control` for mutable files.
+
+`create-domestic-cdn-bucket` is the AList/OpenList domestic shortcut. It defaults to the mobile line (`china_mobile`) and `Cache-Control: public, max-age=86400`; pass `-line telecom|unicom|all` or `-profile china_mobile` when you need an explicit route. `create-mobile-cdn-bucket` is a short alias for the mobile line.
 
 Upload and read an object:
 
 ```powershell
 go run .\cmd\supercdnctl -- upload-bucket -bucket movie-posters -file .\poster.jpg -path posters/poster.jpg
 go run .\cmd\supercdnctl -- upload-bucket -bucket overseas-posters -file .\poster.jpg -path posters/v1/poster.jpg -warmup
+go run .\cmd\supercdnctl -- upload-bucket -bucket mobile-posters -file .\poster.jpg -path posters/poster.jpg -asset-type image -warmup
 go run .\cmd\supercdnctl -- list-bucket -bucket movie-posters
 ```
 
 Bucket uploads return both the relative `url` and the absolute `public_url`/`urls` fields when `server.public_base_url` is configured. If the storage backend exposes an HTTP direct URL, uploads also return `cdn_url` / `storage_url`; for `overseas_r2` this should be the R2/Cloudflare public URL. `-warmup` immediately probes the uploaded public URL; use `-warmup-method GET` when you want the edge to fetch the full object.
+
+For domestic AList/OpenList buckets, `public_url` is the stable Super CDN `/a/...` URL. `cdn_url` is the signed AList storage URL when available; some downstream cloud drives reject `HEAD` after redirect, so use `GET` or a range `GET` when validating the direct storage path.
 
 Purge or warm Cloudflare cache for tracked bucket URLs:
 
