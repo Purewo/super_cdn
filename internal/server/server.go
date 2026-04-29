@@ -510,23 +510,25 @@ type createSiteRequest struct {
 }
 
 type recordCloudflareStaticDeploymentRequest struct {
-	Environment       string   `json:"environment"`
-	RouteProfile      string   `json:"route_profile"`
-	DeploymentTarget  string   `json:"deployment_target"`
-	Mode              string   `json:"mode"`
-	WorkerName        string   `json:"worker_name"`
-	VersionID         string   `json:"version_id"`
-	Domains           []string `json:"domains"`
-	CompatibilityDate string   `json:"compatibility_date"`
-	AssetsSHA256      string   `json:"assets_sha256"`
-	CachePolicy       string   `json:"cache_policy"`
-	HeadersGenerated  bool     `json:"headers_generated"`
-	NotFoundHandling  string   `json:"not_found_handling"`
-	FileCount         int      `json:"file_count"`
-	TotalSize         int64    `json:"total_size"`
-	PublishedAtUTC    string   `json:"published_at_utc"`
-	Promote           bool     `json:"promote"`
-	Pinned            bool     `json:"pinned"`
+	Environment        string   `json:"environment"`
+	RouteProfile       string   `json:"route_profile"`
+	DeploymentTarget   string   `json:"deployment_target"`
+	Mode               string   `json:"mode"`
+	WorkerName         string   `json:"worker_name"`
+	VersionID          string   `json:"version_id"`
+	Domains            []string `json:"domains"`
+	CompatibilityDate  string   `json:"compatibility_date"`
+	AssetsSHA256       string   `json:"assets_sha256"`
+	CachePolicy        string   `json:"cache_policy"`
+	HeadersGenerated   bool     `json:"headers_generated"`
+	NotFoundHandling   string   `json:"not_found_handling"`
+	VerificationStatus string   `json:"verification_status"`
+	VerifiedAtUTC      string   `json:"verified_at_utc"`
+	FileCount          int      `json:"file_count"`
+	TotalSize          int64    `json:"total_size"`
+	PublishedAtUTC     string   `json:"published_at_utc"`
+	Promote            bool     `json:"promote"`
+	Pinned             bool     `json:"pinned"`
 }
 
 type siteDeploymentTargetResponse struct {
@@ -1173,13 +1175,23 @@ func (s *Server) handleUploadBucketObject(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, s.withOverclockWarning(map[string]any{
+	publicURL := s.assetBucketPublicURL("", bucket.Slug, item.LogicalPath)
+	urls := []string{publicURL}
+	resp := map[string]any{
 		"bucket":        bucket.Slug,
 		"object":        obj,
 		"bucket_object": item,
 		"jobs":          jobs,
 		"url":           item.URL,
-	}))
+		"public_url":    publicURL,
+	}
+	if cdnURL, err := s.objectRedirectURL(r.Context(), obj); err == nil {
+		resp["cdn_url"] = cdnURL
+		resp["storage_url"] = cdnURL
+		urls = append(urls, cdnURL)
+	}
+	resp["urls"] = uniqueStrings(urls)
+	writeJSON(w, http.StatusCreated, s.withOverclockWarning(resp))
 }
 
 func (s *Server) handleListBucketObjects(w http.ResponseWriter, r *http.Request) {
@@ -1760,6 +1772,10 @@ func (s *Server) handlePromoteSiteDeployment(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "deployment is not ready")
 		return
 	}
+	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic && !dep.Active {
+		writeError(w, http.StatusConflict, "cloudflare_static deployments cannot be promoted by metadata alone; redeploy the desired assets or use a Cloudflare Worker rollback flow")
+		return
+	}
 	activated, err := s.db.ActivateSiteDeployment(r.Context(), siteID, deploymentID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1788,7 +1804,11 @@ func (s *Server) handleDeleteSiteDeployment(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "deployment_id": deploymentID})
+	resp := map[string]any{"deleted": true, "deployment_id": deploymentID}
+	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic {
+		resp["warning"] = "deleted Super CDN metadata only; Cloudflare Worker versions and custom domains are not deleted by this command"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleSiteGC(w http.ResponseWriter, r *http.Request) {
@@ -2009,17 +2029,27 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 		}
 		publishedAt = parsed.UTC()
 	}
+	var verifiedAt time.Time
+	if strings.TrimSpace(req.VerifiedAtUTC) != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.VerifiedAtUTC))
+		if err != nil {
+			return model.SiteDeployment{}, fmt.Errorf("verified_at_utc must be RFC3339: %w", err)
+		}
+		verifiedAt = parsed.UTC()
+	}
 	static := model.CloudflareStaticDeployment{
-		WorkerName:        req.WorkerName,
-		VersionID:         strings.TrimSpace(req.VersionID),
-		Domains:           requestedDomains,
-		URLs:              httpsDomainURLs(requestedDomains),
-		CompatibilityDate: strings.TrimSpace(req.CompatibilityDate),
-		AssetsSHA256:      strings.TrimSpace(req.AssetsSHA256),
-		CachePolicy:       strings.TrimSpace(req.CachePolicy),
-		HeadersGenerated:  req.HeadersGenerated,
-		NotFoundHandling:  strings.TrimSpace(req.NotFoundHandling),
-		PublishedAt:       publishedAt,
+		WorkerName:         req.WorkerName,
+		VersionID:          strings.TrimSpace(req.VersionID),
+		Domains:            requestedDomains,
+		URLs:               httpsDomainURLs(requestedDomains),
+		CompatibilityDate:  strings.TrimSpace(req.CompatibilityDate),
+		AssetsSHA256:       strings.TrimSpace(req.AssetsSHA256),
+		CachePolicy:        strings.TrimSpace(req.CachePolicy),
+		HeadersGenerated:   req.HeadersGenerated,
+		NotFoundHandling:   strings.TrimSpace(req.NotFoundHandling),
+		VerificationStatus: strings.TrimSpace(req.VerificationStatus),
+		VerifiedAt:         verifiedAt,
+		PublishedAt:        publishedAt,
 	}
 	deploymentID := newDeploymentID()
 	manifest := siteDeployManifest{
@@ -2638,8 +2668,8 @@ func (s *Server) streamObject(w http.ResponseWriter, r *http.Request, obj *model
 		if !ok {
 			continue
 		}
-		if s.shouldRedirectObject(r, obj, replica, statusOverride) {
-			http.Redirect(w, r, replica.Locator, http.StatusFound)
+		if target := s.objectReplicaRedirectURL(r, obj, replica, statusOverride); target != "" {
+			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}
 		stream, err := store.Get(r.Context(), obj.Key, storage.GetOptions{Range: r.Header.Get("Range"), Locator: replica.Locator})
@@ -2658,15 +2688,15 @@ func (s *Server) streamObject(w http.ResponseWriter, r *http.Request, obj *model
 	writeError(w, http.StatusNotFound, "ready replica not found")
 }
 
-func (s *Server) shouldRedirectObject(r *http.Request, obj *model.Object, replica model.Replica, statusOverride int) bool {
+func (s *Server) objectReplicaRedirectURL(r *http.Request, obj *model.Object, replica model.Replica, statusOverride int) string {
 	if statusOverride != http.StatusOK || r.Header.Get("Range") != "" || replica.Locator == "" {
-		return false
+		return ""
 	}
 	profile, ok := s.cfg.Profile(obj.RouteProfile)
 	if !ok || !profile.AllowRedirect {
-		return false
+		return ""
 	}
-	return isHTTPURL(replica.Locator)
+	return directLocatorURL(replica.Locator)
 }
 
 func (s *Server) objectRedirectURL(ctx context.Context, obj *model.Object) (string, error) {

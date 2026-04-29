@@ -87,6 +87,8 @@ For local testing without DNS, use `http://127.0.0.1:8080/s/demo/`.
 
 Static site deploys use immutable deployments. The CLI uploads a zip artifact, the server unpacks it locally, saves the original zip, writes a manifest, and uploads site files with the original directory layout under `sites/{site}/deployments/{deployment}/root/...`. Preview deployments are available at `/p/{site}/{deployment}/`; production is an atomic promote to the active deployment and can be rolled back by promoting an older deployment.
 
+For `cloudflare_static`, promotion is intentionally stricter: the normal `promote-deployment` endpoint will not metadata-promote an older Cloudflare Static record, because the real Worker assets and the Super CDN active row could diverge. Rollback for Cloudflare Static should be done by redeploying the desired assets or by a dedicated Cloudflare Worker rollback flow. Deleting a Cloudflare Static deployment currently deletes Super CDN metadata only; it does not delete Worker versions or custom domains.
+
 Sites and deployments carry a separate `deployment_target` so website hosting strategy is not overloaded onto `route_profile`. Supported target values are:
 
 - `cloudflare_static`: Cloudflare-native website hosting, backed by Workers Static Assets or Pages. This is the intended default for ordinary overseas static sites.
@@ -105,6 +107,8 @@ go run .\cmd\supercdnctl -- deploy-site -site demo -dir .\dist -profile overseas
 By default, Super CDN uses `-static-cache-policy auto` for Cloudflare Static deploys. If the source already contains `_headers`, it is respected. Otherwise the CLI publishes from a temporary copy with a generated `_headers` file: HTML and service-worker files stay revalidating, while versioned or common build assets get long immutable browser caching. The source directory is not modified. Use `-static-cache-policy none` to disable this, or `force` to replace an existing `_headers` during publish.
 
 For SPAs, pass `-static-spa`. The CLI generates a temporary `wrangler.toml` with `assets.not_found_handling = "single-page-application"`, so deep links such as `/movie/123` return `index.html` directly from Cloudflare Static Assets. Use `-static-not-found-handling 404-page|single-page-application|none` when you need the explicit Cloudflare mode.
+
+After a Cloudflare Static publish, `deploy-site` now runs a readiness probe by default before writing the active Super CDN deployment record. The probe verifies each custom domain over HTTPS, checks that the root returns HTML, verifies JS/CSS MIME types, requires direct same-site assets, checks generated cache headers, and validates SPA fallback when `-static-spa` is enabled. The readiness probe uses `1.1.1.1:53` by default so local DNS cache does not mistake an old wildcard origin record for the new Cloudflare custom domain. Use `-static-verify warn` to record the deployment even if readiness is not yet passing, or `-static-verify none` for low-level diagnostics.
 
 The lower-level canary command is still available when you only want to publish to Cloudflare without recording a Super CDN deployment:
 
@@ -356,15 +360,21 @@ Create and initialize a bucket:
 
 ```powershell
 go run .\cmd\supercdnctl -- create-bucket -slug movie-posters -name 影视海报桶 -profile china_all -types image
+go run .\cmd\supercdnctl -- create-cdn-bucket -slug overseas-posters -name overseas-posters -types image,archive
 go run .\cmd\supercdnctl -- init-bucket -bucket movie-posters
 ```
+
+`create-cdn-bucket` is the overseas object-CDN shortcut. It defaults to route profile `overseas_r2` and `Cache-Control: public, max-age=31536000, immutable`; use versioned logical paths or override `-cache-control` for mutable files.
 
 Upload and read an object:
 
 ```powershell
 go run .\cmd\supercdnctl -- upload-bucket -bucket movie-posters -file .\poster.jpg -path posters/poster.jpg
+go run .\cmd\supercdnctl -- upload-bucket -bucket overseas-posters -file .\poster.jpg -path posters/v1/poster.jpg -warmup
 go run .\cmd\supercdnctl -- list-bucket -bucket movie-posters
 ```
+
+Bucket uploads return both the relative `url` and the absolute `public_url`/`urls` fields when `server.public_base_url` is configured. If the storage backend exposes an HTTP direct URL, uploads also return `cdn_url` / `storage_url`; for `overseas_r2` this should be the R2/Cloudflare public URL. `-warmup` immediately probes the uploaded public URL; use `-warmup-method GET` when you want the edge to fetch the full object.
 
 Purge or warm Cloudflare cache for tracked bucket URLs:
 

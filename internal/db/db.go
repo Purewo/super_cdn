@@ -569,19 +569,28 @@ func (d *DB) ListAssetBuckets(ctx context.Context) ([]model.AssetBucket, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var buckets []model.AssetBucket
 	for rows.Next() {
 		bucket, err := scanAssetBucket(rows)
 		if err != nil {
-			return nil, err
-		}
-		if err := d.fillAssetBucketUsage(ctx, bucket); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		buckets = append(buckets, *bucket)
 	}
-	return buckets, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range buckets {
+		if err := d.fillAssetBucketUsage(ctx, &buckets[i]); err != nil {
+			return nil, err
+		}
+	}
+	return buckets, nil
 }
 
 func (d *DB) AssetBucketUsedBytes(ctx context.Context, slug string) (int64, error) {

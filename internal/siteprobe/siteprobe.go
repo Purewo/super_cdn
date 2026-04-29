@@ -23,12 +23,15 @@ const (
 )
 
 type Options struct {
-	URL       string
-	Origin    string
-	SPAPath   string
-	MaxAssets int
-	Timeout   time.Duration
-	Client    *http.Client
+	URL                        string
+	Origin                     string
+	SPAPath                    string
+	MaxAssets                  int
+	Timeout                    time.Duration
+	Client                     *http.Client
+	RequireDirectAssets        bool
+	RequireHTMLRevalidate      bool
+	RequireImmutableAssetCache bool
 }
 
 type Report struct {
@@ -47,28 +50,30 @@ type Report struct {
 }
 
 type Check struct {
-	URL         string `json:"url"`
-	FinalURL    string `json:"final_url,omitempty"`
-	StatusCode  int    `json:"status_code"`
-	ContentType string `json:"content_type,omitempty"`
-	LatencyMS   int64  `json:"latency_ms"`
-	OK          bool   `json:"ok"`
-	Error       string `json:"error,omitempty"`
+	URL          string `json:"url"`
+	FinalURL     string `json:"final_url,omitempty"`
+	StatusCode   int    `json:"status_code"`
+	ContentType  string `json:"content_type,omitempty"`
+	CacheControl string `json:"cache_control,omitempty"`
+	LatencyMS    int64  `json:"latency_ms"`
+	OK           bool   `json:"ok"`
+	Error        string `json:"error,omitempty"`
 }
 
 type AssetCheck struct {
-	Type        string         `json:"type"`
-	URL         string         `json:"url"`
-	FinalURL    string         `json:"final_url,omitempty"`
-	StatusCode  int            `json:"status_code"`
-	ContentType string         `json:"content_type,omitempty"`
-	Redirected  bool           `json:"redirected"`
-	CORS        string         `json:"cors"`
-	LatencyMS   int64          `json:"latency_ms"`
-	OK          bool           `json:"ok"`
-	Chain       []ResponseStep `json:"chain,omitempty"`
-	Warnings    []string       `json:"warnings,omitempty"`
-	Errors      []string       `json:"errors,omitempty"`
+	Type         string         `json:"type"`
+	URL          string         `json:"url"`
+	FinalURL     string         `json:"final_url,omitempty"`
+	StatusCode   int            `json:"status_code"`
+	ContentType  string         `json:"content_type,omitempty"`
+	CacheControl string         `json:"cache_control,omitempty"`
+	Redirected   bool           `json:"redirected"`
+	CORS         string         `json:"cors"`
+	LatencyMS    int64          `json:"latency_ms"`
+	OK           bool           `json:"ok"`
+	Chain        []ResponseStep `json:"chain,omitempty"`
+	Warnings     []string       `json:"warnings,omitempty"`
+	Errors       []string       `json:"errors,omitempty"`
 }
 
 type ResponseStep struct {
@@ -145,14 +150,14 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	if htmlFetch.err != nil {
 		report.Errors = append(report.Errors, "html fetch failed: "+htmlFetch.err.Error())
 	} else {
-		validateHTML(&report)
+		validateHTML(&report, opts)
 	}
 
 	if len(htmlFetch.body) > 0 {
 		assets := internalAssetRefs(baseURL, htmlFetch.body, maxAssets)
 		report.Summary["assets_found"] = len(assets)
 		for _, asset := range assets {
-			report.Assets = append(report.Assets, probeAsset(ctx, client, asset, origin))
+			report.Assets = append(report.Assets, probeAsset(ctx, client, asset, origin, opts))
 		}
 		if len(assets) == maxAssets {
 			report.Warnings = append(report.Warnings, fmt.Sprintf("asset probe capped at %d resources", maxAssets))
@@ -211,6 +216,7 @@ func checkFromFetch(requestURL string, result fetchResult) Check {
 		last := result.steps[len(result.steps)-1]
 		check.StatusCode = last.StatusCode
 		check.ContentType = last.ContentType
+		check.CacheControl = last.CacheControl
 		check.LatencyMS = sumLatency(result.steps)
 	}
 	check.OK = check.StatusCode >= 200 && check.StatusCode <= 299
@@ -220,7 +226,7 @@ func checkFromFetch(requestURL string, result fetchResult) Check {
 	return check
 }
 
-func validateHTML(report *Report) {
+func validateHTML(report *Report, opts Options) {
 	if !report.HTML.OK {
 		report.Errors = append(report.Errors, "html fetch failed: "+firstNonEmpty(report.HTML.Error, fmt.Sprintf("status %d", report.HTML.StatusCode)))
 		return
@@ -230,9 +236,14 @@ func validateHTML(report *Report) {
 		report.HTML.OK = false
 		report.HTML.Error = "root URL did not return HTML"
 	}
+	if opts.RequireHTMLRevalidate && !htmlCacheLooksRevalidating(report.HTML.CacheControl) {
+		report.Errors = append(report.Errors, "root HTML cache policy is not revalidating")
+		report.HTML.OK = false
+		report.HTML.Error = "root HTML cache policy is not revalidating"
+	}
 }
 
-func probeAsset(ctx context.Context, client *http.Client, ref assetRef, origin string) AssetCheck {
+func probeAsset(ctx context.Context, client *http.Client, ref assetRef, origin string, opts Options) AssetCheck {
 	result := fetch(ctx, client, ref.raw, origin, maxAssetBytes)
 	check := AssetCheck{
 		Type:     ref.typ,
@@ -251,6 +262,7 @@ func probeAsset(ctx context.Context, client *http.Client, ref assetRef, origin s
 	last := result.steps[len(result.steps)-1]
 	check.StatusCode = last.StatusCode
 	check.ContentType = last.ContentType
+	check.CacheControl = last.CacheControl
 	check.Redirected = len(result.steps) > 1
 	check.LatencyMS = sumLatency(result.steps)
 	if last.StatusCode < 200 || last.StatusCode > 299 {
@@ -258,6 +270,12 @@ func probeAsset(ctx context.Context, client *http.Client, ref assetRef, origin s
 	}
 	if !assetMIMEOK(ref.typ, last.ContentType) {
 		check.Errors = append(check.Errors, fmt.Sprintf("unexpected %s content type %q", ref.typ, last.ContentType))
+	}
+	if opts.RequireDirectAssets && check.Redirected {
+		check.Errors = append(check.Errors, "asset was redirected instead of being served directly")
+	}
+	if opts.RequireImmutableAssetCache && !cacheLooksImmutable(last.CacheControl) {
+		check.Errors = append(check.Errors, "asset cache policy is not immutable")
 	}
 	check.CORS = corsStatus(origin, result.steps)
 	if check.CORS == "missing" {
@@ -481,6 +499,18 @@ func isHTMLContentType(contentType string) bool {
 		mediaType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
 	}
 	return strings.EqualFold(mediaType, "text/html")
+}
+
+func htmlCacheLooksRevalidating(value string) bool {
+	value = strings.ToLower(value)
+	return strings.Contains(value, "no-cache") ||
+		strings.Contains(value, "no-store") ||
+		(strings.Contains(value, "max-age=0") && strings.Contains(value, "must-revalidate"))
+}
+
+func cacheLooksImmutable(value string) bool {
+	value = strings.ToLower(value)
+	return strings.Contains(value, "immutable") && strings.Contains(value, "max-age=31536000")
 }
 
 func isRedirect(status int) bool {

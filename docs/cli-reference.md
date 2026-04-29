@@ -52,6 +52,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `health-check` | `POST /api/v1/resource-libraries/health-check` | 执行资源库健康检查 |
 | `e2e-probe` | `POST /api/v1/resource-libraries/e2e-probe` | 执行真实上传/读取/清理探针 |
 | `create-bucket` | `POST /api/v1/asset-buckets` | 创建静态资源桶 |
+| `create-cdn-bucket` | `POST /api/v1/asset-buckets` | 创建海外 CDN 资源桶快捷命令 |
 | `init-bucket` | `POST /api/v1/asset-buckets/{slug}/init` | 初始化桶目录结构 |
 | `upload-bucket` | `POST /api/v1/asset-buckets/{slug}/objects` | 上传桶对象 |
 | `list-bucket` | `GET /api/v1/asset-buckets/{slug}/objects` | 列出桶对象 |
@@ -185,6 +186,8 @@ Cloudflare Static deploys default to `-static-cache-policy auto`. If the source 
 
 For SPAs, pass `-static-spa`. The CLI generates a temporary `wrangler.toml` with `assets.not_found_handling = "single-page-application"` so deep links return `index.html` from Cloudflare Static Assets. `-static-not-found-handling` can also be set directly to `none`、`404-page` or `single-page-application`.
 
+Cloudflare Static deployments run `-static-verify wait` by default. After Wrangler publishes, the CLI probes every custom domain over HTTPS before recording the deployment in Super CDN. It checks root HTML, JS/CSS MIME types, direct same-site asset delivery, generated cache headers, and SPA fallback when enabled. The readiness probe uses `-static-verify-resolver 1.1.1.1:53` by default to avoid stale local DNS wildcard cache. A failed wait-mode probe prints the probe report and returns an error, so the control plane does not mark an unreachable custom domain as active. Use `-static-verify warn` to continue after a failed probe or `-static-verify none` to skip it.
+
 本地检查产物但不上传：
 
 ```powershell
@@ -221,6 +224,11 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 | `-static-cache-policy` | 否 | `auto` | `cloudflare_static` 缓存头策略：`auto`、`force` 或 `none` |
 | `-static-spa` | 否 | `false` | 为 `cloudflare_static` 启用 SPA fallback |
 | `-static-not-found-handling` | 否 | `none` | Cloudflare Static `not_found_handling`：`none`、`404-page` 或 `single-page-application` |
+| `-static-verify` | 否 | `wait` | 发布后的域名可用性验证：`wait`、`warn` 或 `none` |
+| `-static-verify-timeout` | 否 | `2m` | `wait` 模式最多等待多久 |
+| `-static-verify-interval` | 否 | `5s` | `wait` 模式两次探测间隔 |
+| `-static-verify-spa-path` | 否 | 自动 | SPA fallback 探测路径；`-static-spa` 时默认 `/__supercdn_spa_probe` |
+| `-static-verify-resolver` | 否 | `1.1.1.1:53` | readiness HTTP 探测使用的 DNS 解析器 |
 
 限制：
 
@@ -231,6 +239,7 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 - `cloudflare_static` 需要 `-dir`，不支持 `-bundle`；它发布到 Cloudflare Workers Static Assets 并写入 Super CDN deployment 记录，不经过 R2。
 - `cloudflare_static` 的 `auto` 缓存策略会生成临时 `_headers`，不会修改源目录；如果源目录已有 `_headers`，默认尊重已有文件。
 - `cloudflare_static` 的 SPA fallback 通过临时 Wrangler 配置文件实现，不会写入源目录。
+- `cloudflare_static` 默认发布后会先验证 HTTPS 域名可访问；验证失败时不会写入 active deployment，除非使用 `-static-verify warn` 或 `none`。
 - 公共访问使用当前 active deployment；preview 访问自动加 `X-Robots-Tag: noindex`。
 - 站点公开访问时，根目录 `index.html` 由 Go origin 直出；其他成功命中的站点文件（非 Range、非 404）会 `302` 到可用的存储直链。普通 `/o/...` 资产仍按 route profile 的 `allow_redirect` 策略处理。
 - deployment 响应包含 `inspect`，只提示 module script、dynamic import、CSS 相对资源、字体、wasm、service worker 等风险，不阻止部署。
@@ -254,6 +263,7 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 .\bin\supercdnctl.exe probe-site -site blog -spa-path /movie/123
 .\bin\supercdnctl.exe probe-site -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe probe-site -url https://blog.sites.example.com/ -max-assets 20
+.\bin\supercdnctl.exe probe-site -url https://blog.qwk.ccwu.cc/ -resolver 1.1.1.1:53 -require-direct-assets -require-html-revalidate -require-immutable-assets
 ```
 
 检查内容：
@@ -263,6 +273,7 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 - 对 JS/CSS 检查最终 `Content-Type`，避免缺失资源被 SPA fallback 返回 HTML 后产生浏览器 MIME 错误。
 - 如果最终地址跨源，使用 `Origin` 头请求并要求最终响应返回 `Access-Control-Allow-Origin: *` 或匹配的 origin。
 - 传 `-spa-path` 时额外请求该路径，并要求返回 HTML。
+- 传 `-resolver 1.1.1.1:53` 时，HTTP 探测会绕开本机 DNS 缓存，用指定解析器确认实际公网接管状态。
 
 ### deployments
 
@@ -279,6 +290,8 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe gc-site -site blog
 ```
+
+注意：`cloudflare_static` 部署不会允许普通 `promote-deployment` 做元数据级回滚，因为 Cloudflare Worker 的真实资产版本不会因此自动切换。要回滚 Cloudflare Static，请重新发布目标产物，或后续使用专门的 Worker rollback 流程。`delete-deployment` 删除 `cloudflare_static` 时只删除 Super CDN 元数据，会在响应里提示不会删除 Worker versions/custom domains。
 
 说明：
 
@@ -489,6 +502,17 @@ POST /api/v1/asset-buckets
 | `-max-file-size` | 否 | `0` | 单文件上限字节，0 不限制 |
 | `-cache-control` | 否 | 线路默认值 | 默认缓存策略 |
 
+### create-cdn-bucket
+
+创建面向海外对象 CDN 的资源桶。它和 `create-bucket` 调用同一个 API，但 CLI 默认值更适合公开静态资源：`-profile overseas_r2`，`-cache-control "public, max-age=31536000, immutable"`。
+
+```powershell
+.\bin\supercdnctl.exe create-cdn-bucket -slug overseas-assets -name 海外资源桶 -types image,archive
+.\bin\supercdnctl.exe create-cdn-bucket -slug downloads -types archive -cache-control "public, max-age=86400"
+```
+
+注意：默认 immutable 缓存适合带版本号或内容 hash 的逻辑路径，例如 `images/v1/poster.jpg` 或 `archives/app-20260429.zip`。会覆盖的固定路径请显式降低 `-cache-control`。
+
 ### init-bucket
 
 初始化桶目录结构。
@@ -517,6 +541,7 @@ POST /api/v1/asset-buckets/{slug}/init
 
 ```powershell
 .\bin\supercdnctl.exe upload-bucket -bucket dynamic-wallpapers -file .\wallpaper.mp4 -path dynamic/20260426T195744Z-01.mp4 -asset-type video -cache-control "public, max-age=86400"
+.\bin\supercdnctl.exe upload-bucket -bucket overseas-assets -file .\poster.jpg -path images/v1/poster.jpg -asset-type image -warmup
 ```
 
 HTTP:
@@ -534,6 +559,14 @@ multipart 字段：
 | `asset_type` | `-asset-type` | 否 | 显式指定类型 |
 | `cache_control` | `-cache-control` | 否 | 覆盖缓存策略 |
 
+CLI 额外参数：
+
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-warmup` | 否 | `false` | 上传成功后立即调用 `warmup-bucket` 同一对象 |
+| `-warmup-method` | 否 | `HEAD` | `HEAD` 或 `GET` |
+| `-warmup-base-url` | 否 | `server.public_base_url` | 覆盖预热 URL 的公开域名 |
+
 返回核心字段：
 
 | 字段 | 说明 |
@@ -542,7 +575,13 @@ multipart 字段：
 | `bucket_object.physical_key` | 物理存储 key |
 | `bucket_object.sha256` | 内容 SHA256 |
 | `object.id` | 底层对象 ID |
-| `url` | 公开路径 |
+| `url` | 相对公开路径 |
+| `public_url` | 绝对公开链接，依赖 `server.public_base_url` |
+| `cdn_url` | 存储后端可提供 HTTP 直链时返回的 CDN/存储公开链接 |
+| `storage_url` | 同 `cdn_url`，用于明确这是底层存储公开 URL |
+| `urls` | 可直接复制的公开链接数组 |
+
+使用 `-warmup` 时输出为 `{ "upload": {...}, "warmup": {...} }`，其中 `upload.public_url` 是上传后的可访问链接。
 
 ### list-bucket
 

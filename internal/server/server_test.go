@@ -197,21 +197,23 @@ func TestResolveSiteDeploymentTargetUsesExistingSiteDomains(t *testing.T) {
 func TestRecordCloudflareStaticDeployment(t *testing.T) {
 	app := newTestServer(t)
 	raw, _ := json.Marshal(map[string]any{
-		"environment":        "production",
-		"route_profile":      "overseas",
-		"deployment_target":  "cloudflare_static",
-		"mode":               "standard",
-		"worker_name":        "supercdn-demo-static",
-		"version_id":         "ver-123",
-		"domains":            []string{"demo-static.example.com"},
-		"compatibility_date": "2026-04-29",
-		"cache_policy":       "auto",
-		"headers_generated":  true,
-		"not_found_handling": "single-page-application",
-		"file_count":         2,
-		"total_size":         1200,
-		"published_at_utc":   "2026-04-29T00:00:00Z",
-		"promote":            true,
+		"environment":         "production",
+		"route_profile":       "overseas",
+		"deployment_target":   "cloudflare_static",
+		"mode":                "standard",
+		"worker_name":         "supercdn-demo-static",
+		"version_id":          "ver-123",
+		"domains":             []string{"demo-static.example.com"},
+		"compatibility_date":  "2026-04-29",
+		"cache_policy":        "auto",
+		"headers_generated":   true,
+		"not_found_handling":  "single-page-application",
+		"verification_status": "ok",
+		"verified_at_utc":     "2026-04-29T00:00:01Z",
+		"file_count":          2,
+		"total_size":          1200,
+		"published_at_utc":    "2026-04-29T00:00:00Z",
+		"promote":             true,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites/demo/cloudflare-static/deployments", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
@@ -231,6 +233,7 @@ func TestRecordCloudflareStaticDeployment(t *testing.T) {
 		`"cache_policy":"auto"`,
 		`"headers_generated":true`,
 		`"not_found_handling":"single-page-application"`,
+		`"verification_status":"ok"`,
 		`"delivery_summary":{"cloudflare_static":2}`,
 	} {
 		if !strings.Contains(body, want) {
@@ -243,6 +246,50 @@ func TestRecordCloudflareStaticDeployment(t *testing.T) {
 	}
 	if !contains(site.Domains, "demo-static.example.com") {
 		t.Fatalf("site domains = %+v", site.Domains)
+	}
+}
+
+func TestPromoteCloudflareStaticDeploymentRejectsMetadataOnlyRollback(t *testing.T) {
+	app := newTestServer(t)
+	activeID := recordCloudflareStaticDeploymentForTest(t, app, "demo", true)
+	readyID := recordCloudflareStaticDeploymentForTest(t, app, "demo", false)
+	if activeID == readyID {
+		t.Fatal("expected distinct deployment ids")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites/demo/deployments/"+readyID+"/promote", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("promote status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "metadata alone") {
+		t.Fatalf("promote response missing safety message: %s", rec.Body.String())
+	}
+
+	dep, err := app.db.GetSiteDeployment(context.Background(), activeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dep.Active {
+		t.Fatalf("active deployment was changed: %+v", dep)
+	}
+}
+
+func TestDeleteCloudflareStaticDeploymentWarnsMetadataOnly(t *testing.T) {
+	app := newTestServer(t)
+	deploymentID := recordCloudflareStaticDeploymentForTest(t, app, "demo", false)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sites/demo/deployments/"+deploymentID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"deleted":true`) || !strings.Contains(rec.Body.String(), "metadata only") {
+		t.Fatalf("delete response missing warning: %s", rec.Body.String())
 	}
 }
 
@@ -1450,6 +1497,7 @@ func TestResourceLibraryE2EProbeCleansUp(t *testing.T) {
 
 func TestAssetBucketUploadServeAndList(t *testing.T) {
 	app := newTestServer(t)
+	app.cfg.Server.PublicBaseURL = "https://cdn.example.com"
 	create := map[string]any{
 		"slug":          "markdown",
 		"name":          "Markdown",
@@ -1478,9 +1526,20 @@ func TestAssetBucketUploadServeAndList(t *testing.T) {
 	var uploadResult struct {
 		BucketObject model.AssetBucketObject `json:"bucket_object"`
 		URL          string                  `json:"url"`
+		PublicURL    string                  `json:"public_url"`
+		URLs         []string                `json:"urls"`
 	}
 	if err := json.Unmarshal(uploadRec.Body.Bytes(), &uploadResult); err != nil {
 		t.Fatal(err)
+	}
+	if uploadResult.URL != "/a/markdown/docs/readme.md" {
+		t.Fatalf("url = %q", uploadResult.URL)
+	}
+	if want := "https://cdn.example.com/a/markdown/docs/readme.md"; uploadResult.PublicURL != want {
+		t.Fatalf("public_url = %q want %q", uploadResult.PublicURL, want)
+	}
+	if len(uploadResult.URLs) != 1 || uploadResult.URLs[0] != uploadResult.PublicURL {
+		t.Fatalf("urls = %#v public_url=%q", uploadResult.URLs, uploadResult.PublicURL)
 	}
 	if uploadResult.BucketObject.AssetType != model.AssetTypeDocument {
 		t.Fatalf("asset type = %q", uploadResult.BucketObject.AssetType)
@@ -1505,6 +1564,102 @@ func TestAssetBucketUploadServeAndList(t *testing.T) {
 	}
 	if !strings.Contains(listRec.Body.String(), `"logical_path":"docs/readme.md"`) {
 		t.Fatalf("list did not include uploaded object: %s", listRec.Body.String())
+	}
+}
+
+func TestAssetBucketUploadReturnsCDNURL(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.Server.PublicBaseURL = "https://origin.example.com"
+	app.cfg.RouteProfiles = []config.RouteProfile{{
+		Name:                "overseas_r2",
+		Primary:             "remote",
+		DefaultCacheControl: "public, max-age=31536000, immutable",
+		AllowRedirect:       true,
+	}}
+	app.stores = storage.NewManager([]storage.Store{&signedLocatorStore{
+		name:          "remote",
+		statLocator:   "https://r2.example.com/assets/poster.jpg?sig=fresh",
+		publicLocator: "https://r2.example.com/assets/poster.jpg",
+	}})
+	raw, _ := json.Marshal(map[string]any{
+		"slug":          "posters",
+		"name":          "Posters",
+		"route_profile": "overseas_r2",
+		"allowed_types": []string{"image"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/asset-buckets", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create bucket status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	body, ctype := multipartBody(t, map[string]string{"path": "images/poster.jpg"}, "file", "poster.jpg", []byte("jpg"))
+	upload := httptest.NewRequest(http.MethodPost, "/api/v1/asset-buckets/posters/objects", body)
+	upload.Header.Set("Content-Type", ctype)
+	upload.Header.Set("Authorization", "Bearer test-token")
+	uploadRec := httptest.NewRecorder()
+	app.ServeHTTP(uploadRec, upload)
+	if uploadRec.Code != http.StatusCreated {
+		t.Fatalf("upload bucket object status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var result struct {
+		PublicURL  string   `json:"public_url"`
+		CDNURL     string   `json:"cdn_url"`
+		StorageURL string   `json:"storage_url"`
+		URLs       []string `json:"urls"`
+	}
+	if err := json.Unmarshal(uploadRec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.PublicURL != "https://origin.example.com/a/posters/images/poster.jpg" {
+		t.Fatalf("public_url = %q", result.PublicURL)
+	}
+	if want := "https://r2.example.com/assets/poster.jpg?sig=fresh"; result.CDNURL != want || result.StorageURL != want {
+		t.Fatalf("cdn_url=%q storage_url=%q want %q", result.CDNURL, result.StorageURL, want)
+	}
+	if len(result.URLs) != 2 || result.URLs[0] != result.PublicURL || result.URLs[1] != result.CDNURL {
+		t.Fatalf("urls = %#v", result.URLs)
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "/a/posters/images/poster.jpg", nil)
+	out := httptest.NewRecorder()
+	app.ServeHTTP(out, get)
+	if out.Code != http.StatusFound {
+		t.Fatalf("bucket read status = %d body=%s", out.Code, out.Body.String())
+	}
+	if got, want := out.Header().Get("Location"), "https://r2.example.com/assets/poster.jpg"; got != want {
+		t.Fatalf("redirect location = %q want %q", got, want)
+	}
+}
+
+func TestListAssetBucketsReturnsUsage(t *testing.T) {
+	app := newTestServer(t)
+	createAssetBucketForTest(t, app, "docs")
+	uploadBucketObjectForTest(t, app, "docs", "readme.md", []byte("hello bucket list"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/asset-buckets", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list buckets status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Buckets []model.AssetBucket `json:"buckets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Buckets) != 1 {
+		t.Fatalf("bucket count = %d", len(result.Buckets))
+	}
+	if result.Buckets[0].ObjectCount != 1 || result.Buckets[0].UsedBytes != int64(len("hello bucket list")) {
+		t.Fatalf("usage = objects:%d bytes:%d", result.Buckets[0].ObjectCount, result.Buckets[0].UsedBytes)
 	}
 }
 
@@ -1924,6 +2079,44 @@ func createDeployment(t *testing.T, app *Server, siteID string, files map[string
 	return created.DeploymentID
 }
 
+func recordCloudflareStaticDeploymentForTest(t *testing.T, app *Server, siteID string, promote bool) string {
+	t.Helper()
+	raw, _ := json.Marshal(map[string]any{
+		"environment":         "production",
+		"route_profile":       "overseas",
+		"deployment_target":   "cloudflare_static",
+		"worker_name":         "supercdn-" + siteID + "-static",
+		"version_id":          newDeploymentID(),
+		"domains":             []string{siteID + ".example.com"},
+		"compatibility_date":  "2026-04-29",
+		"cache_policy":        "auto",
+		"headers_generated":   true,
+		"not_found_handling":  "single-page-application",
+		"verification_status": "ok",
+		"verified_at_utc":     "2026-04-29T00:00:01Z",
+		"file_count":          2,
+		"total_size":          1200,
+		"published_at_utc":    "2026-04-29T00:00:00Z",
+		"promote":             promote,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites/"+siteID+"/cloudflare-static/deployments", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("record static deployment status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var dep model.SiteDeployment
+	if err := json.Unmarshal(rec.Body.Bytes(), &dep); err != nil {
+		t.Fatal(err)
+	}
+	if dep.ID == "" {
+		t.Fatalf("record response missing deployment id: %s", rec.Body.String())
+	}
+	return dep.ID
+}
+
 func contains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -1944,6 +2137,12 @@ func (s *signedLocatorStore) Name() string { return s.name }
 func (s *signedLocatorStore) Type() string { return "signed-test" }
 
 func (s *signedLocatorStore) Put(context.Context, storage.PutOptions) (string, error) {
+	if s.publicLocator != "" {
+		return "resource-library://" + s.name + "?locator=" + url.QueryEscape(s.publicLocator), nil
+	}
+	if s.statLocator != "" {
+		return s.statLocator, nil
+	}
 	return "", errors.New("not implemented")
 }
 

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -107,6 +108,8 @@ func main() {
 		err = e2eProbe(c, args[1:])
 	case "create-bucket":
 		err = createBucket(c, args[1:])
+	case "create-cdn-bucket":
+		err = createCDNBucket(c, args[1:])
 	case "init-bucket":
 		err = initBucket(c, args[1:])
 	case "upload-bucket":
@@ -544,6 +547,11 @@ func deploySite(c client, args []string) error {
 	staticCachePolicy := fs.String("static-cache-policy", cloudflareStaticCachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
 	staticNotFoundHandling := fs.String("static-not-found-handling", "", "Cloudflare Static not_found_handling: none, 404-page, or single-page-application")
 	staticSPA := fs.Bool("static-spa", false, "enable Cloudflare Static single-page-application fallback")
+	staticVerify := fs.String("static-verify", cloudflareStaticVerifyWait, "Cloudflare Static readiness check: wait, warn, or none")
+	staticVerifyTimeout := fs.Duration("static-verify-timeout", 2*time.Minute, "maximum time to wait for Cloudflare Static custom domains")
+	staticVerifyInterval := fs.Duration("static-verify-interval", 5*time.Second, "delay between Cloudflare Static readiness probes")
+	staticVerifySPAPath := fs.String("static-verify-spa-path", "", "SPA path to verify after Cloudflare Static publish; defaults to /__supercdn_spa_probe when -static-spa is enabled")
+	staticVerifyResolver := fs.String("static-verify-resolver", "1.1.1.1:53", "DNS resolver for Cloudflare Static readiness probes")
 	_ = fs.Parse(args)
 	if *site == "" {
 		return errors.New("-site is required")
@@ -592,6 +600,11 @@ func deploySite(c client, args []string) error {
 			Message:           *staticMessage,
 			CachePolicy:       *staticCachePolicy,
 			NotFoundHandling:  cloudflareStaticNotFoundHandlingFlag(*staticNotFoundHandling, *staticSPA),
+			VerifyMode:        *staticVerify,
+			VerifyTimeout:     *staticVerifyTimeout,
+			VerifyInterval:    *staticVerifyInterval,
+			VerifySPAPath:     *staticVerifySPAPath,
+			VerifyResolver:    *staticVerifyResolver,
 			Promote:           *promote,
 			Pinned:            *pinned,
 		})
@@ -680,6 +693,11 @@ type cloudflareStaticDeploySiteOptions struct {
 	Message           string
 	CachePolicy       string
 	NotFoundHandling  string
+	VerifyMode        string
+	VerifyTimeout     time.Duration
+	VerifyInterval    time.Duration
+	VerifySPAPath     string
+	VerifyResolver    string
 	Promote           bool
 	Pinned            bool
 }
@@ -712,25 +730,194 @@ func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions
 		_ = printJSON(raw)
 		return err
 	}
+	verify, err := verifyCloudflareStaticPublish(context.Background(), cloudflareStaticVerifyOptions{
+		Mode:                        opts.VerifyMode,
+		Domains:                     opts.Domains,
+		Timeout:                     opts.VerifyTimeout,
+		Interval:                    opts.VerifyInterval,
+		SPAPath:                     opts.VerifySPAPath,
+		Resolver:                    opts.VerifyResolver,
+		NotFoundHandling:            publish.NotFoundHandling,
+		RequireGeneratedCachePolicy: publish.HeadersGenerated,
+	})
+	if err != nil {
+		raw, _ := json.Marshal(verify)
+		_ = printJSON(raw)
+		return err
+	}
 	req := map[string]any{
-		"environment":        opts.Environment,
-		"route_profile":      opts.RouteProfile,
-		"deployment_target":  "cloudflare_static",
-		"worker_name":        workerName,
-		"version_id":         extractCloudflareVersionID(publish.Output),
-		"domains":            opts.Domains,
-		"compatibility_date": opts.CompatibilityDate,
-		"assets_sha256":      stats.SHA256,
-		"file_count":         stats.FileCount,
-		"total_size":         stats.TotalSize,
-		"cache_policy":       publish.CachePolicy,
-		"headers_generated":  publish.HeadersGenerated,
-		"not_found_handling": publish.NotFoundHandling,
-		"published_at_utc":   time.Now().UTC().Format(time.RFC3339Nano),
-		"promote":            opts.Promote,
-		"pinned":             opts.Pinned,
+		"environment":         opts.Environment,
+		"route_profile":       opts.RouteProfile,
+		"deployment_target":   "cloudflare_static",
+		"worker_name":         workerName,
+		"version_id":          extractCloudflareVersionID(publish.Output),
+		"domains":             opts.Domains,
+		"compatibility_date":  opts.CompatibilityDate,
+		"assets_sha256":       stats.SHA256,
+		"file_count":          stats.FileCount,
+		"total_size":          stats.TotalSize,
+		"cache_policy":        publish.CachePolicy,
+		"headers_generated":   publish.HeadersGenerated,
+		"not_found_handling":  publish.NotFoundHandling,
+		"verification_status": verify.Status,
+		"verified_at_utc":     time.Now().UTC().Format(time.RFC3339Nano),
+		"published_at_utc":    time.Now().UTC().Format(time.RFC3339Nano),
+		"promote":             opts.Promote,
+		"pinned":              opts.Pinned,
 	}
 	return c.doJSON(http.MethodPost, "/api/v1/sites/"+url.PathEscape(opts.Site)+"/cloudflare-static/deployments", req)
+}
+
+type cloudflareStaticVerifyOptions struct {
+	Mode                        string
+	Domains                     []string
+	Timeout                     time.Duration
+	Interval                    time.Duration
+	SPAPath                     string
+	Resolver                    string
+	NotFoundHandling            string
+	RequireGeneratedCachePolicy bool
+}
+
+type cloudflareStaticVerifyReport struct {
+	Status   string             `json:"status"`
+	Mode     string             `json:"mode"`
+	Domains  []string           `json:"domains,omitempty"`
+	Attempts int                `json:"attempts,omitempty"`
+	Reports  []siteprobe.Report `json:"reports,omitempty"`
+	Warnings []string           `json:"warnings,omitempty"`
+	Errors   []string           `json:"errors,omitempty"`
+}
+
+func verifyCloudflareStaticPublish(ctx context.Context, opts cloudflareStaticVerifyOptions) (cloudflareStaticVerifyReport, error) {
+	mode, err := normalizeCloudflareStaticVerifyMode(opts.Mode)
+	if err != nil {
+		return cloudflareStaticVerifyReport{}, err
+	}
+	domains := cleanDomains(opts.Domains)
+	report := cloudflareStaticVerifyReport{Status: "planned", Mode: mode, Domains: domains}
+	if mode == cloudflareStaticVerifyNone {
+		report.Status = "skipped"
+		return report, nil
+	}
+	if len(domains) == 0 {
+		report.Status = "skipped"
+		report.Warnings = append(report.Warnings, "no custom domains to verify")
+		return report, nil
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	interval := opts.Interval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	spaPath := strings.TrimSpace(opts.SPAPath)
+	if spaPath == "" && opts.NotFoundHandling == cloudflareStaticNotFoundSPA {
+		spaPath = "/__supercdn_spa_probe"
+	}
+	httpClient, err := httpClientWithDNSResolver(opts.Resolver)
+	if err != nil {
+		return cloudflareStaticVerifyReport{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var last []siteprobe.Report
+	for {
+		report.Attempts++
+		last = probeCloudflareStaticDomains(ctx, domains, siteprobe.Options{
+			SPAPath:                    spaPath,
+			MaxAssets:                  20,
+			Timeout:                    30 * time.Second,
+			Client:                     httpClient,
+			RequireDirectAssets:        true,
+			RequireHTMLRevalidate:      opts.RequireGeneratedCachePolicy,
+			RequireImmutableAssetCache: opts.RequireGeneratedCachePolicy,
+		})
+		if cloudflareStaticReportsOK(last) {
+			report.Status = "ok"
+			report.Reports = last
+			return report, nil
+		}
+		if mode == cloudflareStaticVerifyWarn {
+			report.Status = "warning"
+			report.Reports = last
+			report.Warnings = append(report.Warnings, "Cloudflare Static readiness probe failed; deployment will still be recorded")
+			_, _ = fmt.Fprintln(os.Stderr, "warning: Cloudflare Static readiness probe failed; continuing because -static-verify=warn")
+			return report, nil
+		}
+		select {
+		case <-ctx.Done():
+			report.Status = "failed"
+			report.Reports = last
+			report.Errors = append(report.Errors, "Cloudflare Static readiness probe did not pass before timeout")
+			return report, errors.New("cloudflare static readiness probe failed")
+		case <-time.After(interval):
+		}
+	}
+}
+
+func probeCloudflareStaticDomains(ctx context.Context, domains []string, opts siteprobe.Options) []siteprobe.Report {
+	reports := make([]siteprobe.Report, 0, len(domains))
+	for _, domain := range domains {
+		probeOpts := opts
+		probeOpts.URL = "https://" + domain + "/"
+		report, err := siteprobe.Run(ctx, probeOpts)
+		if err != nil {
+			report = siteprobe.Report{
+				OK:      false,
+				Status:  "failed",
+				URL:     probeOpts.URL,
+				Errors:  []string{err.Error()},
+				Summary: map[string]int{},
+			}
+		}
+		reports = append(reports, report)
+	}
+	return reports
+}
+
+func cloudflareStaticReportsOK(reports []siteprobe.Report) bool {
+	if len(reports) == 0 {
+		return false
+	}
+	for _, report := range reports {
+		if !report.OK {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeCloudflareStaticVerifyMode(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", cloudflareStaticVerifyWait:
+		return cloudflareStaticVerifyWait, nil
+	case cloudflareStaticVerifyWarn:
+		return cloudflareStaticVerifyWarn, nil
+	case cloudflareStaticVerifyNone:
+		return cloudflareStaticVerifyNone, nil
+	default:
+		return "", fmt.Errorf("static-verify must be wait, warn, or none")
+	}
+}
+
+func cleanDomains(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		host := strings.ToLower(strings.TrimSpace(value))
+		host = strings.TrimPrefix(host, "https://")
+		host = strings.TrimPrefix(host, "http://")
+		host = strings.Trim(host, "/")
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		out = append(out, host)
+	}
+	return out
 }
 
 func inspectSite(args []string) error {
@@ -772,8 +959,12 @@ func probeSite(c client, args []string) error {
 	production := fs.Bool("production", false, "probe the production URL when -deployment is set")
 	spaPath := fs.String("spa-path", "", "optional SPA route path to verify as HTML")
 	origin := fs.String("origin", "", "Origin header for redirected asset checks; defaults to the probe URL origin")
+	resolver := fs.String("resolver", "", "DNS resolver for HTTP probes, for example 1.1.1.1:53")
 	maxAssets := fs.Int("max-assets", 20, "maximum JS/CSS assets to probe from index HTML")
 	timeout := fs.Duration("timeout", 30*time.Second, "overall probe timeout")
+	requireDirectAssets := fs.Bool("require-direct-assets", false, "fail if JS/CSS assets redirect away from the probed site")
+	requireHTMLRevalidate := fs.Bool("require-html-revalidate", false, "fail if root HTML is not served with a revalidating cache policy")
+	requireImmutableAssets := fs.Bool("require-immutable-assets", false, "fail if JS/CSS assets are not served with immutable long-term cache policy")
 	_ = fs.Parse(args)
 	if *preview && *production {
 		return errors.New("use either -preview or -production, not both")
@@ -796,12 +987,20 @@ func probeSite(c client, args []string) error {
 			return err
 		}
 	}
+	httpClient, err := httpClientWithDNSResolver(*resolver)
+	if err != nil {
+		return err
+	}
 	report, err := siteprobe.Run(context.Background(), siteprobe.Options{
-		URL:       targetURL,
-		Origin:    *origin,
-		SPAPath:   *spaPath,
-		MaxAssets: *maxAssets,
-		Timeout:   *timeout,
+		URL:                        targetURL,
+		Origin:                     *origin,
+		SPAPath:                    *spaPath,
+		MaxAssets:                  *maxAssets,
+		Timeout:                    *timeout,
+		Client:                     httpClient,
+		RequireDirectAssets:        *requireDirectAssets,
+		RequireHTMLRevalidate:      *requireHTMLRevalidate,
+		RequireImmutableAssetCache: *requireImmutableAssets,
 	})
 	if err != nil {
 		return err
@@ -1004,6 +1203,10 @@ const (
 	cloudflareStaticHTMLCacheControl      = "public, max-age=0, must-revalidate"
 	cloudflareStaticShortCacheControl     = "public, max-age=300, must-revalidate"
 	cloudflareStaticImmutableCacheControl = "public, max-age=31536000, immutable"
+
+	cloudflareStaticVerifyWait = "wait"
+	cloudflareStaticVerifyWarn = "warn"
+	cloudflareStaticVerifyNone = "none"
 )
 
 func publishCloudflareStatic(args []string) error {
@@ -1499,6 +1702,34 @@ func runCommand(name string, args, env []string) (string, int, error) {
 	return string(raw), -1, err
 }
 
+func httpClientWithDNSResolver(resolverAddress string) (*http.Client, error) {
+	resolverAddress = strings.TrimSpace(resolverAddress)
+	if resolverAddress == "" {
+		return nil, nil
+	}
+	if !strings.Contains(resolverAddress, ":") {
+		resolverAddress += ":53"
+	}
+	if _, _, err := net.SplitHostPort(resolverAddress); err != nil {
+		return nil, fmt.Errorf("invalid resolver %q: %w", resolverAddress, err)
+	}
+	resolverDialer := &net.Dialer{Timeout: 5 * time.Second}
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return resolverDialer.DialContext(ctx, network, resolverAddress)
+		},
+	}
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Resolver:  resolver,
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = dialer.DialContext
+	return &http.Client{Transport: transport}, nil
+}
+
 func cleanWorkerName(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	var b strings.Builder
@@ -1637,15 +1868,23 @@ func e2eProbe(c client, args []string) error {
 }
 
 func createBucket(c client, args []string) error {
-	fs := flag.NewFlagSet("create-bucket", flag.ExitOnError)
+	return createBucketWithDefaults(c, args, "create-bucket", "china_all", "")
+}
+
+func createCDNBucket(c client, args []string) error {
+	return createBucketWithDefaults(c, args, "create-cdn-bucket", "overseas_r2", "public, max-age=31536000, immutable")
+}
+
+func createBucketWithDefaults(c client, args []string, commandName, defaultProfile, defaultCacheControl string) error {
+	fs := flag.NewFlagSet(commandName, flag.ExitOnError)
 	slug := fs.String("slug", "", "bucket slug")
 	name := fs.String("name", "", "bucket display name")
 	description := fs.String("description", "", "bucket description")
-	profile := fs.String("profile", "china_all", "default route profile")
+	profile := fs.String("profile", defaultProfile, "default route profile")
 	types := fs.String("types", "", "comma-separated asset types: image,video,document,archive,other")
 	maxCapacity := fs.Int64("max-capacity", 0, "bucket capacity limit in bytes; 0 means unlimited")
 	maxFileSize := fs.Int64("max-file-size", 0, "single file limit in bytes; 0 means unlimited")
-	cacheControl := fs.String("cache-control", "", "default Cache-Control value")
+	cacheControl := fs.String("cache-control", defaultCacheControl, "default Cache-Control value")
 	_ = fs.Parse(args)
 	if *slug == "" {
 		return errors.New("-slug is required")
@@ -1681,6 +1920,9 @@ func uploadBucket(c client, args []string) error {
 	dst := fs.String("path", "", "logical path inside the bucket")
 	assetType := fs.String("asset-type", "", "optional asset type override")
 	cacheControl := fs.String("cache-control", "", "Cache-Control value override")
+	warmup := fs.Bool("warmup", false, "warm the uploaded public URL after upload")
+	warmupMethod := fs.String("warmup-method", http.MethodHead, "warmup method: HEAD or GET")
+	warmupBaseURL := fs.String("warmup-base-url", "", "public base URL override for warmup")
 	_ = fs.Parse(args)
 	if *bucket == "" || *file == "" || *dst == "" {
 		return errors.New("-bucket, -file and -path are required")
@@ -1690,7 +1932,33 @@ func uploadBucket(c client, args []string) error {
 		"asset_type":    *assetType,
 		"cache_control": *cacheControl,
 	}
-	return c.uploadFile("/api/v1/asset-buckets/"+url.PathEscape(*bucket)+"/objects", "file", *file, fields)
+	apiPath := "/api/v1/asset-buckets/" + url.PathEscape(*bucket) + "/objects"
+	if !*warmup {
+		return c.uploadFile(apiPath, "file", *file, fields)
+	}
+	uploadRaw, err := c.uploadFileRaw(apiPath, "file", *file, fields)
+	if err != nil {
+		return err
+	}
+	warmupRaw, err := c.doJSONRaw(http.MethodPost, "/api/v1/asset-buckets/"+url.PathEscape(*bucket)+"/warmup", map[string]any{
+		"path":     *dst,
+		"method":   *warmupMethod,
+		"base_url": *warmupBaseURL,
+	})
+	if err != nil {
+		return fmt.Errorf("upload succeeded but warmup failed: %w", err)
+	}
+	out, err := json.Marshal(struct {
+		Upload json.RawMessage `json:"upload"`
+		Warmup json.RawMessage `json:"warmup"`
+	}{
+		Upload: json.RawMessage(uploadRaw),
+		Warmup: json.RawMessage(warmupRaw),
+	})
+	if err != nil {
+		return err
+	}
+	return printJSON(out)
 }
 
 func listBucket(c client, args []string) error {
@@ -2266,10 +2534,11 @@ func usage() {
   supercdnctl [global flags] create-r2-credentials -cloudflare-account cf_business_main -write-config .\configs\config.local.json -dry-run=false
   supercdnctl set-r2-credentials -config .\configs\config.local.json -cloudflare-account cf_business_main -access-key-id <id> -secret-access-key <secret>
   supercdnctl [global flags] deploy-site -site blog -dir ./dist -profile china_all -target hybrid_edge
+  supercdnctl [global flags] deploy-site -site blog -dir ./dist -profile overseas -static-spa
   supercdnctl [global flags] deploy-site -site blog -bundle ./dist.zip -env preview
   supercdnctl inspect-site -dir ./dist
   supercdnctl [global flags] probe-site -site blog -spa-path /movie/123
-  supercdnctl probe-site -url https://blog.example.com/ -max-assets 20
+  supercdnctl probe-site -url https://blog.example.com/ -max-assets 20 -require-direct-assets
   supercdnctl [global flags] list-deployments -site blog
   supercdnctl [global flags] deployment -site blog -deployment dpl-abc
   supercdnctl [global flags] export-edge-manifest -site blog -deployment dpl-abc -out .\edge-manifest.json
@@ -2284,8 +2553,9 @@ func usage() {
   supercdnctl [global flags] health-check -libraries repo_china_all
   supercdnctl [global flags] e2e-probe -profile china_all
   supercdnctl [global flags] create-bucket -slug movie-posters -name 影视海报桶 -profile china_all -types image
+  supercdnctl [global flags] create-cdn-bucket -slug movie-posters -name movie-posters -types image
   supercdnctl [global flags] init-bucket -bucket movie-posters
-  supercdnctl [global flags] upload-bucket -bucket movie-posters -file poster.jpg -path posters/poster.jpg
+  supercdnctl [global flags] upload-bucket -bucket movie-posters -file poster.jpg -path posters/poster.jpg -warmup
   supercdnctl [global flags] list-bucket -bucket movie-posters
   supercdnctl [global flags] purge-bucket -bucket movie-posters -prefix posters/ -dry-run
   supercdnctl [global flags] warmup-bucket -bucket movie-posters -path posters/poster.jpg -dry-run

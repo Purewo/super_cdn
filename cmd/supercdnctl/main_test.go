@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -143,6 +144,122 @@ func TestResolveSiteDeploymentTargetCallsControlPlane(t *testing.T) {
 	}
 	if defaults.DeploymentTarget != "cloudflare_static" || len(defaults.Domains) != 1 || defaults.Domains[0] != "demo.sites.example.com" {
 		t.Fatalf("unexpected defaults: %+v", defaults)
+	}
+}
+
+func TestNormalizeCloudflareStaticVerifyMode(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"", "wait"},
+		{"WAIT", "wait"},
+		{"warn", "warn"},
+		{"none", "none"},
+	} {
+		got, err := normalizeCloudflareStaticVerifyMode(tc.in)
+		if err != nil {
+			t.Fatalf("normalize %q: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("normalize %q = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if _, err := normalizeCloudflareStaticVerifyMode("off"); err == nil {
+		t.Fatal("expected invalid verify mode error")
+	}
+}
+
+func TestCreateCDNBucketUsesOverseasDefaults(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/asset-buckets" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", auth)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"slug":"posters"}`))
+	}))
+	defer srv.Close()
+
+	err := createCDNBucket(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+		"-slug", "posters",
+		"-name", "Posters",
+		"-types", "image,archive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["route_profile"] != "overseas_r2" {
+		t.Fatalf("route_profile = %#v", got["route_profile"])
+	}
+	if got["default_cache_control"] != "public, max-age=31536000, immutable" {
+		t.Fatalf("default_cache_control = %#v", got["default_cache_control"])
+	}
+	types, ok := got["allowed_types"].([]any)
+	if !ok || len(types) != 2 || types[0] != "image" || types[1] != "archive" {
+		t.Fatalf("allowed_types = %#v", got["allowed_types"])
+	}
+}
+
+func TestUploadBucketWarmupCallsWarmupEndpoint(t *testing.T) {
+	var uploadSeen, warmupSeen bool
+	var warmupReq map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/asset-buckets/posters/objects":
+			uploadSeen = true
+			if r.Method != http.MethodPost {
+				t.Fatalf("upload method = %s", r.Method)
+			}
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.FormValue("path"); got != "images/one.png" {
+				t.Fatalf("upload path = %q", got)
+			}
+			if got := r.FormValue("asset_type"); got != "image" {
+				t.Fatalf("asset_type = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"bucket":"posters","public_url":"https://cdn.example.com/a/posters/images/one.png"}`))
+		case "/api/v1/asset-buckets/posters/warmup":
+			warmupSeen = true
+			if r.Method != http.MethodPost {
+				t.Fatalf("warmup method = %s", r.Method)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&warmupReq); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"bucket":"posters","status":"ok","urls":["https://cdn.example.com/a/posters/images/one.png"]}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	file := filepath.Join(t.TempDir(), "one.png")
+	writeTestFile(t, file, "png")
+	err := uploadBucket(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+		"-bucket", "posters",
+		"-file", file,
+		"-path", "images/one.png",
+		"-asset-type", "image",
+		"-warmup",
+		"-warmup-method", "GET",
+		"-warmup-base-url", "https://cdn.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !uploadSeen || !warmupSeen {
+		t.Fatalf("uploadSeen=%v warmupSeen=%v", uploadSeen, warmupSeen)
+	}
+	if warmupReq["path"] != "images/one.png" || warmupReq["method"] != "GET" || warmupReq["base_url"] != "https://cdn.example.com" {
+		t.Fatalf("warmup request = %#v", warmupReq)
 	}
 }
 

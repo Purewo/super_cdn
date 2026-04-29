@@ -60,16 +60,18 @@ type SiteDeployment struct {
 }
 
 type CloudflareStaticDeployment struct {
-	WorkerName        string    `json:"worker_name"`
-	VersionID         string    `json:"version_id,omitempty"`
-	Domains           []string  `json:"domains,omitempty"`
-	URLs              []string  `json:"urls,omitempty"`
-	CompatibilityDate string    `json:"compatibility_date,omitempty"`
-	AssetsSHA256      string    `json:"assets_sha256,omitempty"`
-	CachePolicy       string    `json:"cache_policy,omitempty"`
-	HeadersGenerated  bool      `json:"headers_generated,omitempty"`
-	NotFoundHandling  string    `json:"not_found_handling,omitempty"`
-	PublishedAt       time.Time `json:"published_at,omitempty"`
+	WorkerName         string    `json:"worker_name"`
+	VersionID          string    `json:"version_id,omitempty"`
+	Domains            []string  `json:"domains,omitempty"`
+	URLs               []string  `json:"urls,omitempty"`
+	CompatibilityDate  string    `json:"compatibility_date,omitempty"`
+	AssetsSHA256       string    `json:"assets_sha256,omitempty"`
+	CachePolicy        string    `json:"cache_policy,omitempty"`
+	HeadersGenerated   bool      `json:"headers_generated,omitempty"`
+	NotFoundHandling   string    `json:"not_found_handling,omitempty"`
+	VerificationStatus string    `json:"verification_status,omitempty"`
+	VerifiedAt         time.Time `json:"verified_at,omitempty"`
+	PublishedAt        time.Time `json:"published_at,omitempty"`
 }
 
 type SiteDeploymentFile struct {

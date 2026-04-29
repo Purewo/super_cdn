@@ -96,3 +96,39 @@ func TestRunFailsOnHTMLServedAsScript(t *testing.T) {
 		t.Fatalf("expected asset MIME error: %+v", report.Assets)
 	}
 }
+
+func TestRunCanRequireCloudflareStaticCacheAndDirectAssets(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
+			_, _ = w.Write([]byte(`<script type="module" src="/assets/app.js"></script><link rel="stylesheet" href="/assets/app.css">`))
+		case "/assets/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			_, _ = w.Write([]byte("console.log('ok')"))
+		case "/assets/app.css":
+			w.Header().Set("Content-Type", "text/css")
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			_, _ = w.Write([]byte("body{}"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer origin.Close()
+
+	report, err := Run(context.Background(), Options{
+		URL:                        origin.URL + "/",
+		Timeout:                    5 * time.Second,
+		RequireDirectAssets:        true,
+		RequireHTMLRevalidate:      true,
+		RequireImmutableAssetCache: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.OK {
+		t.Fatalf("expected ok report: %+v", report)
+	}
+}
