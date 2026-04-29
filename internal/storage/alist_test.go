@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -256,6 +257,7 @@ func TestAListRefreshesExpiredTokenAndRetriesStat(t *testing.T) {
 }
 
 func TestAListRefreshesExpiredTokenAndRetriesPut(t *testing.T) {
+	dirs := map[string]bool{"/repo": true, "/repo/dir": true}
 	var putCalls int
 	var loginCalls int
 	var uploadedPath string
@@ -271,6 +273,18 @@ func TestAListRefreshesExpiredTokenAndRetriesPut(t *testing.T) {
 					"token": "fresh-token",
 				},
 			})
+		case "/api/fs/list":
+			var req struct {
+				Path string `json:"path"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if dirs[req.Path] {
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "message": "success", "data": map[string]any{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 404, "message": "not found"})
 		case "/api/fs/put":
 			putCalls++
 			switch r.Header.Get("Authorization") {
@@ -320,5 +334,85 @@ func TestAListRefreshesExpiredTokenAndRetriesPut(t *testing.T) {
 	}
 	if uploadedPath != "/repo/dir/probe.txt" || uploadedBody != "mobile probe" {
 		t.Fatalf("uploaded path=%q body=%q", uploadedPath, uploadedBody)
+	}
+}
+
+func TestAListPutCreatesParentDirectories(t *testing.T) {
+	var mu sync.Mutex
+	dirs := map[string]bool{"/repo": true}
+	var made []string
+	var uploadedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/fs/list":
+			var req struct {
+				Path string `json:"path"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			exists := dirs[req.Path]
+			mu.Unlock()
+			if exists {
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "message": "success", "data": map[string]any{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 404, "message": "not found"})
+		case "/api/fs/mkdir":
+			var req struct {
+				Path string `json:"path"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			dirs[req.Path] = true
+			made = append(made, req.Path)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "message": "success"})
+		case "/api/fs/put":
+			uploadedPath = r.Header.Get("File-Path")
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "message": "success"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	file := filepath.Join(t.TempDir(), "app.js")
+	if err := os.WriteFile(file, []byte("console.log('ok')"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewAListStore(AListOptions{
+		Name:    "alist",
+		BaseURL: server.URL,
+		Token:   "token",
+		Root:    "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(context.Background(), PutOptions{
+		Key:      "sites/demo/deployments/dpl/root/assets/app.js",
+		FilePath: file,
+		Size:     int64(len("console.log('ok')")),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wantMade := []string{
+		"/repo/sites",
+		"/repo/sites/demo",
+		"/repo/sites/demo/deployments",
+		"/repo/sites/demo/deployments/dpl",
+		"/repo/sites/demo/deployments/dpl/root",
+		"/repo/sites/demo/deployments/dpl/root/assets",
+	}
+	if strings.Join(made, "\n") != strings.Join(wantMade, "\n") {
+		t.Fatalf("made dirs = %#v", made)
+	}
+	if uploadedPath != "/repo/sites/demo/deployments/dpl/root/assets/app.js" {
+		t.Fatalf("uploaded path = %q", uploadedPath)
 	}
 }

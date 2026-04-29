@@ -278,6 +278,9 @@ func (s *AListStore) putReader(ctx context.Context, key string, body io.Reader, 
 	if _, err := CleanObjectPath(key); err != nil {
 		return err
 	}
+	if err := s.ensureParentDir(ctx, key); err != nil {
+		return err
+	}
 	var buildCount int
 	var resp aListEnvelope[any]
 	if err := s.doAuthorizedJSON(ctx, func() (*http.Request, error) {
@@ -307,6 +310,60 @@ func (s *AListStore) putReader(ctx context.Context, key string, body io.Reader, 
 	}
 	if resp.Code != 200 {
 		return fmt.Errorf("alist upload failed: code=%d message=%s", resp.Code, resp.Message)
+	}
+	return nil
+}
+
+func (s *AListStore) ensureParentDir(ctx context.Context, key string) error {
+	remote := path.Clean(s.remotePath(key))
+	parent := path.Dir(remote)
+	root := path.Clean(s.root)
+	if root == "." || root == "" {
+		root = "/"
+	}
+	if parent == "." || parent == "" {
+		parent = "/"
+	}
+	if root != "/" {
+		exists, err := s.dirExists(ctx, root)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("alist root path %q does not exist", root)
+		}
+	}
+	if parent == root || parent == "/" {
+		return nil
+	}
+	rel := strings.TrimPrefix(parent, root)
+	if root == "/" {
+		rel = strings.TrimPrefix(parent, "/")
+	}
+	rel = strings.Trim(rel, "/")
+	if rel == "" {
+		return nil
+	}
+	current := root
+	for _, part := range strings.Split(rel, "/") {
+		if part == "" {
+			continue
+		}
+		if current == "/" {
+			current = "/" + part
+		} else {
+			current = path.Join(current, part)
+		}
+		exists, err := s.dirExists(ctx, current)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := s.mkdir(ctx, current); err != nil {
+			return fmt.Errorf("ensure alist dir %q: %w", current, err)
+		}
 	}
 	return nil
 }

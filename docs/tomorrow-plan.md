@@ -40,6 +40,8 @@ china mobile AList retry binary update: 2026-04-30 Asia/Shanghai, backed up unde
 china mobile AList retry deployed binary hashes: supercdn b97fe62869332e48d5d867f4a8f65ae419c58cd5bc4bf840f92ee79d26df61d9, supercdnctl 985854afc5203b803c6ce20d3666886d6d699645acf9bed80673f42393a4724d
 domestic CDN bucket binary update: 2026-04-30 Asia/Shanghai, backed up under /opt/supercdn/backups/20260429T211742Z-domestic-cdn-bucket
 domestic CDN bucket deployed binary hashes: supercdn 6d46b7e26fd9c7286a28e9037ebf729bb42425a3dc3963e703a6aa9a85b844d0, supercdnctl 07199d6ec8dfff4e25e6123a3c142650c02d22f7c9c103e68ea4cd3686607b14
+AList parent-directory binary update: 2026-04-30 Asia/Shanghai, backed up under /opt/supercdn/backups/20260429T213448Z-alist-autodirs
+AList parent-directory deployed binary hashes: supercdn 0fd51a8f9e6e35a477b72c050faf367d9d41bbf35b18af475f2f216f4c7e0808, supercdnctl e7ec37dd469ff3bea711ac82e4474a0155402593d815838b9a68e8f75b656c53
 ```
 
 Latest live validation:
@@ -56,6 +58,7 @@ overseas CDN bucket smoke: `create-cdn-bucket` + `upload-bucket -warmup` created
 asset bucket list deadlock fix: live `GET /api/v1/asset-buckets` returns after the SQLite single-connection rows/usage query fix and reports the smoke bucket with `object_count=1`.
 china_mobile line-only validation: `resource-status -library repo_china_mobile` reports `alist_mobile_primary` at `/移动资源/个人云/Super_CDN`. Passive health check passed, then write/read/delete health probe passed with list/write/read/delete latencies 1857/2038/2213/370 ms. `e2e-probe -profile china_mobile` passed with primary target `repo_china_mobile`, object id 45, upload latency 3908 ms, read latency 1976 ms, HTTP 200, and cleanup remote/db both deleted. During the first run it exposed an AList upload retry bug (`seek ... file already closed`) when token refresh was needed; fixed by preventing the HTTP client from closing the reusable file reader between auth retry attempts.
 domestic mobile CDN bucket smoke: `create-domestic-cdn-bucket -slug mobile-cdn-smoke-20260430051907 -line mobile` created a bucket with `route_profile=china_mobile` and `default_cache_control=public, max-age=86400`. `upload-bucket -warmup` stored README.md on `repo_china_mobile`, object id 46, and returned stable public URL https://qwk.ccwu.cc/a/mobile-cdn-smoke-20260430051907/docs/readme-20260430051907.md plus signed AList storage URL. Public `/a/...` HEAD returned 200 with the bucket cache header, warmup returned 200, and direct signed storage Range GET followed redirects to 206 with the expected file prefix. Direct storage HEAD can return 403 because the downstream drive rejects HEAD; GET/Range GET is the meaningful validation for that path.
+domestic mobile origin-assisted website smoke: first `deploy-site -site path2agi-mobile-go -dir test_file/path2agi -profile china_mobile -target origin_assisted -env production -promote` exposed an AList parent-directory gap because the new deployment path did not exist yet. AList uploads now create missing parent directories before `PUT`. The second deployment `dpl-di5ypwr3ukab` is active at https://qwk.ccwu.cc/s/path2agi-mobile-go/ with `route_profile=china_mobile`, `deployment_target=origin_assisted`, `delivery_summary={origin:1, redirect:1}`. Root HTML HEAD returns 200 from Go with `Cache-Control: public, max-age=300`; `path2agi-data.js` HEAD returns 302 with `X-Supercdn-Redirect: storage` to the signed mobile AList path; Range GET follows the mobile chain to 206. `probe-site -url https://qwk.ccwu.cc/s/path2agi-mobile-go/ -max-assets 5` passed with one redirected script asset and final 200.
 legacy R2 site probe: cyberstream still passes HTML, JS/CSS redirect MIME/CORS, and /movie/123 SPA fallback checks
 ```
 
@@ -260,6 +263,8 @@ AList/OpenList public links must include `sign`. The storage layer now refreshes
 
 Go HTTP redirects intentionally strip `Referer` to avoid OpenList/downstream drive `Referer check fail` errors.
 
+AList uploads create missing parent directories before `PUT`, because site deployment keys include a fresh deployment id and cannot rely on manual directory pre-creation.
+
 ## What Was Cleaned
 
 The old deployment record was removed:
@@ -377,6 +382,7 @@ Current overseas R2 decision:
 - Promote Cloudflare Static to the ordinary overseas site default path. Done locally: `deploy-site` now resolves the site/profile deployment target through `GET /api/v1/sites/{id}/deployment-target`; if `overseas.deployment_target=cloudflare_static` and no `-domains` are passed, the CLI uses existing site domains or a one-level `cloudflare.root_domain` default domain for Wrangler. Important live lesson: nested `*.sites.qwk.ccwu.cc` is fine for Go-origin DNS defaults, but Cloudflare Static custom domains should use one-level `*.qwk.ccwu.cc` hosts to avoid TLS handshake failure.
 - Make overseas object-CDN buckets easy to use. Done and live-tested: `create-cdn-bucket` creates a resource bucket with R2-backed `overseas_r2` defaults, bucket uploads now return `public_url`/`urls` and `cdn_url`/`storage_url` when a direct storage URL is available, and `upload-bucket -warmup` can immediately probe or fetch the uploaded public URL.
 - Make domestic AList/OpenList CDN buckets easy to use. Done and live-tested for the mobile line: `create-domestic-cdn-bucket` maps `-line mobile|telecom|unicom|all` to domestic route profiles, `create-mobile-cdn-bucket` is the mobile alias, uploads return stable `/a/...` public URLs plus signed AList storage URLs when available, and the live mobile smoke passed warmup, public HEAD and direct Range GET checks.
+- Make domestic AList/OpenList origin-assisted website deploys usable. Done and live-tested for the mobile line with `path2agi-mobile-go`: root `index.html` stays on Go origin, non-root JS redirects to the signed mobile AList path, and the site probe passed.
 - Teach the edge manifest to express route intent, not only route mechanics: `entry_html`, `overseas_static`, `overseas_r2`, `domestic_alist`, `fallback_origin`, plus cache/CORS expectations.
 - Keep `qwk.ccwu.cc` / ai-learning-map as a legacy domestic-chain compatibility sample. Its normal script path currently works through the AList/OpenList chain, but the final drive stream is not a clean CORS-capable module/fetch target, so probes must distinguish classic scripts from resources that actually require CORS.
 - Add a preflight warning when a built `index.html` references root-absolute files that are not present in the artifact, because SPA fallback can turn missing CSS/JS into HTML and produce browser MIME errors.
