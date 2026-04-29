@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -250,5 +252,73 @@ func TestAListRefreshesExpiredTokenAndRetriesStat(t *testing.T) {
 	}
 	if loginCalls != 1 || getCalls != 2 {
 		t.Fatalf("login calls = %d, get calls = %d", loginCalls, getCalls)
+	}
+}
+
+func TestAListRefreshesExpiredTokenAndRetriesPut(t *testing.T) {
+	var putCalls int
+	var loginCalls int
+	var uploadedPath string
+	var uploadedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/login":
+			loginCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code":    200,
+				"message": "success",
+				"data": map[string]any{
+					"token": "fresh-token",
+				},
+			})
+		case "/api/fs/put":
+			putCalls++
+			switch r.Header.Get("Authorization") {
+			case "old-token":
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 401, "message": "token is expired"})
+			case "fresh-token":
+				uploadedPath = r.Header.Get("File-Path")
+				raw, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				uploadedBody = string(raw)
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "message": "success"})
+			default:
+				t.Fatalf("unexpected authorization header")
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	file := filepath.Join(t.TempDir(), "probe.txt")
+	if err := os.WriteFile(file, []byte("mobile probe"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewAListStore(AListOptions{
+		Name:     "alist",
+		BaseURL:  server.URL,
+		Token:    "old-token",
+		Username: "admin",
+		Password: "password",
+		Root:     "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(context.Background(), PutOptions{
+		Key:      "dir/probe.txt",
+		FilePath: file,
+		Size:     int64(len("mobile probe")),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if loginCalls != 1 || putCalls != 2 {
+		t.Fatalf("login calls = %d, put calls = %d", loginCalls, putCalls)
+	}
+	if uploadedPath != "/repo/dir/probe.txt" || uploadedBody != "mobile probe" {
+		t.Fatalf("uploaded path=%q body=%q", uploadedPath, uploadedBody)
 	}
 }

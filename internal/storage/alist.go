@@ -291,7 +291,7 @@ func (s *AListStore) putReader(ctx context.Context, key string, body io.Reader, 
 			}
 		}
 		buildCount++
-		req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.baseURL+"/api/fs/put", body)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.baseURL+"/api/fs/put", io.NopCloser(body))
 		if err != nil {
 			return nil, err
 		}

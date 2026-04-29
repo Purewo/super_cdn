@@ -1,6 +1,6 @@
 # Super CDN Handoff
 
-Last updated: 2026-04-29 Asia/Shanghai.
+Last updated: 2026-04-30 Asia/Shanghai.
 
 ## Current State
 
@@ -36,6 +36,8 @@ asset bucket UX binary update: 2026-04-30 Asia/Shanghai, backed up under /opt/su
 asset bucket UX deployed binary hashes: supercdn 2062fd23697d45611fd0bdfcd288b9d5d261f5f96d0668620e5bf77f7c2c14ed, supercdnctl 52324207f7c27537fe146ecef63431bd60dfb04e304391c6271fbb734c5dcfb3
 overseas R2 CDN bucket binary update: 2026-04-30 Asia/Shanghai, backed up under /opt/supercdn/backups/20260429T161836Z-bucket-r2-redirect
 overseas R2 CDN bucket deployed binary hashes: supercdn 706f0abd66fa18132ede1bf9462238600b38261c51facfa683f91f315f738ad0, supercdnctl 74f3339675e51a8fdfeff735c0910cea3ab6613a146e34cf8f57446ccb3d8325
+china mobile AList retry binary update: 2026-04-30 Asia/Shanghai, backed up under /opt/supercdn/backups/20260429T210651Z-china-mobile-alist-retry
+china mobile AList retry deployed binary hashes: supercdn b97fe62869332e48d5d867f4a8f65ae419c58cd5bc4bf840f92ee79d26df61d9, supercdnctl 985854afc5203b803c6ce20d3666886d6d699645acf9bed80673f42393a4724d
 ```
 
 Latest live validation:
@@ -50,6 +52,7 @@ cloudflare_static readiness guard: `deploy-site` now defaults to `-static-verify
 cloudflare_static rollback guard: normal `promote-deployment` now rejects non-active Cloudflare Static deployments instead of doing metadata-only rollback. `delete-deployment` on Cloudflare Static returns a warning that it removes Super CDN metadata only and does not delete Worker versions/custom domains.
 overseas CDN bucket smoke: `create-cdn-bucket` + `upload-bucket -warmup` created `overseas-r2-smoke-20260430001954`, defaulted to `route_profile=overseas_r2`, stored the object on `overseas_accel`, returned `public_url` https://qwk.ccwu.cc/a/overseas-r2-smoke-20260430001954/docs/readme-20260430001954.md and `cdn_url` https://overseas-accel.r2.qwk.ccwu.cc/assets/buckets/overseas-r2-smoke-20260430001954/documents/2026/04/ed/ed45ae53f5b24487025f6ba2cf106496f9401009a48547e7151499e01520f539.md. Warmup HEAD returned 200; public `/a/...` HEAD returns 302 to R2; direct R2 HEAD returns 200 with `Cache-Control: public, max-age=31536000, immutable`.
 asset bucket list deadlock fix: live `GET /api/v1/asset-buckets` returns after the SQLite single-connection rows/usage query fix and reports the smoke bucket with `object_count=1`.
+china_mobile line-only validation: `resource-status -library repo_china_mobile` reports `alist_mobile_primary` at `/移动资源/个人云/Super_CDN`. Passive health check passed, then write/read/delete health probe passed with list/write/read/delete latencies 1857/2038/2213/370 ms. `e2e-probe -profile china_mobile` passed with primary target `repo_china_mobile`, object id 45, upload latency 3908 ms, read latency 1976 ms, HTTP 200, and cleanup remote/db both deleted. During the first run it exposed an AList upload retry bug (`seek ... file already closed`) when token refresh was needed; fixed by preventing the HTTP client from closing the reusable file reader between auth retry attempts.
 legacy R2 site probe: cyberstream still passes HTML, JS/CSS redirect MIME/CORS, and /movie/123 SPA fallback checks
 ```
 
