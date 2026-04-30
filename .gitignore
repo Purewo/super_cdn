@@ -16,6 +16,7 @@ alist/
 
 # Build outputs
 bin/
+dist/
 *.exe
 *.test
 
