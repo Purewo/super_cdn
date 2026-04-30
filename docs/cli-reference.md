@@ -275,6 +275,8 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 .\bin\supercdnctl.exe probe-site -url https://blog.qwk.ccwu.cc/ -spa-path /movie/123 -require-edge-static-html -require-edge-manifest-assets
 ```
 
+`probe-site` and deployment readiness reports redact query values for signed storage URLs by default. Use `-redact-urls=false` only when debugging locally and avoiding shared logs.
+
 检查内容：
 
 - 首页必须返回 `2xx` 且 `Content-Type` 为 `text/html`。

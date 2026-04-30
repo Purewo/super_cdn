@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -250,6 +251,41 @@ func TestRedactSignedURL(t *testing.T) {
 	}
 }
 
+func TestProbeSiteRedactsSignedURLsByDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<script type="module" src="/assets/app.js"></script>`))
+		case "/assets/app.js":
+			http.Redirect(w, r, "/signed/app.js?X-Amz-Signature=secret&plain=keep", http.StatusFound)
+		case "/signed/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			_, _ = w.Write([]byte("console.log('ok')"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	var probeErr error
+	out := captureStdout(t, func() {
+		probeErr = probeSite(client{}, []string{
+			"-url", srv.URL + "/",
+			"-max-assets", "1",
+		})
+	})
+	if probeErr != nil {
+		t.Fatal(probeErr)
+	}
+	if strings.Contains(out, "secret") || strings.Contains(out, "plain=keep") {
+		t.Fatalf("probe output leaked signed query values:\n%s", out)
+	}
+	if !strings.Contains(out, "X-Amz-Signature=%3Credacted%3E") || !strings.Contains(out, "plain=%3Credacted%3E") {
+		t.Fatalf("probe output did not contain redacted query values:\n%s", out)
+	}
+}
+
 func TestNormalizeCloudflareStaticVerifyMode(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
@@ -439,6 +475,30 @@ func TestUploadBucketWarmupCallsWarmupEndpoint(t *testing.T) {
 	if warmupReq["path"] != "images/one.png" || warmupReq["method"] != "GET" || warmupReq["base_url"] != "https://cdn.example.com" {
 		t.Fatalf("warmup request = %#v", warmupReq)
 	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fn()
+	if err := w.Close(); err != nil {
+		os.Stdout = old
+		t.Fatal(err)
+	}
+	os.Stdout = old
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 func writeTestFile(t *testing.T, path, content string) {

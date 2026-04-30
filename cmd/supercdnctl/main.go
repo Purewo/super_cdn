@@ -1348,7 +1348,7 @@ func probeCloudflareStaticDomains(ctx context.Context, domains []string, opts si
 				Summary: map[string]int{},
 			}
 		}
-		reports = append(reports, report)
+		reports = append(reports, redactSignedProbeReport(report))
 	}
 	return reports
 }
@@ -1442,6 +1442,7 @@ func probeSite(c client, args []string) error {
 	requireEdgeManifestAssets := fs.Bool("require-edge-manifest-assets", false, "fail if JS/CSS asset first hops are not routed by the edge manifest")
 	requireHTMLRevalidate := fs.Bool("require-html-revalidate", false, "fail if root HTML is not served with a revalidating cache policy")
 	requireImmutableAssets := fs.Bool("require-immutable-assets", false, "fail if JS/CSS assets are not served with immutable long-term cache policy")
+	redactURLs := fs.Bool("redact-urls", true, "redact query values for signed URLs from JSON output")
 	_ = fs.Parse(args)
 	if *preview && *production {
 		return errors.New("use either -preview or -production, not both")
@@ -1464,17 +1465,12 @@ func probeSite(c client, args []string) error {
 			return err
 		}
 	}
-	httpClient, err := httpClientWithDNSResolver(*resolver)
-	if err != nil {
-		return err
-	}
-	report, err := siteprobe.Run(context.Background(), siteprobe.Options{
+	report, err := runSiteProbe(*resolver, siteprobe.Options{
 		URL:                        targetURL,
 		Origin:                     *origin,
 		SPAPath:                    *spaPath,
 		MaxAssets:                  *maxAssets,
 		Timeout:                    *timeout,
-		Client:                     httpClient,
 		RequireDirectAssets:        *requireDirectAssets,
 		RequireEdgeStaticHTML:      *requireEdgeStaticHTML,
 		RequireEdgeManifestAssets:  *requireEdgeManifestAssets,
@@ -1483,6 +1479,9 @@ func probeSite(c client, args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if *redactURLs {
+		report = redactSignedProbeReport(report)
 	}
 	raw, err := json.Marshal(report)
 	if err != nil {
@@ -1664,7 +1663,7 @@ func refreshEdgeManifest(c client, args []string) error {
 	maxAssets := fs.Int("max-assets", 20, "maximum JS/CSS assets to probe from index HTML")
 	timeout := fs.Duration("timeout", 30*time.Second, "overall probe timeout")
 	hybridChecks := fs.Bool("hybrid-checks", true, "require Cloudflare Static HTML and edge-manifest asset first hops during probe")
-	redactProbeURLs := fs.Bool("redact-probe-urls", true, "redact signed query values from the embedded probe report")
+	redactProbeURLs := fs.Bool("redact-probe-urls", true, "redact query values for signed URLs from the embedded probe report")
 	_ = fs.Parse(args)
 	if *site == "" {
 		return errors.New("-site is required")

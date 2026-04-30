@@ -157,6 +157,8 @@ go run .\cmd\supercdnctl -- probe-site -url https://demo.sites.qwk.ccwu.cc/ -max
 go run .\cmd\supercdnctl -- probe-site -url https://demo.qwk.ccwu.cc/ -spa-path /movie/123 -require-edge-static-html -require-edge-manifest-assets
 ```
 
+Probe and readiness JSON redact query values for signed storage URLs by default so AList/OpenList and cloud storage signatures do not leak into logs. Use `-redact-urls=false` only for local low-level debugging.
+
 Use `supercdn.site.json` to keep risky files on the origin while leaving the default non-index redirect behavior in place:
 
 ```json
