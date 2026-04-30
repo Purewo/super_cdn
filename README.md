@@ -28,6 +28,8 @@ Full CLI reference: [docs/cli-reference.md](docs/cli-reference.md).
 
 v0.1.x maintenance scope and runbooks: [docs/v0.1-maintenance.md](docs/v0.1-maintenance.md).
 
+Next feature roadmap: [docs/v0.2-roadmap.md](docs/v0.2-roadmap.md).
+
 Development handoff and next goals: [docs/tomorrow-plan.md](docs/tomorrow-plan.md).
 
 ## Current verified live site
