@@ -294,14 +294,18 @@ func (s *AListStore) putReader(ctx context.Context, key string, body io.Reader, 
 			}
 		}
 		buildCount++
-		req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.baseURL+"/api/fs/put", io.NopCloser(body))
+		requestBody := io.Reader(io.NopCloser(body))
+		if size == 0 {
+			requestBody = http.NoBody
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.baseURL+"/api/fs/put", requestBody)
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("File-Path", s.remotePath(key))
 		req.Header.Set("As-Task", "false")
 		req.Header.Set("Content-Type", firstNonEmpty(contentType, "application/octet-stream"))
-		if size > 0 {
+		if size >= 0 {
 			req.ContentLength = size
 		}
 		return req, nil

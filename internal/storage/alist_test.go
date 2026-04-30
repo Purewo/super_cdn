@@ -416,3 +416,63 @@ func TestAListPutCreatesParentDirectories(t *testing.T) {
 		t.Fatalf("uploaded path = %q", uploadedPath)
 	}
 }
+
+func TestAListPutZeroByteFileSendsContentLength(t *testing.T) {
+	dirs := map[string]bool{"/repo": true}
+	var gotLength int64 = -1
+	var gotHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/fs/list":
+			var req struct {
+				Path string `json:"path"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if dirs[req.Path] {
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "message": "success", "data": map[string]any{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 404, "message": "not found"})
+		case "/api/fs/put":
+			gotLength = r.ContentLength
+			gotHeader = r.Header.Get("Content-Length")
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(raw) != 0 {
+				t.Fatalf("body length = %d", len(raw))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "message": "success"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	file := filepath.Join(t.TempDir(), "empty.css")
+	if err := os.WriteFile(file, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewAListStore(AListOptions{
+		Name:    "alist",
+		BaseURL: server.URL,
+		Token:   "token",
+		Root:    "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(context.Background(), PutOptions{
+		Key:      "empty.css",
+		FilePath: file,
+		Size:     0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if gotLength != 0 || gotHeader != "0" {
+		t.Fatalf("content length = %d header=%q", gotLength, gotHeader)
+	}
+}
