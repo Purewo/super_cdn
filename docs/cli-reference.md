@@ -42,6 +42,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `deployment` | `GET /api/v1/sites/{id}/deployments/{deployment}` | 查询单个部署 |
 | `export-edge-manifest` | `GET /api/v1/sites/{id}/deployments/{deployment}/edge-manifest` | 导出可用于边缘路由的部署 manifest |
 | `publish-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 发布边缘 manifest 到 Cloudflare Workers KV |
+| `refresh-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 刷新 active edge manifest 并默认执行 hybrid 探测 |
 | `publish-cloudflare-static` | 本地 Wrangler 调用 | 发布本地目录到 Cloudflare Workers Static Assets |
 | `promote-deployment` | `POST /api/v1/sites/{id}/deployments/{deployment}/promote` | 将部署提升为当前生产版本 |
 | `delete-deployment` | `DELETE /api/v1/sites/{id}/deployments/{deployment}` | 删除未激活且未 pinned 的部署 |
@@ -294,6 +295,7 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 .\bin\supercdnctl.exe deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe export-edge-manifest -site blog -deployment dpl-abc -out .\edge-manifest.json
 .\bin\supercdnctl.exe publish-edge-manifest -site blog -deployment dpl-abc -kv-namespace supercdn-edge-manifest -dry-run
+.\bin\supercdnctl.exe refresh-edge-manifest -site blog -kv-namespace supercdn-edge-manifest -spa-path /movie/123
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target cloudflare_static -domains blog-static-test.example.com
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target hybrid_edge -profile china_mobile -domains blog.qwk.ccwu.cc -static-spa
 .\bin\supercdnctl.exe publish-cloudflare-static -site blog -dir .\dist -domains blog-static-test.example.com -dry-run=false
@@ -316,6 +318,8 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 - `hybrid_edge` readiness 会额外检查 root/SPA 的 `X-SuperCDN-Edge-Source: cloudflare_static`，以及 JS/CSS 首跳的 `X-SuperCDN-Edge-Manifest: route`，用来确认请求没有回到 Go origin。
 - `publish-cloudflare-static` 是更底层的 Cloudflare canary/诊断入口，只发布本地目录，不写 Super CDN deployment 记录；默认 dry-run，真实发布需要 `-dry-run=false`。它读取 `configs/private/cloudflare.env` 中的 `CF_API_TOKEN` / `CF_ACCOUNT_ID`，不会读取或打印密钥值。
 - `gc-site` 当前是保守入口，不做破坏性清理；后续可按 manifest 引用计数清理未引用对象。
+
+`refresh-edge-manifest` defaults to the active production deployment, rewrites the active/deployment KV manifest keys, and then runs the hybrid edge probe. It is the quick recovery path when AList/OpenList route signatures become stale; embedded probe URLs redact signed query values by default.
 
 ### supercdn.site.json
 

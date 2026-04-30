@@ -64,22 +64,23 @@ type Check struct {
 }
 
 type AssetCheck struct {
-	Type         string         `json:"type"`
-	URL          string         `json:"url"`
-	FinalURL     string         `json:"final_url,omitempty"`
-	StatusCode   int            `json:"status_code"`
-	ContentType  string         `json:"content_type,omitempty"`
-	CacheControl string         `json:"cache_control,omitempty"`
-	EdgeSource   string         `json:"x_supercdn_edge_source,omitempty"`
-	EdgeManifest string         `json:"x_supercdn_edge_manifest,omitempty"`
-	EdgeAction   string         `json:"x_supercdn_edge_action,omitempty"`
-	Redirected   bool           `json:"redirected"`
-	CORS         string         `json:"cors"`
-	LatencyMS    int64          `json:"latency_ms"`
-	OK           bool           `json:"ok"`
-	Chain        []ResponseStep `json:"chain,omitempty"`
-	Warnings     []string       `json:"warnings,omitempty"`
-	Errors       []string       `json:"errors,omitempty"`
+	Type             string         `json:"type"`
+	URL              string         `json:"url"`
+	FinalURL         string         `json:"final_url,omitempty"`
+	StatusCode       int            `json:"status_code"`
+	ContentType      string         `json:"content_type,omitempty"`
+	CacheControl     string         `json:"cache_control,omitempty"`
+	EdgeSource       string         `json:"x_supercdn_edge_source,omitempty"`
+	EdgeManifest     string         `json:"x_supercdn_edge_manifest,omitempty"`
+	EdgeAction       string         `json:"x_supercdn_edge_action,omitempty"`
+	SignatureSuspect bool           `json:"signature_suspect,omitempty"`
+	Redirected       bool           `json:"redirected"`
+	CORS             string         `json:"cors"`
+	LatencyMS        int64          `json:"latency_ms"`
+	OK               bool           `json:"ok"`
+	Chain            []ResponseStep `json:"chain,omitempty"`
+	Warnings         []string       `json:"warnings,omitempty"`
+	Errors           []string       `json:"errors,omitempty"`
 }
 
 type ResponseStep struct {
@@ -202,6 +203,12 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 		if asset.Redirected {
 			report.Summary["assets_redirected"]++
 		}
+		if asset.SignatureSuspect {
+			report.Summary["signature_suspect"]++
+		}
+	}
+	if report.Summary["signature_suspect"] > 0 {
+		report.Warnings = append(report.Warnings, "one or more assets look like expired storage signatures; refresh the edge manifest and retry")
 	}
 	if report.HTML.OK {
 		report.Summary["html_ok"] = 1
@@ -289,6 +296,10 @@ func probeAsset(ctx context.Context, client *http.Client, ref assetRef, origin s
 	check.LatencyMS = sumLatency(result.steps)
 	if last.StatusCode < 200 || last.StatusCode > 299 {
 		check.Errors = append(check.Errors, fmt.Sprintf("unexpected status %d", last.StatusCode))
+	}
+	if storageSignatureFailureLikely(result.steps) {
+		check.SignatureSuspect = true
+		check.Warnings = append(check.Warnings, "storage signature may be expired; refresh the edge manifest and retry")
 	}
 	if !assetMIMEOK(ref.typ, last.ContentType) {
 		check.Errors = append(check.Errors, fmt.Sprintf("unexpected %s content type %q", ref.typ, last.ContentType))
@@ -549,6 +560,64 @@ func firstStepLooksEdgeManifestRoute(steps []ResponseStep) bool {
 	return strings.EqualFold(first.SuperCDNEdgeSource, "manifest") &&
 		strings.EqualFold(first.SuperCDNEdgeManifest, "route") &&
 		strings.EqualFold(first.SuperCDNEdgeAction, "route")
+}
+
+func storageSignatureFailureLikely(steps []ResponseStep) bool {
+	if len(steps) == 0 {
+		return false
+	}
+	last := steps[len(steps)-1]
+	switch last.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+	default:
+		return false
+	}
+	if firstStepLooksEdgeManifestRoute(steps) {
+		return true
+	}
+	for _, step := range steps {
+		if signedURLLike(step.URL) || signedURLLike(step.Location) {
+			return true
+		}
+	}
+	return false
+}
+
+func signedURLLike(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	for key := range parsed.Query() {
+		if signedQueryParam(key) {
+			return true
+		}
+	}
+	return false
+}
+
+func signedQueryParam(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "sign",
+		"signature",
+		"expires",
+		"policy",
+		"key-pair-id",
+		"awsaccesskeyid",
+		"x-amz-algorithm",
+		"x-amz-credential",
+		"x-amz-date",
+		"x-amz-expires",
+		"x-amz-security-token",
+		"x-amz-signature",
+		"x-amz-signedheaders":
+		return true
+	default:
+		return false
+	}
 }
 
 func isRedirect(status int) bool {

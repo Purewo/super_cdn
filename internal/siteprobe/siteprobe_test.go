@@ -218,3 +218,52 @@ func TestRunFailsHybridEdgeWhenHeadersMissing(t *testing.T) {
 		t.Fatalf("expected asset errors: %+v", report.Assets)
 	}
 }
+
+func TestRunMarksLikelyExpiredStorageSignature(t *testing.T) {
+	var storageOrigin string
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		http.Error(w, "expired", http.StatusForbidden)
+	}))
+	defer storage.Close()
+	storageOrigin = storage.URL
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script type="module" src="/assets/app.js"></script>`))
+		case "/assets/app.js":
+			w.Header().Set("X-SuperCDN-Edge-Source", "manifest")
+			w.Header().Set("X-SuperCDN-Edge-Manifest", "route")
+			w.Header().Set("X-SuperCDN-Edge-Action", "route")
+			http.Redirect(w, r, storageOrigin+"/app.js?sign=expired", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer origin.Close()
+
+	report, err := Run(context.Background(), Options{
+		URL:                       origin.URL + "/",
+		Timeout:                   5 * time.Second,
+		RequireEdgeStaticHTML:     true,
+		RequireEdgeManifestAssets: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OK {
+		t.Fatalf("expected failed report: %+v", report)
+	}
+	if report.Summary["signature_suspect"] != 1 {
+		t.Fatalf("signature_suspect summary = %#v", report.Summary)
+	}
+	if len(report.Assets) != 1 || !report.Assets[0].SignatureSuspect || len(report.Assets[0].Warnings) == 0 {
+		t.Fatalf("expected signature suspect asset: %+v", report.Assets)
+	}
+	if len(report.Warnings) == 0 {
+		t.Fatalf("expected report warning: %+v", report)
+	}
+}

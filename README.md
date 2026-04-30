@@ -138,7 +138,10 @@ Export an edge manifest for a ready deployment when preparing the zero-origin ed
 ```powershell
 go run .\cmd\supercdnctl -- export-edge-manifest -site demo -deployment dpl-abc -out .\edge-manifest.json
 go run .\cmd\supercdnctl -- publish-edge-manifest -site demo -deployment dpl-abc -kv-namespace supercdn-edge-manifest -dry-run
+go run .\cmd\supercdnctl -- refresh-edge-manifest -site demo -kv-namespace supercdn-edge-manifest -spa-path /movie/123
 ```
+
+`refresh-edge-manifest` reloads the active deployment manifest from the control plane, republishes the active/deployment KV keys, and then probes the hybrid edge path by default. This is the quick recovery path for stale AList/OpenList signed route locations without rebuilding or redeploying the website package.
 
 Run a local-only bundle inspection before uploading:
 

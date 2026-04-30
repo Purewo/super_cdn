@@ -88,6 +88,8 @@ func main() {
 		err = exportEdgeManifest(c, args[1:])
 	case "publish-edge-manifest":
 		err = publishEdgeManifest(c, args[1:])
+	case "refresh-edge-manifest":
+		err = refreshEdgeManifest(c, args[1:])
 	case "publish-cloudflare-static":
 		err = publishCloudflareStatic(args[1:])
 	case "promote-deployment":
@@ -1634,6 +1636,191 @@ func publishEdgeManifest(c client, args []string) error {
 	return c.doJSON(http.MethodPost, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment)+"/edge-manifest/publish", req)
 }
 
+type edgeManifestRefreshResponse struct {
+	Status        string                      `json:"status"`
+	SiteID        string                      `json:"site_id"`
+	DeploymentID  string                      `json:"deployment_id"`
+	URL           string                      `json:"url,omitempty"`
+	Deployment    probeDeployment             `json:"deployment"`
+	EdgeManifest  edgeManifestPublishResponse `json:"edge_manifest"`
+	Probe         *siteprobe.Report           `json:"probe,omitempty"`
+	ProbeRedacted bool                        `json:"probe_redacted,omitempty"`
+}
+
+func refreshEdgeManifest(c client, args []string) error {
+	fs := flag.NewFlagSet("refresh-edge-manifest", flag.ExitOnError)
+	site := fs.String("site", "", "site id")
+	deployment := fs.String("deployment", "", "deployment id; defaults to active production deployment")
+	domains := fs.String("domains", "", "comma-separated bound domains to refresh; empty means all site domains")
+	kvNamespaceID := fs.String("kv-namespace-id", "", "Cloudflare Workers KV namespace id")
+	kvNamespace := fs.String("kv-namespace", "supercdn-edge-manifest", "Cloudflare Workers KV namespace title")
+	deploymentKey := fs.Bool("deployment-key", true, "publish sites/{host}/deployments/{deployment}/edge-manifest")
+	dryRun := fs.Bool("dry-run", false, "plan KV writes without modifying Cloudflare")
+	probe := fs.Bool("probe", true, "run a site probe after refreshing the manifest")
+	probeURL := fs.String("probe-url", "", "absolute public site URL to probe; defaults to the deployment production URL")
+	spaPath := fs.String("spa-path", "", "optional SPA route path to verify as HTML")
+	origin := fs.String("origin", "", "Origin header for redirected asset checks; defaults to the probe URL origin")
+	resolver := fs.String("resolver", "", "DNS resolver for HTTP probes, for example 1.1.1.1:53")
+	maxAssets := fs.Int("max-assets", 20, "maximum JS/CSS assets to probe from index HTML")
+	timeout := fs.Duration("timeout", 30*time.Second, "overall probe timeout")
+	hybridChecks := fs.Bool("hybrid-checks", true, "require Cloudflare Static HTML and edge-manifest asset first hops during probe")
+	redactProbeURLs := fs.Bool("redact-probe-urls", true, "redact signed query values from the embedded probe report")
+	_ = fs.Parse(args)
+	if *site == "" {
+		return errors.New("-site is required")
+	}
+	dep, err := loadProbeDeployment(c, *site, *deployment)
+	if err != nil {
+		return err
+	}
+	if dep.ID == "" {
+		return errors.New("deployment response did not include id")
+	}
+	edgeManifest, err := c.publishEdgeManifestForDeployment(edgeManifestPublishOptions{
+		Site:          *site,
+		Deployment:    dep.ID,
+		Domains:       cleanDomains(splitCSV(*domains)),
+		KVNamespaceID: *kvNamespaceID,
+		KVNamespace:   *kvNamespace,
+		ActiveKey:     dep.Active,
+		DeploymentKey: *deploymentKey,
+		DryRun:        *dryRun,
+	})
+	if err != nil {
+		return err
+	}
+	status := edgeManifest.Status
+	if status == "" {
+		status = "ok"
+	}
+	resp := edgeManifestRefreshResponse{
+		Status:       status,
+		SiteID:       *site,
+		DeploymentID: dep.ID,
+		Deployment:   dep,
+		EdgeManifest: edgeManifest,
+	}
+	if *probe {
+		targetURL := strings.TrimSpace(*probeURL)
+		if targetURL == "" {
+			targetURL, err = deploymentProbeURL(dep, false)
+			if err != nil {
+				return err
+			}
+		}
+		resp.URL = targetURL
+		report, err := runSiteProbe(*resolver, siteprobe.Options{
+			URL:                       targetURL,
+			Origin:                    *origin,
+			SPAPath:                   *spaPath,
+			MaxAssets:                 *maxAssets,
+			Timeout:                   *timeout,
+			RequireEdgeStaticHTML:     *hybridChecks,
+			RequireEdgeManifestAssets: *hybridChecks,
+		})
+		if err != nil {
+			return err
+		}
+		if *redactProbeURLs {
+			report = redactSignedProbeReport(report)
+			resp.URL = redactSignedURL(resp.URL)
+			resp.ProbeRedacted = true
+		}
+		resp.Probe = &report
+		if !report.OK {
+			raw, _ := json.Marshal(resp)
+			_ = printJSON(raw)
+			return errors.New("site probe failed")
+		}
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	return printJSON(raw)
+}
+
+func runSiteProbe(resolver string, opts siteprobe.Options) (siteprobe.Report, error) {
+	httpClient, err := httpClientWithDNSResolver(resolver)
+	if err != nil {
+		return siteprobe.Report{}, err
+	}
+	opts.Client = httpClient
+	return siteprobe.Run(context.Background(), opts)
+}
+
+func redactSignedProbeReport(report siteprobe.Report) siteprobe.Report {
+	report.URL = redactSignedURL(report.URL)
+	report.FinalURL = redactSignedURL(report.FinalURL)
+	report.HTML.URL = redactSignedURL(report.HTML.URL)
+	report.HTML.FinalURL = redactSignedURL(report.HTML.FinalURL)
+	if report.SPA != nil {
+		spa := *report.SPA
+		spa.URL = redactSignedURL(spa.URL)
+		spa.FinalURL = redactSignedURL(spa.FinalURL)
+		report.SPA = &spa
+	}
+	for i := range report.Assets {
+		report.Assets[i].URL = redactSignedURL(report.Assets[i].URL)
+		report.Assets[i].FinalURL = redactSignedURL(report.Assets[i].FinalURL)
+		for j := range report.Assets[i].Chain {
+			report.Assets[i].Chain[j].URL = redactSignedURL(report.Assets[i].Chain[j].URL)
+			report.Assets[i].Chain[j].Location = redactSignedURL(report.Assets[i].Chain[j].Location)
+		}
+	}
+	return report
+}
+
+func redactSignedURL(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.RawQuery == "" {
+		return raw
+	}
+	query := parsed.Query()
+	hasSignature := false
+	for key := range query {
+		if signedQueryParam(key) {
+			hasSignature = true
+			break
+		}
+	}
+	if !hasSignature {
+		return raw
+	}
+	for key, values := range query {
+		for i := range values {
+			values[i] = "<redacted>"
+		}
+		query[key] = values
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func signedQueryParam(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "sign",
+		"signature",
+		"expires",
+		"policy",
+		"key-pair-id",
+		"awsaccesskeyid",
+		"x-amz-algorithm",
+		"x-amz-credential",
+		"x-amz-date",
+		"x-amz-expires",
+		"x-amz-security-token",
+		"x-amz-signature",
+		"x-amz-signedheaders":
+		return true
+	default:
+		return false
+	}
+}
+
 type cloudflareStaticPublishResponse struct {
 	Status            string   `json:"status"`
 	DryRun            bool     `json:"dry_run"`
@@ -3111,6 +3298,7 @@ func usage() {
   supercdnctl [global flags] deployment -site blog -deployment dpl-abc
   supercdnctl [global flags] export-edge-manifest -site blog -deployment dpl-abc -out .\edge-manifest.json
   supercdnctl [global flags] publish-edge-manifest -site blog -deployment dpl-abc -kv-namespace supercdn-edge-manifest -dry-run
+  supercdnctl [global flags] refresh-edge-manifest -site blog -kv-namespace supercdn-edge-manifest -spa-path /movie/123
   supercdnctl publish-cloudflare-static -site blog -dir ./dist -domains blog-static-test.example.com -dry-run=false
   supercdnctl [global flags] promote-deployment -site blog -deployment dpl-abc
   supercdnctl [global flags] delete-deployment -site blog -deployment dpl-abc

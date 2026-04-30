@@ -190,6 +190,66 @@ func TestResolveSiteDeploymentTargetCallsControlPlane(t *testing.T) {
 	}
 }
 
+func TestRefreshEdgeManifestPublishesActiveManifest(t *testing.T) {
+	var publishReq map[string]any
+	var sawList, sawPublish bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", auth)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sites/demo/deployments":
+			sawList = true
+			if got := r.URL.Query().Get("limit"); got != "100" {
+				t.Fatalf("limit query = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"deployments":[{"id":"dpl-preview","environment":"preview","active":false},{"id":"dpl-active","environment":"production","active":true,"production_url":"https://demo.example.com/"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sites/demo/deployments/dpl-active/edge-manifest/publish":
+			sawPublish = true
+			if err := json.NewDecoder(r.Body).Decode(&publishReq); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"status":"ok","site_id":"demo","deployment_id":"dpl-active","active":true,"kv_namespace_id":"kv-1","kv_namespace":"supercdn-edge-manifest","key_prefix":"sites/","domains":["demo.example.com"],"manifest_size":12,"manifest_sha256":"abc"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+
+	err := refreshEdgeManifest(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+		"-site", "demo",
+		"-domains", "https://demo.example.com/",
+		"-kv-namespace", "supercdn-edge-manifest",
+		"-probe=false",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawList || !sawPublish {
+		t.Fatalf("sawList=%v sawPublish=%v", sawList, sawPublish)
+	}
+	if publishReq["kv_namespace"] != "supercdn-edge-manifest" {
+		t.Fatalf("kv_namespace = %#v", publishReq["kv_namespace"])
+	}
+	if publishReq["dry_run"] != false || publishReq["active_key"] != true || publishReq["deployment_key"] != true {
+		t.Fatalf("publish flags = %#v", publishReq)
+	}
+	domains, ok := publishReq["domains"].([]any)
+	if !ok || len(domains) != 1 || domains[0] != "demo.example.com" {
+		t.Fatalf("domains = %#v", publishReq["domains"])
+	}
+}
+
+func TestRedactSignedURL(t *testing.T) {
+	got := redactSignedURL("https://storage.example.com/app.js?X-Amz-Date=20260430T000000Z&X-Amz-Signature=secret&plain=keep")
+	if strings.Contains(got, "secret") || strings.Contains(got, "20260430T000000Z") || strings.Contains(got, "plain=keep") {
+		t.Fatalf("signed URL was not redacted: %s", got)
+	}
+	if !strings.Contains(got, "plain=%3Credacted%3E") || !strings.Contains(got, "X-Amz-Signature=%3Credacted%3E") {
+		t.Fatalf("unexpected redacted URL: %s", got)
+	}
+}
+
 func TestNormalizeCloudflareStaticVerifyMode(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
