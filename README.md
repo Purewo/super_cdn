@@ -111,7 +111,7 @@ For SPAs, pass `-static-spa`. The CLI generates a temporary `wrangler.toml` with
 
 After a Cloudflare Static publish, `deploy-site` now runs a readiness probe by default before writing the active Super CDN deployment record. The probe verifies each custom domain over HTTPS, checks that the root returns HTML, verifies JS/CSS MIME types, requires direct same-site assets, checks generated cache headers, and validates SPA fallback when `-static-spa` is enabled. The readiness probe uses `1.1.1.1:53` by default so local DNS cache does not mistake an old wildcard origin record for the new Cloudflare custom domain. Use `-static-verify warn` to record the deployment even if readiness is not yet passing, or `-static-verify none` for low-level diagnostics.
 
-For true hybrid no-origin website delivery, use `-target hybrid_edge`. The CLI uploads the deployment to the selected Super CDN route profile, waits until it is ready, publishes the active edge manifest to Workers KV, deploys the shared Worker with Cloudflare Static Assets (`ASSETS`, `run_worker_first = true`), and runs the same readiness probe without requiring direct same-site assets. Entry HTML and SPA fallback are served by Cloudflare Static Assets; manifest-backed resources redirect directly to the selected storage line. Use `-edge-kv-namespace`, `-edge-kv-namespace-id`, `-edge-name`, and `-edge-manifest-mode route|enforce` for explicit edge routing control.
+For true hybrid no-origin website delivery, use `-target hybrid_edge`. The CLI uploads the deployment to the selected Super CDN route profile, waits until it is ready, publishes the active edge manifest to Workers KV, deploys the shared Worker with Cloudflare Static Assets (`ASSETS`, `run_worker_first = true`), and runs the same readiness probe without requiring direct same-site assets. Entry HTML and SPA fallback are served by Cloudflare Static Assets; manifest-backed resources redirect directly to the selected storage line. Use `-edge-kv-namespace`, `-edge-kv-namespace-id`, `-edge-name`, and `-edge-manifest-mode route|enforce` for explicit edge routing control. Hybrid verification also checks `X-SuperCDN-Edge-Source: cloudflare_static` on HTML/SPAs and `X-SuperCDN-Edge-Manifest: route` on asset first hops.
 
 The lower-level canary command is still available when you only want to publish to Cloudflare without recording a Super CDN deployment:
 
@@ -151,6 +151,7 @@ Run a live delivery probe after deployment. `probe-site -site` resolves the acti
 ```powershell
 go run .\cmd\supercdnctl -- probe-site -site demo -spa-path /movie/123
 go run .\cmd\supercdnctl -- probe-site -url https://demo.sites.qwk.ccwu.cc/ -max-assets 20
+go run .\cmd\supercdnctl -- probe-site -url https://demo.qwk.ccwu.cc/ -spa-path /movie/123 -require-edge-static-html -require-edge-manifest-assets
 ```
 
 Use `supercdn.site.json` to keep risky files on the origin while leaving the default non-index redirect behavior in place:

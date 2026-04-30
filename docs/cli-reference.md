@@ -271,6 +271,7 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 .\bin\supercdnctl.exe probe-site -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe probe-site -url https://blog.sites.example.com/ -max-assets 20
 .\bin\supercdnctl.exe probe-site -url https://blog.qwk.ccwu.cc/ -resolver 1.1.1.1:53 -require-direct-assets -require-html-revalidate -require-immutable-assets
+.\bin\supercdnctl.exe probe-site -url https://blog.qwk.ccwu.cc/ -spa-path /movie/123 -require-edge-static-html -require-edge-manifest-assets
 ```
 
 检查内容：
@@ -280,6 +281,8 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 - 对 JS/CSS 检查最终 `Content-Type`，避免缺失资源被 SPA fallback 返回 HTML 后产生浏览器 MIME 错误。
 - 如果最终地址跨源，使用 `Origin` 头请求并要求最终响应返回 `Access-Control-Allow-Origin: *` 或匹配的 origin。
 - 传 `-spa-path` 时额外请求该路径，并要求返回 HTML。
+- 传 `-require-edge-static-html` 时要求 root/SPA 响应带 `X-SuperCDN-Edge-Source: cloudflare_static`。
+- 传 `-require-edge-manifest-assets` 时要求 JS/CSS 首跳带 `X-SuperCDN-Edge-Source: manifest` 和 `X-SuperCDN-Edge-Manifest: route`。
 - 传 `-resolver 1.1.1.1:53` 时，HTTP 探测会绕开本机 DNS 缓存，用指定解析器确认实际公网接管状态。
 
 ### deployments
@@ -310,6 +313,7 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 - `publish-edge-manifest` 默认 dry-run；真实写入 KV 需要 `-dry-run=false`，默认会写 deployment key，并且仅当该 deployment 当前 active 时写 `sites/{host}/active/edge-manifest`。
 - `deploy-site -target cloudflare_static` 是正式的 Cloudflare-native 静态托管入口：它本地调用 Wrangler 发布 Workers Static Assets，然后把部署记录写回 Super CDN。
 - `deploy-site -target hybrid_edge` 会执行完整 no-Go 网站流程：上传线路 deployment、发布 active edge manifest 到 Workers KV、部署带 `ASSETS` 和 `run_worker_first` 的 Worker，然后验证 HTML/SPA 和被 manifest 重定向的资源。
+- `hybrid_edge` readiness 会额外检查 root/SPA 的 `X-SuperCDN-Edge-Source: cloudflare_static`，以及 JS/CSS 首跳的 `X-SuperCDN-Edge-Manifest: route`，用来确认请求没有回到 Go origin。
 - `publish-cloudflare-static` 是更底层的 Cloudflare canary/诊断入口，只发布本地目录，不写 Super CDN deployment 记录；默认 dry-run，真实发布需要 `-dry-run=false`。它读取 `configs/private/cloudflare.env` 中的 `CF_API_TOKEN` / `CF_ACCOUNT_ID`，不会读取或打印密钥值。
 - `gc-site` 当前是保守入口，不做破坏性清理；后续可按 manifest 引用计数清理未引用对象。
 

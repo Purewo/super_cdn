@@ -132,3 +132,89 @@ func TestRunCanRequireCloudflareStaticCacheAndDirectAssets(t *testing.T) {
 		t.Fatalf("expected ok report: %+v", report)
 	}
 }
+
+func TestRunCanRequireHybridEdgeHeaders(t *testing.T) {
+	var storageOrigin string
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "text/javascript")
+		_, _ = w.Write([]byte("console.log('ok')"))
+	}))
+	defer storage.Close()
+	storageOrigin = storage.URL
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/movie/123":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script type="module" src="/assets/app.js"></script>`))
+		case "/assets/app.js":
+			w.Header().Set("X-SuperCDN-Edge-Source", "manifest")
+			w.Header().Set("X-SuperCDN-Edge-Manifest", "route")
+			w.Header().Set("X-SuperCDN-Edge-Action", "route")
+			http.Redirect(w, r, storageOrigin+"/app.js", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer origin.Close()
+
+	report, err := Run(context.Background(), Options{
+		URL:                       origin.URL + "/",
+		SPAPath:                   "/movie/123",
+		Timeout:                   5 * time.Second,
+		RequireEdgeStaticHTML:     true,
+		RequireEdgeManifestAssets: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.OK {
+		t.Fatalf("expected ok report: %+v", report)
+	}
+	if report.HTML.EdgeSource != "cloudflare_static" {
+		t.Fatalf("html edge source = %q", report.HTML.EdgeSource)
+	}
+	if len(report.Assets) != 1 {
+		t.Fatalf("expected 1 asset, got %d", len(report.Assets))
+	}
+	if report.Assets[0].EdgeSource != "manifest" || report.Assets[0].EdgeManifest != "route" || report.Assets[0].EdgeAction != "route" {
+		t.Fatalf("unexpected edge asset headers: %+v", report.Assets[0])
+	}
+}
+
+func TestRunFailsHybridEdgeWhenHeadersMissing(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<script type="module" src="/assets/app.js"></script>`))
+		case "/assets/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			_, _ = w.Write([]byte("console.log('ok')"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer origin.Close()
+
+	report, err := Run(context.Background(), Options{
+		URL:                       origin.URL + "/",
+		Timeout:                   5 * time.Second,
+		RequireEdgeStaticHTML:     true,
+		RequireEdgeManifestAssets: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.OK {
+		t.Fatalf("expected failed report: %+v", report)
+	}
+	if len(report.Errors) == 0 {
+		t.Fatalf("expected report errors: %+v", report)
+	}
+	if len(report.Assets) != 1 || len(report.Assets[0].Errors) == 0 {
+		t.Fatalf("expected asset errors: %+v", report.Assets)
+	}
+}

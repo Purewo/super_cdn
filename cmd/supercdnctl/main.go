@@ -791,6 +791,8 @@ func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions
 		Resolver:                    opts.VerifyResolver,
 		NotFoundHandling:            publish.NotFoundHandling,
 		RequireDirectAssets:         true,
+		RequireEdgeStaticHTML:       false,
+		RequireEdgeManifestAssets:   false,
 		RequireGeneratedCachePolicy: publish.HeadersGenerated,
 		RequireImmutableAssetCache:  publish.HeadersGenerated,
 	})
@@ -970,6 +972,8 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 		Resolver:                    opts.VerifyResolver,
 		NotFoundHandling:            publish.NotFoundHandling,
 		RequireDirectAssets:         false,
+		RequireEdgeStaticHTML:       true,
+		RequireEdgeManifestAssets:   true,
 		RequireGeneratedCachePolicy: publish.HeadersGenerated,
 		RequireImmutableAssetCache:  false,
 	})
@@ -1240,6 +1244,8 @@ type cloudflareStaticVerifyOptions struct {
 	Resolver                    string
 	NotFoundHandling            string
 	RequireDirectAssets         bool
+	RequireEdgeStaticHTML       bool
+	RequireEdgeManifestAssets   bool
 	RequireGeneratedCachePolicy bool
 	RequireImmutableAssetCache  bool
 }
@@ -1297,6 +1303,8 @@ func verifyCloudflareStaticPublish(ctx context.Context, opts cloudflareStaticVer
 			Timeout:                    30 * time.Second,
 			Client:                     httpClient,
 			RequireDirectAssets:        opts.RequireDirectAssets,
+			RequireEdgeStaticHTML:      opts.RequireEdgeStaticHTML,
+			RequireEdgeManifestAssets:  opts.RequireEdgeManifestAssets,
 			RequireHTMLRevalidate:      opts.RequireGeneratedCachePolicy,
 			RequireImmutableAssetCache: opts.RequireImmutableAssetCache,
 		})
@@ -1428,6 +1436,8 @@ func probeSite(c client, args []string) error {
 	maxAssets := fs.Int("max-assets", 20, "maximum JS/CSS assets to probe from index HTML")
 	timeout := fs.Duration("timeout", 30*time.Second, "overall probe timeout")
 	requireDirectAssets := fs.Bool("require-direct-assets", false, "fail if JS/CSS assets redirect away from the probed site")
+	requireEdgeStaticHTML := fs.Bool("require-edge-static-html", false, "fail if root HTML or SPA fallback is not served by Cloudflare Static Assets")
+	requireEdgeManifestAssets := fs.Bool("require-edge-manifest-assets", false, "fail if JS/CSS asset first hops are not routed by the edge manifest")
 	requireHTMLRevalidate := fs.Bool("require-html-revalidate", false, "fail if root HTML is not served with a revalidating cache policy")
 	requireImmutableAssets := fs.Bool("require-immutable-assets", false, "fail if JS/CSS assets are not served with immutable long-term cache policy")
 	_ = fs.Parse(args)
@@ -1464,6 +1474,8 @@ func probeSite(c client, args []string) error {
 		Timeout:                    *timeout,
 		Client:                     httpClient,
 		RequireDirectAssets:        *requireDirectAssets,
+		RequireEdgeStaticHTML:      *requireEdgeStaticHTML,
+		RequireEdgeManifestAssets:  *requireEdgeManifestAssets,
 		RequireHTMLRevalidate:      *requireHTMLRevalidate,
 		RequireImmutableAssetCache: *requireImmutableAssets,
 	})

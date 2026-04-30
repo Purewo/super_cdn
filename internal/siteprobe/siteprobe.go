@@ -30,6 +30,8 @@ type Options struct {
 	Timeout                    time.Duration
 	Client                     *http.Client
 	RequireDirectAssets        bool
+	RequireEdgeStaticHTML      bool
+	RequireEdgeManifestAssets  bool
 	RequireHTMLRevalidate      bool
 	RequireImmutableAssetCache bool
 }
@@ -55,6 +57,7 @@ type Check struct {
 	StatusCode   int    `json:"status_code"`
 	ContentType  string `json:"content_type,omitempty"`
 	CacheControl string `json:"cache_control,omitempty"`
+	EdgeSource   string `json:"x_supercdn_edge_source,omitempty"`
 	LatencyMS    int64  `json:"latency_ms"`
 	OK           bool   `json:"ok"`
 	Error        string `json:"error,omitempty"`
@@ -67,6 +70,9 @@ type AssetCheck struct {
 	StatusCode   int            `json:"status_code"`
 	ContentType  string         `json:"content_type,omitempty"`
 	CacheControl string         `json:"cache_control,omitempty"`
+	EdgeSource   string         `json:"x_supercdn_edge_source,omitempty"`
+	EdgeManifest string         `json:"x_supercdn_edge_manifest,omitempty"`
+	EdgeAction   string         `json:"x_supercdn_edge_action,omitempty"`
 	Redirected   bool           `json:"redirected"`
 	CORS         string         `json:"cors"`
 	LatencyMS    int64          `json:"latency_ms"`
@@ -83,6 +89,9 @@ type ResponseStep struct {
 	ContentType              string `json:"content_type,omitempty"`
 	CacheControl             string `json:"cache_control,omitempty"`
 	SuperCDNRedirect         string `json:"x_supercdn_redirect,omitempty"`
+	SuperCDNEdgeSource       string `json:"x_supercdn_edge_source,omitempty"`
+	SuperCDNEdgeManifest     string `json:"x_supercdn_edge_manifest,omitempty"`
+	SuperCDNEdgeAction       string `json:"x_supercdn_edge_action,omitempty"`
 	AccessControlAllowOrigin string `json:"access_control_allow_origin,omitempty"`
 	LatencyMS                int64  `json:"latency_ms"`
 }
@@ -172,6 +181,10 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			check.OK = false
 			check.Error = "SPA fallback did not return HTML"
 		}
+		if check.OK && opts.RequireEdgeStaticHTML && !strings.EqualFold(check.EdgeSource, "cloudflare_static") {
+			check.OK = false
+			check.Error = "SPA fallback was not served by Cloudflare Static Assets"
+		}
 		report.SPA = &check
 		if !check.OK {
 			report.Errors = append(report.Errors, "spa fallback failed: "+firstNonEmpty(check.Error, fmt.Sprintf("status %d", check.StatusCode)))
@@ -217,6 +230,7 @@ func checkFromFetch(requestURL string, result fetchResult) Check {
 		check.StatusCode = last.StatusCode
 		check.ContentType = last.ContentType
 		check.CacheControl = last.CacheControl
+		check.EdgeSource = last.SuperCDNEdgeSource
 		check.LatencyMS = sumLatency(result.steps)
 	}
 	check.OK = check.StatusCode >= 200 && check.StatusCode <= 299
@@ -241,6 +255,11 @@ func validateHTML(report *Report, opts Options) {
 		report.HTML.OK = false
 		report.HTML.Error = "root HTML cache policy is not revalidating"
 	}
+	if opts.RequireEdgeStaticHTML && !strings.EqualFold(report.HTML.EdgeSource, "cloudflare_static") {
+		report.Errors = append(report.Errors, "root HTML was not served by Cloudflare Static Assets")
+		report.HTML.OK = false
+		report.HTML.Error = "root HTML was not served by Cloudflare Static Assets"
+	}
 }
 
 func probeAsset(ctx context.Context, client *http.Client, ref assetRef, origin string, opts Options) AssetCheck {
@@ -263,6 +282,9 @@ func probeAsset(ctx context.Context, client *http.Client, ref assetRef, origin s
 	check.StatusCode = last.StatusCode
 	check.ContentType = last.ContentType
 	check.CacheControl = last.CacheControl
+	check.EdgeSource = result.steps[0].SuperCDNEdgeSource
+	check.EdgeManifest = result.steps[0].SuperCDNEdgeManifest
+	check.EdgeAction = result.steps[0].SuperCDNEdgeAction
 	check.Redirected = len(result.steps) > 1
 	check.LatencyMS = sumLatency(result.steps)
 	if last.StatusCode < 200 || last.StatusCode > 299 {
@@ -273,6 +295,9 @@ func probeAsset(ctx context.Context, client *http.Client, ref assetRef, origin s
 	}
 	if opts.RequireDirectAssets && check.Redirected {
 		check.Errors = append(check.Errors, "asset was redirected instead of being served directly")
+	}
+	if opts.RequireEdgeManifestAssets && !firstStepLooksEdgeManifestRoute(result.steps) {
+		check.Errors = append(check.Errors, "asset first hop was not routed by the edge manifest")
 	}
 	if opts.RequireImmutableAssetCache && !cacheLooksImmutable(last.CacheControl) {
 		check.Errors = append(check.Errors, "asset cache policy is not immutable")
@@ -317,6 +342,9 @@ func fetch(ctx context.Context, client *http.Client, rawURL, origin string, maxB
 			ContentType:              resp.Header.Get("Content-Type"),
 			CacheControl:             resp.Header.Get("Cache-Control"),
 			SuperCDNRedirect:         resp.Header.Get("X-Supercdn-Redirect"),
+			SuperCDNEdgeSource:       resp.Header.Get("X-SuperCDN-Edge-Source"),
+			SuperCDNEdgeManifest:     resp.Header.Get("X-SuperCDN-Edge-Manifest"),
+			SuperCDNEdgeAction:       resp.Header.Get("X-SuperCDN-Edge-Action"),
 			AccessControlAllowOrigin: resp.Header.Get("Access-Control-Allow-Origin"),
 			LatencyMS:                latency,
 		}
@@ -511,6 +539,16 @@ func htmlCacheLooksRevalidating(value string) bool {
 func cacheLooksImmutable(value string) bool {
 	value = strings.ToLower(value)
 	return strings.Contains(value, "immutable") && strings.Contains(value, "max-age=31536000")
+}
+
+func firstStepLooksEdgeManifestRoute(steps []ResponseStep) bool {
+	if len(steps) == 0 {
+		return false
+	}
+	first := steps[0]
+	return strings.EqualFold(first.SuperCDNEdgeSource, "manifest") &&
+		strings.EqualFold(first.SuperCDNEdgeManifest, "route") &&
+		strings.EqualFold(first.SuperCDNEdgeAction, "route")
 }
 
 func isRedirect(status int) bool {
