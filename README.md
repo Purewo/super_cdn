@@ -26,6 +26,8 @@ The Go service remains the control plane: deploy intake, inspection, health chec
 
 Full CLI reference: [docs/cli-reference.md](docs/cli-reference.md).
 
+v0.1.x maintenance scope and runbooks: [docs/v0.1-maintenance.md](docs/v0.1-maintenance.md).
+
 Development handoff and next goals: [docs/tomorrow-plan.md](docs/tomorrow-plan.md).
 
 ## Current verified live site
