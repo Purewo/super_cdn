@@ -6,6 +6,8 @@ Last updated: 2026-04-30 Asia/Shanghai.
 
 The service is still in development mode. There is no need to preserve compatibility with the old static-site deployment flow.
 
+v0.1 is closed as a stable internal milestone. The `v0.1.x` line is feature-frozen and should only receive bug fixes, documentation, operational hardening and regression coverage. New product work starts from the `v0.2` roadmap, with IPFS as the next major feature surface.
+
 Current local service:
 
 ```text
@@ -66,6 +68,16 @@ domestic mobile origin-assisted website smoke: first `deploy-site -site path2agi
 cyberstream mobile origin-assisted website smoke: `test_file/cyberstream` latest source needed local TypeScript compatibility fixes and removal of a stale `/index.css` reference before Vite could build cleanly. Site `cyberstream-mobile-go` deployment `dpl-di61osrsjdz2` is active at https://cyberstream-mobile-go.sites.qwk.ccwu.cc/ with `route_profile=china_mobile`, `deployment_target=origin_assisted`, and `delivery_summary={origin:1, redirect:2}`. Root HTML returns 200 from Go origin; main JS returns 302 with `X-Supercdn-Redirect: storage` to the signed mobile AList path; Range GET returns 206; SPA fallback `/movie/123` returns 200 HTML. `probe-site -url https://cyberstream-mobile-go.sites.qwk.ccwu.cc/ -spa-path /movie/123 -max-assets 10` passed. Headless Chrome screenshots are in `data/cyberstream-mobile-go-home.png` and `data/cyberstream-mobile-go-mobile.png`; desktop renders, mobile renders but the hero title is oversized and clips horizontally.
 team auth/CLI profile smoke: production `healthz` returned ok after the binary update. Root `auth/me` returned root owner; a short-lived viewer invite was created and accepted, viewer `auth/me` returned the smoke user, viewer `POST /sites` was rejected with 403, and the smoke token was revoked. `cloudflare-status -all` still reports both configured accounts with token/zone/R2 ok. `probe-site -url https://cyberstream-mobile-go.sites.qwk.ccwu.cc/ -spa-path /movie/123 -max-assets 10` passed with summary `{html_ok:1, spa_ok:1, assets_found:1, assets_ok:1, assets_redirected:1}`.
 legacy R2 site probe: cyberstream still passes HTML, JS/CSS redirect MIME/CORS, and /movie/123 SPA fallback checks
+```
+
+Latest local validation:
+
+```text
+2026-04-30 Asia/Shanghai closeout check: `go test ./...` and `go vet ./...` pass. A quick grep for common leaked-secret patterns only found placeholders, tests and documentation examples.
+
+domestic all-line local CDN smoke: local service was started from `configs/config.local.json`, then stopped after the test. `repo_china_all` write/read/delete health probe passed with status ok and list/write/read/delete latencies around 496/2578/1293/1835 ms. `create-domestic-cdn-bucket -line all` created a temporary bucket with `route_profile=china_all`, upload of README.md returned a CDN/storage URL, warmup passed, public URL HEAD returned 200, Range GET returned 206 with 32 bytes, and `list-bucket` returned the uploaded object metadata.
+
+local config note: if `repo_china_all` reports `alist root path "...Super_CDN" does not exist`, check for mojibake in the ignored local `configs/config.local.json`. The expected path is `/豆包/Super_CDN`, matching `configs/config.full.example.json`.
 ```
 
 Latest legacy R2 site validation:
