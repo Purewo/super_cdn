@@ -123,6 +123,49 @@ func TestWriteCloudflareStaticWranglerConfig(t *testing.T) {
 	}
 }
 
+func TestWriteHybridEdgeWranglerConfig(t *testing.T) {
+	path, cleanup, err := writeHybridEdgeWranglerConfig(hybridEdgeWranglerConfigOptions{
+		WorkerName:          "supercdn-demo-edge",
+		WorkerMain:          `C:\repo\worker\src\index.ts`,
+		AssetsDir:           `C:\repo\dist`,
+		CompatibilityDate:   "2026-04-30",
+		NotFoundHandling:    cloudflareStaticNotFoundSPA,
+		KVNamespaceID:       "kv-123",
+		ManifestMode:        "route",
+		DefaultCacheControl: "public, max-age=300",
+		OriginBaseURL:       "https://origin.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := string(raw)
+	for _, want := range []string{
+		`name = "supercdn-demo-edge"`,
+		`main = "C:/repo/worker/src/index.ts"`,
+		`compatibility_date = "2026-04-30"`,
+		`ORIGIN_BASE_URL = "https://origin.example.com"`,
+		`EDGE_MANIFEST_MODE = "route"`,
+		`EDGE_STATIC_ASSETS = "true"`,
+		`[assets]`,
+		`directory = "C:/repo/dist"`,
+		`binding = "ASSETS"`,
+		`run_worker_first = true`,
+		`not_found_handling = "single-page-application"`,
+		`[[kv_namespaces]]`,
+		`binding = "EDGE_MANIFEST"`,
+		`id = "kv-123"`,
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Fatalf("hybrid config missing %q:\n%s", want, cfg)
+		}
+	}
+}
+
 func TestResolveSiteDeploymentTargetCallsControlPlane(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/sites/demo/deployment-target" {

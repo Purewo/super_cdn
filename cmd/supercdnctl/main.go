@@ -544,10 +544,11 @@ func deploySite(c client, args []string) error {
 	timeout := fs.Duration("timeout", 30*time.Minute, "maximum time to wait")
 	profile := fs.String("profile", "", "route profile override")
 	target := fs.String("target", "", "deployment target override: origin_assisted, cloudflare_static, or hybrid_edge")
-	domains := fs.String("domains", "", "comma-separated Cloudflare Static custom domains when -target cloudflare_static")
+	domains := fs.String("domains", "", "comma-separated custom domains when -target cloudflare_static or hybrid_edge")
 	staticName := fs.String("static-name", "", "Worker name when -target cloudflare_static; defaults to supercdn-{site}-static")
-	compatDate := fs.String("compatibility-date", time.Now().UTC().Format("2006-01-02"), "Workers compatibility date when -target cloudflare_static")
-	staticMessage := fs.String("message", "", "Cloudflare deployment message when -target cloudflare_static")
+	edgeName := fs.String("edge-name", "", "Worker name when -target hybrid_edge; defaults to supercdn-{site}-edge")
+	compatDate := fs.String("compatibility-date", time.Now().UTC().Format("2006-01-02"), "Workers compatibility date when -target cloudflare_static or hybrid_edge")
+	staticMessage := fs.String("message", "", "Cloudflare deployment message when -target cloudflare_static or hybrid_edge")
 	staticCachePolicy := fs.String("static-cache-policy", cloudflareStaticCachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
 	staticNotFoundHandling := fs.String("static-not-found-handling", "", "Cloudflare Static not_found_handling: none, 404-page, or single-page-application")
 	staticSPA := fs.Bool("static-spa", false, "enable Cloudflare Static single-page-application fallback")
@@ -556,6 +557,10 @@ func deploySite(c client, args []string) error {
 	staticVerifyInterval := fs.Duration("static-verify-interval", 5*time.Second, "delay between Cloudflare Static readiness probes")
 	staticVerifySPAPath := fs.String("static-verify-spa-path", "", "SPA path to verify after Cloudflare Static publish; defaults to /__supercdn_spa_probe when -static-spa is enabled")
 	staticVerifyResolver := fs.String("static-verify-resolver", "1.1.1.1:53", "DNS resolver for Cloudflare Static readiness probes")
+	edgeKVNamespaceID := fs.String("edge-kv-namespace-id", "", "Cloudflare Workers KV namespace id for hybrid_edge edge manifests")
+	edgeKVNamespace := fs.String("edge-kv-namespace", "supercdn-edge-manifest", "Cloudflare Workers KV namespace title for hybrid_edge edge manifests")
+	edgeManifestMode := fs.String("edge-manifest-mode", "route", "hybrid_edge Worker manifest mode: route or enforce")
+	edgeDefaultCacheControl := fs.String("edge-default-cache-control", "public, max-age=300", "default Cache-Control for hybrid_edge Worker fallback responses")
 	_ = fs.Parse(args)
 	if *site == "" {
 		return errors.New("-site is required")
@@ -583,6 +588,16 @@ func deploySite(c client, args []string) error {
 		}
 		if len(resolvedDomains) == 0 {
 			resolvedDomains = defaults.Domains
+		}
+	} else if strings.TrimSpace(resolvedProfile) == "" || len(resolvedDomains) == 0 {
+		defaults, err := c.resolveSiteDeploymentTarget(*site, *profile, *target)
+		if err == nil {
+			if strings.TrimSpace(resolvedProfile) == "" {
+				resolvedProfile = defaults.RouteProfile
+			}
+			if len(resolvedDomains) == 0 {
+				resolvedDomains = defaults.Domains
+			}
 		}
 	}
 	if resolvedTarget == "cloudflare_static" {
@@ -613,6 +628,39 @@ func deploySite(c client, args []string) error {
 			Pinned:            *pinned,
 		})
 	}
+	if resolvedTarget == "hybrid_edge" {
+		if *dir == "" {
+			return errors.New("hybrid_edge deploy-site requires -dir")
+		}
+		if *bundle != "" {
+			return errors.New("hybrid_edge deploy-site does not accept -bundle yet")
+		}
+		return deploySiteHybridEdge(c, hybridEdgeDeploySiteOptions{
+			Site:                *site,
+			Dir:                 *dir,
+			Environment:         *env,
+			RouteProfile:        resolvedProfile,
+			DeploymentTarget:    resolvedTarget,
+			Domains:             resolvedDomains,
+			WorkerName:          *edgeName,
+			CompatibilityDate:   *compatDate,
+			Message:             *staticMessage,
+			CachePolicy:         *staticCachePolicy,
+			NotFoundHandling:    cloudflareStaticNotFoundHandlingFlag(*staticNotFoundHandling, *staticSPA),
+			VerifyMode:          *staticVerify,
+			VerifyTimeout:       *staticVerifyTimeout,
+			VerifyInterval:      *staticVerifyInterval,
+			VerifySPAPath:       *staticVerifySPAPath,
+			VerifyResolver:      *staticVerifyResolver,
+			Promote:             *promote,
+			Pinned:              *pinned,
+			Timeout:             *timeout,
+			KVNamespaceID:       *edgeKVNamespaceID,
+			KVNamespace:         *edgeKVNamespace,
+			ManifestMode:        *edgeManifestMode,
+			DefaultCacheControl: *edgeDefaultCacheControl,
+		})
+	}
 	artifact := *bundle
 	cleanup := ""
 	if *dir != "" {
@@ -627,7 +675,7 @@ func deploySite(c client, args []string) error {
 		defer os.Remove(cleanup)
 	}
 	fields := map[string]string{
-		"route_profile":     *profile,
+		"route_profile":     resolvedProfile,
 		"deployment_target": resolvedTarget,
 		"environment":       *env,
 		"promote":           fmt.Sprint(*promote),
@@ -742,7 +790,9 @@ func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions
 		SPAPath:                     opts.VerifySPAPath,
 		Resolver:                    opts.VerifyResolver,
 		NotFoundHandling:            publish.NotFoundHandling,
+		RequireDirectAssets:         true,
 		RequireGeneratedCachePolicy: publish.HeadersGenerated,
+		RequireImmutableAssetCache:  publish.HeadersGenerated,
 	})
 	if err != nil {
 		raw, _ := json.Marshal(verify)
@@ -772,6 +822,415 @@ func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions
 	return c.doJSON(http.MethodPost, "/api/v1/sites/"+url.PathEscape(opts.Site)+"/cloudflare-static/deployments", req)
 }
 
+type hybridEdgeDeploySiteOptions struct {
+	Site                string
+	Dir                 string
+	Environment         string
+	RouteProfile        string
+	DeploymentTarget    string
+	Domains             []string
+	WorkerName          string
+	CompatibilityDate   string
+	Message             string
+	CachePolicy         string
+	NotFoundHandling    string
+	VerifyMode          string
+	VerifyTimeout       time.Duration
+	VerifyInterval      time.Duration
+	VerifySPAPath       string
+	VerifyResolver      string
+	Promote             bool
+	Pinned              bool
+	Timeout             time.Duration
+	KVNamespaceID       string
+	KVNamespace         string
+	ManifestMode        string
+	DefaultCacheControl string
+}
+
+type siteDeploymentResult struct {
+	ID               string   `json:"id"`
+	SiteID           string   `json:"site_id"`
+	Status           string   `json:"status"`
+	RouteProfile     string   `json:"route_profile"`
+	DeploymentTarget string   `json:"deployment_target"`
+	Active           bool     `json:"active"`
+	ProductionURL    string   `json:"production_url,omitempty"`
+	ProductionURLs   []string `json:"production_urls,omitempty"`
+	PreviewURL       string   `json:"preview_url,omitempty"`
+}
+
+type edgeManifestPublishResponse struct {
+	SiteID            string                `json:"site_id"`
+	DeploymentID      string                `json:"deployment_id"`
+	Active            bool                  `json:"active"`
+	CloudflareAccount string                `json:"cloudflare_account,omitempty"`
+	CloudflareLibrary string                `json:"cloudflare_library,omitempty"`
+	KVNamespaceID     string                `json:"kv_namespace_id,omitempty"`
+	KVNamespace       string                `json:"kv_namespace,omitempty"`
+	KeyPrefix         string                `json:"key_prefix"`
+	Domains           []string              `json:"domains,omitempty"`
+	DryRun            bool                  `json:"dry_run"`
+	Status            string                `json:"status"`
+	ManifestSize      int                   `json:"manifest_size"`
+	ManifestSHA256    string                `json:"manifest_sha256"`
+	Writes            []edgeManifestKVWrite `json:"writes,omitempty"`
+	ManifestWarnings  []string              `json:"manifest_warnings,omitempty"`
+	Warnings          []string              `json:"warnings,omitempty"`
+	Errors            []string              `json:"errors,omitempty"`
+}
+
+type edgeManifestKVWrite struct {
+	Domain string `json:"domain"`
+	Key    string `json:"key"`
+	Kind   string `json:"kind"`
+	Action string `json:"action"`
+	DryRun bool   `json:"dry_run,omitempty"`
+	Size   int    `json:"size,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+type hybridEdgeDeployResponse struct {
+	Status       string                          `json:"status"`
+	SiteID       string                          `json:"site_id"`
+	DeploymentID string                          `json:"deployment_id"`
+	URL          string                          `json:"url,omitempty"`
+	URLs         []string                        `json:"urls,omitempty"`
+	Deployment   siteDeploymentResult            `json:"deployment"`
+	EdgeManifest edgeManifestPublishResponse     `json:"edge_manifest"`
+	Worker       cloudflareStaticPublishResponse `json:"worker"`
+	Verify       cloudflareStaticVerifyReport    `json:"verify"`
+}
+
+func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
+	if len(cleanDomains(opts.Domains)) == 0 {
+		return errors.New("hybrid_edge deploy-site requires at least one domain")
+	}
+	dep, err := createAndWaitSiteDeployment(c, opts.Site, siteDeploymentUploadOptions{
+		Dir:              opts.Dir,
+		Environment:      opts.Environment,
+		RouteProfile:     opts.RouteProfile,
+		DeploymentTarget: opts.DeploymentTarget,
+		Promote:          opts.Promote,
+		Pinned:           opts.Pinned,
+		Timeout:          opts.Timeout,
+	})
+	if err != nil {
+		return err
+	}
+	edgeManifest, err := c.publishEdgeManifestForDeployment(edgeManifestPublishOptions{
+		Site:          opts.Site,
+		Deployment:    dep.ID,
+		Domains:       opts.Domains,
+		KVNamespaceID: opts.KVNamespaceID,
+		KVNamespace:   opts.KVNamespace,
+		ActiveKey:     dep.Active,
+		DeploymentKey: true,
+		DryRun:        false,
+	})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(edgeManifest.KVNamespaceID) == "" {
+		return errors.New("hybrid_edge publish-edge-manifest did not return a kv_namespace_id")
+	}
+	workerName := strings.TrimSpace(opts.WorkerName)
+	if workerName == "" {
+		workerName = "supercdn-" + cleanWorkerName(opts.Site) + "-edge"
+	}
+	publish, err := runHybridEdgePublish(hybridEdgePublishOptions{
+		Site:                opts.Site,
+		WorkerName:          workerName,
+		Dir:                 opts.Dir,
+		Domains:             opts.Domains,
+		CompatibilityDate:   opts.CompatibilityDate,
+		Message:             firstNonEmpty(opts.Message, "SuperCDN hybrid_edge deploy "+opts.Site),
+		CachePolicy:         opts.CachePolicy,
+		NotFoundHandling:    opts.NotFoundHandling,
+		KVNamespaceID:       edgeManifest.KVNamespaceID,
+		ManifestMode:        firstNonEmpty(opts.ManifestMode, "route"),
+		DefaultCacheControl: firstNonEmpty(opts.DefaultCacheControl, "public, max-age=300"),
+		OriginBaseURL:       c.baseURL,
+		EnvFile:             "configs/private/cloudflare.env",
+		Wrangler:            "npx",
+		WranglerPrefix:      "worker",
+	})
+	if err != nil {
+		raw, _ := json.Marshal(publish)
+		_ = printJSON(raw)
+		return err
+	}
+	verify, err := verifyCloudflareStaticPublish(context.Background(), cloudflareStaticVerifyOptions{
+		Mode:                        opts.VerifyMode,
+		Domains:                     opts.Domains,
+		Timeout:                     opts.VerifyTimeout,
+		Interval:                    opts.VerifyInterval,
+		SPAPath:                     opts.VerifySPAPath,
+		Resolver:                    opts.VerifyResolver,
+		NotFoundHandling:            publish.NotFoundHandling,
+		RequireDirectAssets:         false,
+		RequireGeneratedCachePolicy: publish.HeadersGenerated,
+		RequireImmutableAssetCache:  false,
+	})
+	if err != nil {
+		raw, _ := json.Marshal(verify)
+		_ = printJSON(raw)
+		return err
+	}
+	resp := hybridEdgeDeployResponse{
+		Status:       "ok",
+		SiteID:       opts.Site,
+		DeploymentID: dep.ID,
+		URL:          firstNonEmpty(dep.ProductionURL, firstString(dep.ProductionURLs)),
+		URLs:         dep.ProductionURLs,
+		Deployment:   dep,
+		EdgeManifest: edgeManifest,
+		Worker:       publish,
+		Verify:       verify,
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	return printJSON(raw)
+}
+
+type siteDeploymentUploadOptions struct {
+	Dir              string
+	Environment      string
+	RouteProfile     string
+	DeploymentTarget string
+	Promote          bool
+	Pinned           bool
+	Timeout          time.Duration
+}
+
+func createAndWaitSiteDeployment(c client, site string, opts siteDeploymentUploadOptions) (siteDeploymentResult, error) {
+	zipPath, err := zipDirectory(opts.Dir)
+	if err != nil {
+		return siteDeploymentResult{}, err
+	}
+	defer os.Remove(zipPath)
+	fields := map[string]string{
+		"route_profile":     opts.RouteProfile,
+		"deployment_target": opts.DeploymentTarget,
+		"environment":       opts.Environment,
+		"promote":           fmt.Sprint(opts.Promote),
+		"pinned":            fmt.Sprint(opts.Pinned),
+	}
+	raw, err := c.uploadFileRaw("/api/v1/sites/"+url.PathEscape(site)+"/deployments", "artifact", zipPath, fields)
+	if err != nil {
+		return siteDeploymentResult{}, err
+	}
+	var created struct {
+		DeploymentID string `json:"deployment_id"`
+	}
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return siteDeploymentResult{}, err
+	}
+	if created.DeploymentID == "" {
+		return siteDeploymentResult{}, errors.New("deployment response did not include deployment_id")
+	}
+	readyRaw, err := c.waitDeploymentRaw(site, created.DeploymentID, opts.Timeout)
+	if err != nil {
+		_ = printJSON(readyRaw)
+		return siteDeploymentResult{}, err
+	}
+	var dep siteDeploymentResult
+	if err := json.Unmarshal(readyRaw, &dep); err != nil {
+		return siteDeploymentResult{}, err
+	}
+	return dep, nil
+}
+
+type edgeManifestPublishOptions struct {
+	Site          string
+	Deployment    string
+	Domains       []string
+	KVNamespaceID string
+	KVNamespace   string
+	ActiveKey     bool
+	DeploymentKey bool
+	DryRun        bool
+}
+
+func (c client) publishEdgeManifestForDeployment(opts edgeManifestPublishOptions) (edgeManifestPublishResponse, error) {
+	req := map[string]any{
+		"domains":         opts.Domains,
+		"kv_namespace_id": opts.KVNamespaceID,
+		"kv_namespace":    opts.KVNamespace,
+		"active_key":      opts.ActiveKey,
+		"deployment_key":  opts.DeploymentKey,
+		"dry_run":         opts.DryRun,
+	}
+	raw, err := c.doRaw(http.MethodPost, "/api/v1/sites/"+url.PathEscape(opts.Site)+"/deployments/"+url.PathEscape(opts.Deployment)+"/edge-manifest/publish", bytes.NewReader(mustJSON(req)), "application/json")
+	if err != nil {
+		return edgeManifestPublishResponse{}, err
+	}
+	var resp edgeManifestPublishResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return edgeManifestPublishResponse{}, err
+	}
+	if resp.Status != "ok" && resp.Status != "planned" {
+		return resp, fmt.Errorf("publish edge manifest status %q", resp.Status)
+	}
+	return resp, nil
+}
+
+type hybridEdgePublishOptions struct {
+	Site                string
+	WorkerName          string
+	Dir                 string
+	Domains             []string
+	CompatibilityDate   string
+	Message             string
+	CachePolicy         string
+	NotFoundHandling    string
+	KVNamespaceID       string
+	ManifestMode        string
+	DefaultCacheControl string
+	OriginBaseURL       string
+	EnvFile             string
+	Wrangler            string
+	WranglerPrefix      string
+}
+
+func runHybridEdgePublish(opts hybridEdgePublishOptions) (cloudflareStaticPublishResponse, error) {
+	if strings.TrimSpace(opts.Dir) == "" {
+		return cloudflareStaticPublishResponse{}, errors.New("-dir is required")
+	}
+	absDir, err := filepath.Abs(opts.Dir)
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	info, err := os.Stat(absDir)
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	if !info.IsDir() {
+		return cloudflareStaticPublishResponse{}, fmt.Errorf("%s is not a directory", opts.Dir)
+	}
+	preparedDir, cleanup, headers, err := prepareCloudflareStaticAssetsDir(absDir, opts.CachePolicy)
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	notFoundHandling, err := normalizeCloudflareStaticNotFoundHandling(opts.NotFoundHandling)
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	workerName := strings.TrimSpace(opts.WorkerName)
+	if workerName == "" {
+		if strings.TrimSpace(opts.Site) == "" {
+			return cloudflareStaticPublishResponse{}, errors.New("-site or -edge-name is required")
+		}
+		workerName = "supercdn-" + cleanWorkerName(opts.Site) + "-edge"
+	}
+	workerMain, err := filepath.Abs(filepath.Join("worker", "src", "index.ts"))
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	wranglerConfig, configCleanup, err := writeHybridEdgeWranglerConfig(hybridEdgeWranglerConfigOptions{
+		WorkerName:          workerName,
+		WorkerMain:          workerMain,
+		AssetsDir:           preparedDir,
+		CompatibilityDate:   opts.CompatibilityDate,
+		NotFoundHandling:    notFoundHandling,
+		KVNamespaceID:       opts.KVNamespaceID,
+		ManifestMode:        opts.ManifestMode,
+		DefaultCacheControl: opts.DefaultCacheControl,
+		OriginBaseURL:       opts.OriginBaseURL,
+	})
+	if err != nil {
+		return cloudflareStaticPublishResponse{}, err
+	}
+	defer configCleanup()
+	wrangler := firstNonEmpty(strings.TrimSpace(opts.Wrangler), "npx")
+	cmdArgs := wranglerDeployArgs(wrangler, opts.WranglerPrefix, workerName, preparedDir, opts.Domains, opts.CompatibilityDate, opts.Message, false, wranglerConfig)
+	resp := cloudflareStaticPublishResponse{
+		Status:            "planned",
+		DryRun:            false,
+		Worker:            workerName,
+		AssetsDir:         preparedDir,
+		SourceDir:         absDir,
+		Domains:           opts.Domains,
+		CompatibilityDate: strings.TrimSpace(opts.CompatibilityDate),
+		CachePolicy:       headers.Policy,
+		NotFoundHandling:  notFoundHandling,
+		WranglerConfig:    wranglerConfig,
+		HeadersFile:       headers.Path,
+		HeadersSource:     headers.Source,
+		HeadersGenerated:  headers.Generated,
+		Command:           append([]string{wrangler}, cmdArgs...),
+	}
+	env, err := cloudflareStaticEnv(opts.EnvFile)
+	if err != nil {
+		return resp, err
+	}
+	out, exitCode, err := runCommand(wrangler, cmdArgs, env)
+	resp.Output = strings.TrimSpace(out)
+	resp.ExitCode = exitCode
+	if err != nil {
+		resp.Status = "failed"
+		return resp, err
+	}
+	resp.Status = "ok"
+	return resp, nil
+}
+
+type hybridEdgeWranglerConfigOptions struct {
+	WorkerName          string
+	WorkerMain          string
+	AssetsDir           string
+	CompatibilityDate   string
+	NotFoundHandling    string
+	KVNamespaceID       string
+	ManifestMode        string
+	DefaultCacheControl string
+	OriginBaseURL       string
+}
+
+func writeHybridEdgeWranglerConfig(opts hybridEdgeWranglerConfigOptions) (string, func(), error) {
+	if strings.TrimSpace(opts.KVNamespaceID) == "" {
+		return "", nil, errors.New("kv namespace id is required")
+	}
+	tmp, err := os.MkdirTemp("", "supercdn-hybrid-edge-wrangler-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+	configPath := filepath.Join(tmp, "wrangler.toml")
+	var b strings.Builder
+	b.WriteString("name = " + tomlString(opts.WorkerName) + "\n")
+	b.WriteString("main = " + tomlPathString(opts.WorkerMain) + "\n")
+	b.WriteString("compatibility_date = " + tomlString(strings.TrimSpace(opts.CompatibilityDate)) + "\n\n")
+	b.WriteString("[vars]\n")
+	b.WriteString("ORIGIN_BASE_URL = " + tomlString(firstNonEmpty(opts.OriginBaseURL, "https://origin.example.com")) + "\n")
+	b.WriteString("EDGE_DEFAULT_CACHE_CONTROL = " + tomlString(firstNonEmpty(opts.DefaultCacheControl, "public, max-age=300")) + "\n")
+	b.WriteString("EDGE_MANIFEST_DRY_RUN = \"true\"\n")
+	b.WriteString("EDGE_MANIFEST_KEY_PREFIX = \"sites/\"\n")
+	b.WriteString("EDGE_MANIFEST_MODE = " + tomlString(firstNonEmpty(opts.ManifestMode, "route")) + "\n")
+	b.WriteString("EDGE_STATIC_ASSETS = \"true\"\n\n")
+	b.WriteString("[assets]\n")
+	b.WriteString("directory = " + tomlPathString(opts.AssetsDir) + "\n")
+	b.WriteString("binding = \"ASSETS\"\n")
+	b.WriteString("run_worker_first = true\n")
+	if strings.TrimSpace(opts.NotFoundHandling) != "" {
+		b.WriteString("not_found_handling = " + tomlString(strings.TrimSpace(opts.NotFoundHandling)) + "\n")
+	}
+	b.WriteString("\n[[kv_namespaces]]\n")
+	b.WriteString("binding = \"EDGE_MANIFEST\"\n")
+	b.WriteString("id = " + tomlString(strings.TrimSpace(opts.KVNamespaceID)) + "\n")
+	if err := os.WriteFile(configPath, []byte(b.String()), 0600); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return configPath, cleanup, nil
+}
+
 type cloudflareStaticVerifyOptions struct {
 	Mode                        string
 	Domains                     []string
@@ -780,7 +1239,9 @@ type cloudflareStaticVerifyOptions struct {
 	SPAPath                     string
 	Resolver                    string
 	NotFoundHandling            string
+	RequireDirectAssets         bool
 	RequireGeneratedCachePolicy bool
+	RequireImmutableAssetCache  bool
 }
 
 type cloudflareStaticVerifyReport struct {
@@ -835,9 +1296,9 @@ func verifyCloudflareStaticPublish(ctx context.Context, opts cloudflareStaticVer
 			MaxAssets:                  20,
 			Timeout:                    30 * time.Second,
 			Client:                     httpClient,
-			RequireDirectAssets:        true,
+			RequireDirectAssets:        opts.RequireDirectAssets,
 			RequireHTMLRevalidate:      opts.RequireGeneratedCachePolicy,
-			RequireImmutableAssetCache: opts.RequireGeneratedCachePolicy,
+			RequireImmutableAssetCache: opts.RequireImmutableAssetCache,
 		})
 		if cloudflareStaticReportsOK(last) {
 			report.Status = "ok"
@@ -2371,28 +2832,35 @@ func printJSON(raw []byte) error {
 }
 
 func (c client) waitDeployment(site, deployment string, timeout time.Duration) error {
+	raw, err := c.waitDeploymentRaw(site, deployment, timeout)
+	if err != nil {
+		_ = printJSON(raw)
+		return err
+	}
+	return printJSON(raw)
+}
+
+func (c client) waitDeploymentRaw(site, deployment string, timeout time.Duration) ([]byte, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		raw, err := c.doRaw(http.MethodGet, "/api/v1/sites/"+url.PathEscape(site)+"/deployments/"+url.PathEscape(deployment), nil, "")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		var dep struct {
 			Status string `json:"status"`
 		}
 		if err := json.Unmarshal(raw, &dep); err != nil {
-			return err
+			return raw, err
 		}
 		switch dep.Status {
 		case "ready", "active":
-			return printJSON(raw)
+			return raw, nil
 		case "failed":
-			_ = printJSON(raw)
-			return errors.New("deployment failed")
+			return raw, errors.New("deployment failed")
 		}
 		if time.Now().After(deadline) {
-			_ = printJSON(raw)
-			return errors.New("deployment wait timed out")
+			return raw, errors.New("deployment wait timed out")
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -2578,6 +3046,35 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func firstString(values []string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func mustJSON(value any) []byte {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+func tomlString(value string) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return `""`
+	}
+	return string(raw)
+}
+
+func tomlPathString(value string) string {
+	return tomlString(filepath.ToSlash(value))
+}
+
 func usage() {
 	fmt.Println(`Usage:
   supercdnctl [global flags] create-project -id assets
@@ -2592,7 +3089,7 @@ func usage() {
   supercdnctl [global flags] provision-cloudflare-r2 -cloudflare-library overseas_accel -dry-run
   supercdnctl [global flags] create-r2-credentials -cloudflare-account cf_business_main -write-config .\configs\config.local.json -dry-run=false
   supercdnctl set-r2-credentials -config .\configs\config.local.json -cloudflare-account cf_business_main -access-key-id <id> -secret-access-key <secret>
-  supercdnctl [global flags] deploy-site -site blog -dir ./dist -profile china_all -target hybrid_edge
+  supercdnctl [global flags] deploy-site -site blog -dir ./dist -profile china_all -target hybrid_edge -domains blog.qwk.ccwu.cc -static-spa
   supercdnctl [global flags] deploy-site -site blog -dir ./dist -profile overseas -static-spa
   supercdnctl [global flags] deploy-site -site blog -bundle ./dist.zip -env preview
   supercdnctl inspect-site -dir ./dist

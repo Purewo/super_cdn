@@ -231,6 +231,11 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 | `-static-verify-interval` | 否 | `5s` | `wait` 模式两次探测间隔 |
 | `-static-verify-spa-path` | 否 | 自动 | SPA fallback 探测路径；`-static-spa` 时默认 `/__supercdn_spa_probe` |
 | `-static-verify-resolver` | 否 | `1.1.1.1:53` | readiness HTTP 探测使用的 DNS 解析器 |
+| `-edge-name` | 否 | `supercdn-{site}-edge` | `hybrid_edge` Worker 名称 |
+| `-edge-kv-namespace` | 否 | `supercdn-edge-manifest` | `hybrid_edge` edge manifest KV namespace 标题 |
+| `-edge-kv-namespace-id` | 否 | 空 | `hybrid_edge` edge manifest KV namespace ID；传入后无需按标题解析 |
+| `-edge-manifest-mode` | 否 | `route` | `hybrid_edge` Worker manifest 模式：`route` 或 `enforce` |
+| `-edge-default-cache-control` | 否 | `public, max-age=300` | `hybrid_edge` Worker 默认 Cache-Control |
 
 限制：
 
@@ -287,6 +292,7 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 .\bin\supercdnctl.exe export-edge-manifest -site blog -deployment dpl-abc -out .\edge-manifest.json
 .\bin\supercdnctl.exe publish-edge-manifest -site blog -deployment dpl-abc -kv-namespace supercdn-edge-manifest -dry-run
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target cloudflare_static -domains blog-static-test.example.com
+.\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target hybrid_edge -profile china_mobile -domains blog.qwk.ccwu.cc -static-spa
 .\bin\supercdnctl.exe publish-cloudflare-static -site blog -dir .\dist -domains blog-static-test.example.com -dry-run=false
 .\bin\supercdnctl.exe promote-deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc
@@ -303,6 +309,7 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 - `export-edge-manifest` 是只读旁路导出，用于后续 Cloudflare Worker/KV/Pages 边缘路由改造；不会改变当前线上 Go-origin + storage 302 交付链路。
 - `publish-edge-manifest` 默认 dry-run；真实写入 KV 需要 `-dry-run=false`，默认会写 deployment key，并且仅当该 deployment 当前 active 时写 `sites/{host}/active/edge-manifest`。
 - `deploy-site -target cloudflare_static` 是正式的 Cloudflare-native 静态托管入口：它本地调用 Wrangler 发布 Workers Static Assets，然后把部署记录写回 Super CDN。
+- `deploy-site -target hybrid_edge` 会执行完整 no-Go 网站流程：上传线路 deployment、发布 active edge manifest 到 Workers KV、部署带 `ASSETS` 和 `run_worker_first` 的 Worker，然后验证 HTML/SPA 和被 manifest 重定向的资源。
 - `publish-cloudflare-static` 是更底层的 Cloudflare canary/诊断入口，只发布本地目录，不写 Super CDN deployment 记录；默认 dry-run，真实发布需要 `-dry-run=false`。它读取 `configs/private/cloudflare.env` 中的 `CF_API_TOKEN` / `CF_ACCOUNT_ID`，不会读取或打印密钥值。
 - `gc-site` 当前是保守入口，不做破坏性清理；后续可按 manifest 引用计数清理未引用对象。
 

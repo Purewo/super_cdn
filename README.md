@@ -101,6 +101,7 @@ For `cloudflare_static`, `deploy-site` uses the local Wrangler Workers Static As
 
 ```powershell
 go run .\cmd\supercdnctl -- deploy-site -site demo -dir .\dist -target cloudflare_static -domains demo-static-test.example.com -static-name supercdn-demo-static
+go run .\cmd\supercdnctl -- deploy-site -site demo -dir .\dist -target hybrid_edge -profile china_mobile -domains demo.qwk.ccwu.cc -static-spa
 go run .\cmd\supercdnctl -- deploy-site -site demo -dir .\dist -profile overseas
 ```
 
@@ -109,6 +110,8 @@ By default, Super CDN uses `-static-cache-policy auto` for Cloudflare Static dep
 For SPAs, pass `-static-spa`. The CLI generates a temporary `wrangler.toml` with `assets.not_found_handling = "single-page-application"`, so deep links such as `/movie/123` return `index.html` directly from Cloudflare Static Assets. Use `-static-not-found-handling 404-page|single-page-application|none` when you need the explicit Cloudflare mode.
 
 After a Cloudflare Static publish, `deploy-site` now runs a readiness probe by default before writing the active Super CDN deployment record. The probe verifies each custom domain over HTTPS, checks that the root returns HTML, verifies JS/CSS MIME types, requires direct same-site assets, checks generated cache headers, and validates SPA fallback when `-static-spa` is enabled. The readiness probe uses `1.1.1.1:53` by default so local DNS cache does not mistake an old wildcard origin record for the new Cloudflare custom domain. Use `-static-verify warn` to record the deployment even if readiness is not yet passing, or `-static-verify none` for low-level diagnostics.
+
+For true hybrid no-origin website delivery, use `-target hybrid_edge`. The CLI uploads the deployment to the selected Super CDN route profile, waits until it is ready, publishes the active edge manifest to Workers KV, deploys the shared Worker with Cloudflare Static Assets (`ASSETS`, `run_worker_first = true`), and runs the same readiness probe without requiring direct same-site assets. Entry HTML and SPA fallback are served by Cloudflare Static Assets; manifest-backed resources redirect directly to the selected storage line. Use `-edge-kv-namespace`, `-edge-kv-namespace-id`, `-edge-name`, and `-edge-manifest-mode route|enforce` for explicit edge routing control.
 
 The lower-level canary command is still available when you only want to publish to Cloudflare without recording a Super CDN deployment:
 
@@ -128,7 +131,7 @@ Deployment responses include direct access URLs when the site has bound domains:
 - `inspect` for non-blocking bundle warnings such as module scripts, dynamic chunks, CSS relative assets, fonts, wasm and service workers.
 - `delivery_summary` for how many files are planned as origin or redirect delivery.
 
-For hosted sites, the Go origin serves the root `index.html` directly. Other successful site file requests return `302 Found` to the freshest direct storage URL when one is available, so Cloudflare carries the cache/fetch traffic instead of forcing the Go origin to stream every asset. Range requests, 404 responses, and SPA fallbacks that resolve to root `index.html` stay on the origin. Generic `/o/...` asset redirects still follow the route profile `allow_redirect` policy.
+For `origin_assisted` hosted sites, the Go origin serves the root `index.html` directly. Other successful site file requests return `302 Found` to the freshest direct storage URL when one is available, so Cloudflare carries the cache/fetch traffic instead of forcing the Go origin to stream every asset. Range requests, 404 responses, and SPA fallbacks that resolve to root `index.html` stay on the origin. Generic `/o/...` asset redirects still follow the route profile `allow_redirect` policy.
 
 Export an edge manifest for a ready deployment when preparing the zero-origin edge path. This is a read-only sidecar export; it does not change the current production delivery path.
 
