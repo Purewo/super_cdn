@@ -46,6 +46,29 @@ func TestPrepareCloudflareStaticAssetsDirGeneratesHeaders(t *testing.T) {
 	}
 }
 
+func TestCLIProfileConfigRoundTrip(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "cli.json")
+	t.Setenv("SUPERCDN_CONFIG", cfgPath)
+
+	if err := saveCLIProfile("team", "http://127.0.0.1:8080/", "sct_secret"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCLIConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CurrentProfile != "team" {
+		t.Fatalf("current profile = %q", cfg.CurrentProfile)
+	}
+	profile, ok := cfg.Profiles["team"]
+	if !ok {
+		t.Fatalf("missing saved profile: %+v", cfg.Profiles)
+	}
+	if profile.Server != "http://127.0.0.1:8080" || profile.Token != "sct_secret" {
+		t.Fatalf("profile = %+v", profile)
+	}
+}
+
 func TestPrepareCloudflareStaticAssetsDirRespectsExistingHeaders(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "index.html"), "ok")

@@ -15,6 +15,7 @@ const (
 
 type AssetBucket struct {
 	Slug                string    `json:"slug"`
+	WorkspaceID         string    `json:"workspace_id,omitempty"`
 	Name                string    `json:"name"`
 	Description         string    `json:"description,omitempty"`
 	RouteProfile        string    `json:"route_profile"`

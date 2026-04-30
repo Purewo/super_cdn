@@ -35,21 +35,57 @@ type client struct {
 	http    *http.Client
 }
 
+type cliConfig struct {
+	CurrentProfile string                `json:"current_profile,omitempty"`
+	Profiles       map[string]cliProfile `json:"profiles,omitempty"`
+}
+
+type cliProfile struct {
+	Server string `json:"server"`
+	Token  string `json:"token"`
+}
+
 func main() {
-	serverURL := flag.String("server", firstNonEmpty(os.Getenv("SUPERCDN_URL"), "http://127.0.0.1:8080"), "Super CDN server URL")
-	token := flag.String("token", os.Getenv("SUPERCDN_TOKEN"), "admin token")
+	cfg, err := loadCLIConfig()
+	if err != nil {
+		fatal(err)
+	}
+	defaultProfile := firstNonEmpty(os.Getenv("SUPERCDN_PROFILE"), cfg.CurrentProfile, "default")
+	profile := flag.String("profile", defaultProfile, "local CLI profile")
+	serverURL := flag.String("server", os.Getenv("SUPERCDN_URL"), "Super CDN server URL")
+	token := flag.String("token", os.Getenv("SUPERCDN_TOKEN"), "admin or user API token")
 	flag.Parse()
 	args := flag.Args()
 	if len(args) == 0 {
 		usage()
 		os.Exit(2)
 	}
-	if *token == "" && args[0] != "inspect-site" && args[0] != "probe-site" && args[0] != "set-r2-credentials" && args[0] != "publish-cloudflare-static" {
-		fatal(errors.New("token is required, pass -token or SUPERCDN_TOKEN"))
+	if stored, ok := cfg.Profiles[*profile]; ok {
+		if *serverURL == "" && os.Getenv("SUPERCDN_URL") == "" {
+			*serverURL = stored.Server
+		}
+		if *token == "" && os.Getenv("SUPERCDN_TOKEN") == "" {
+			*token = stored.Token
+		}
+	}
+	*serverURL = firstNonEmpty(*serverURL, "http://127.0.0.1:8080")
+	if *token == "" && commandNeedsToken(args[0]) {
+		fatal(errors.New("token is required; run login, pass -token, or set SUPERCDN_TOKEN"))
 	}
 	c := client{baseURL: strings.TrimRight(*serverURL, "/"), token: *token, http: http.DefaultClient}
-	var err error
 	switch args[0] {
+	case "login":
+		err = login(c, *profile, args[1:])
+	case "logout":
+		err = logout(*profile, args[1:])
+	case "whoami":
+		err = whoami(c, args[1:])
+	case "invite-user":
+		err = inviteUser(c, args[1:])
+	case "list-users":
+		err = listUsers(c, args[1:])
+	case "revoke-token":
+		err = revokeToken(c, args[1:])
 	case "create-project":
 		err = createProject(c, args[1:])
 	case "upload":
@@ -144,6 +180,173 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+}
+
+func commandNeedsToken(command string) bool {
+	switch command {
+	case "inspect-site", "probe-site", "set-r2-credentials", "publish-cloudflare-static", "login", "logout":
+		return false
+	default:
+		return true
+	}
+}
+
+func loadCLIConfig() (cliConfig, error) {
+	path, err := cliConfigPath()
+	if err != nil {
+		return cliConfig{}, err
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return cliConfig{Profiles: map[string]cliProfile{}}, nil
+	}
+	if err != nil {
+		return cliConfig{}, err
+	}
+	var cfg cliConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return cliConfig{}, fmt.Errorf("read CLI config %s: %w", path, err)
+	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = map[string]cliProfile{}
+	}
+	return cfg, nil
+}
+
+func saveCLIConfig(cfg cliConfig) error {
+	if cfg.Profiles == nil {
+		cfg.Profiles = map[string]cliProfile{}
+	}
+	path, err := cliConfigPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	return os.WriteFile(path, raw, 0o600)
+}
+
+func cliConfigPath() (string, error) {
+	if path := strings.TrimSpace(os.Getenv("SUPERCDN_CONFIG")); path != "" {
+		return path, nil
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "supercdn", "cli.json"), nil
+}
+
+func saveCLIProfile(profileName, serverURL, token string) error {
+	cfg, err := loadCLIConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = map[string]cliProfile{}
+	}
+	cfg.CurrentProfile = profileName
+	cfg.Profiles[profileName] = cliProfile{Server: strings.TrimRight(serverURL, "/"), Token: token}
+	return saveCLIConfig(cfg)
+}
+
+func login(c client, profileName string, args []string) error {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	inviteToken := fs.String("invite-token", "", "invite token")
+	tokenName := fs.String("token-name", "", "local token name")
+	_ = fs.Parse(args)
+	if *inviteToken == "" {
+		return errors.New("-invite-token is required")
+	}
+	raw, err := c.doJSONRaw(http.MethodPost, "/api/v1/auth/accept-invite", map[string]string{
+		"invite_token": *inviteToken,
+		"token_name":   firstNonEmpty(*tokenName, profileName),
+	})
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		User     any             `json:"user"`
+		APIToken string          `json:"api_token"`
+		Token    json.RawMessage `json:"token"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return err
+	}
+	if resp.APIToken == "" {
+		return errors.New("login response did not include an api token")
+	}
+	if err := saveCLIProfile(profileName, c.baseURL, resp.APIToken); err != nil {
+		return err
+	}
+	return printJSON(mustJSON(map[string]any{
+		"status":  "ok",
+		"profile": profileName,
+		"server":  c.baseURL,
+		"user":    resp.User,
+		"token":   json.RawMessage(resp.Token),
+	}))
+}
+
+func logout(profileName string, args []string) error {
+	fs := flag.NewFlagSet("logout", flag.ExitOnError)
+	_ = fs.Parse(args)
+	cfg, err := loadCLIConfig()
+	if err != nil {
+		return err
+	}
+	delete(cfg.Profiles, profileName)
+	if cfg.CurrentProfile == profileName {
+		cfg.CurrentProfile = ""
+	}
+	if err := saveCLIConfig(cfg); err != nil {
+		return err
+	}
+	return printJSON(mustJSON(map[string]any{"status": "ok", "profile": profileName}))
+}
+
+func whoami(c client, args []string) error {
+	fs := flag.NewFlagSet("whoami", flag.ExitOnError)
+	_ = fs.Parse(args)
+	return c.do(http.MethodGet, "/api/v1/auth/me", nil, "")
+}
+
+func inviteUser(c client, args []string) error {
+	fs := flag.NewFlagSet("invite-user", flag.ExitOnError)
+	name := fs.String("name", "", "user name")
+	role := fs.String("role", "maintainer", "owner, maintainer, or viewer")
+	expires := fs.Duration("expires", 7*24*time.Hour, "invite expiration")
+	_ = fs.Parse(args)
+	if *name == "" {
+		return errors.New("-name is required")
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/auth/invites", map[string]any{
+		"name":               *name,
+		"role":               *role,
+		"expires_in_seconds": int64(expires.Seconds()),
+	})
+}
+
+func listUsers(c client, args []string) error {
+	fs := flag.NewFlagSet("list-users", flag.ExitOnError)
+	_ = fs.Parse(args)
+	return c.do(http.MethodGet, "/api/v1/users", nil, "")
+}
+
+func revokeToken(c client, args []string) error {
+	fs := flag.NewFlagSet("revoke-token", flag.ExitOnError)
+	id := fs.String("id", "", "token id")
+	_ = fs.Parse(args)
+	if *id == "" {
+		return errors.New("-id is required")
+	}
+	return c.do(http.MethodDelete, "/api/v1/tokens/"+url.PathEscape(*id), nil, "")
 }
 
 func createProject(c client, args []string) error {
@@ -3275,6 +3478,11 @@ func tomlPathString(value string) string {
 
 func usage() {
 	fmt.Println(`Usage:
+  supercdnctl [global flags] login -invite-token sci_xxx
+  supercdnctl [global flags] whoami
+  supercdnctl [global flags] invite-user -name alice -role maintainer
+  supercdnctl [global flags] list-users
+  supercdnctl [global flags] revoke-token -id tok_xxx
   supercdnctl [global flags] create-project -id assets
   supercdnctl [global flags] upload -file ./logo.png -project assets -path /img/logo.png -profile overseas
   supercdnctl [global flags] create-site -site blog -name "AI学习星图" -profile china_all -domains example.com,www.example.com
@@ -3320,7 +3528,12 @@ func usage() {
   supercdnctl [global flags] job -id 1
   supercdnctl [global flags] replicas -object-id 1
   supercdnctl [global flags] purge -urls https://example.com/a.css
-  supercdnctl [global flags] purge-site -site blog -dry-run`)
+  supercdnctl [global flags] purge-site -site blog -dry-run
+
+Global flags:
+  -server   Super CDN server URL; saved by login when omitted later
+  -token    Admin or user API token; overrides saved profile
+  -profile  Local profile name; defaults to SUPERCDN_PROFILE or current saved profile`)
 }
 
 func fatal(err error) {

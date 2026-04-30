@@ -44,8 +44,56 @@ func (d *DB) migrate(ctx context.Context) error {
 	stmts := []string{
 		`PRAGMA journal_mode = WAL;`,
 		`PRAGMA foreign_keys = ON;`,
+		`CREATE TABLE IF NOT EXISTS workspaces (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL UNIQUE,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS workspace_members (
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			role TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(workspace_id, user_id)
+		);`,
+		`CREATE TABLE IF NOT EXISTS api_tokens (
+			id TEXT PRIMARY KEY,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			last_used_at TEXT NOT NULL DEFAULT '',
+			revoked_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS invites (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			role TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_by INTEGER NOT NULL DEFAULT 0,
+			expires_at TEXT NOT NULL,
+			accepted_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS audit_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workspace_id TEXT NOT NULL,
+			user_id INTEGER NOT NULL DEFAULT 0,
+			action TEXT NOT NULL,
+			resource TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS projects (
 			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL DEFAULT 'default',
 			created_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS objects (
@@ -106,6 +154,7 @@ func (d *DB) migrate(ctx context.Context) error {
 		);`,
 		`CREATE TABLE IF NOT EXISTS asset_buckets (
 			slug TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL DEFAULT 'default',
 			name TEXT NOT NULL,
 			description TEXT NOT NULL,
 			route_profile TEXT NOT NULL,
@@ -132,6 +181,7 @@ func (d *DB) migrate(ctx context.Context) error {
 		);`,
 		`CREATE TABLE IF NOT EXISTS sites (
 			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL DEFAULT 'default',
 			name TEXT NOT NULL DEFAULT '',
 			mode TEXT NOT NULL,
 			route_profile TEXT NOT NULL,
@@ -186,6 +236,18 @@ func (d *DB) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if _, err := d.sql.ExecContext(ctx, `INSERT INTO workspaces(id, name, created_at) VALUES(?, ?, ?) ON CONFLICT(id) DO NOTHING`, model.DefaultWorkspaceID, "Default", nowString()); err != nil {
+		return err
+	}
+	if err := d.ensureColumn(ctx, "projects", "workspace_id", "TEXT NOT NULL DEFAULT 'default'"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn(ctx, "sites", "workspace_id", "TEXT NOT NULL DEFAULT 'default'"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn(ctx, "asset_buckets", "workspace_id", "TEXT NOT NULL DEFAULT 'default'"); err != nil {
+		return err
+	}
 	if err := d.ensureColumn(ctx, "jobs", "result", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -227,8 +289,23 @@ func (d *DB) ensureColumn(ctx context.Context, table, column, definition string)
 }
 
 func (d *DB) CreateProject(ctx context.Context, id string) (*model.Project, error) {
+	return d.CreateProjectInWorkspace(ctx, id, model.DefaultWorkspaceID)
+}
+
+func (d *DB) CreateProjectInWorkspace(ctx context.Context, id, workspaceID string) (*model.Project, error) {
+	if workspaceID == "" {
+		workspaceID = model.DefaultWorkspaceID
+	}
+	if existing, err := d.GetProject(ctx, id); err == nil {
+		if existing.WorkspaceID != workspaceID {
+			return nil, fmt.Errorf("project %q belongs to another workspace", id)
+		}
+		return existing, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
 	now := nowString()
-	_, err := d.sql.ExecContext(ctx, `INSERT INTO projects(id, created_at) VALUES(?, ?) ON CONFLICT(id) DO NOTHING`, id, now)
+	_, err := d.sql.ExecContext(ctx, `INSERT INTO projects(id, workspace_id, created_at) VALUES(?, ?, ?) ON CONFLICT(id) DO NOTHING`, id, workspaceID, now)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +315,7 @@ func (d *DB) CreateProject(ctx context.Context, id string) (*model.Project, erro
 func (d *DB) GetProject(ctx context.Context, id string) (*model.Project, error) {
 	var p model.Project
 	var created string
-	err := d.sql.QueryRowContext(ctx, `SELECT id, created_at FROM projects WHERE id = ?`, id).Scan(&p.ID, &created)
+	err := d.sql.QueryRowContext(ctx, `SELECT id, workspace_id, created_at FROM projects WHERE id = ?`, id).Scan(&p.ID, &p.WorkspaceID, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, sql.ErrNoRows
 	}
@@ -538,10 +615,13 @@ func (d *DB) CreateAssetBucket(ctx context.Context, bucket model.AssetBucket) (*
 	if bucket.Status == "" {
 		bucket.Status = model.AssetBucketActive
 	}
+	if bucket.WorkspaceID == "" {
+		bucket.WorkspaceID = model.DefaultWorkspaceID
+	}
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO asset_buckets(slug, name, description, route_profile, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		bucket.Slug, bucket.Name, bucket.Description, bucket.RouteProfile, joinCSV(bucket.AllowedTypes), bucket.MaxCapacityBytes, bucket.MaxFileSizeBytes, bucket.DefaultCacheControl, bucket.Status, now, now)
+		INSERT INTO asset_buckets(slug, workspace_id, name, description, route_profile, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		bucket.Slug, bucket.WorkspaceID, bucket.Name, bucket.Description, bucket.RouteProfile, joinCSV(bucket.AllowedTypes), bucket.MaxCapacityBytes, bucket.MaxFileSizeBytes, bucket.DefaultCacheControl, bucket.Status, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +630,7 @@ func (d *DB) CreateAssetBucket(ctx context.Context, bucket model.AssetBucket) (*
 
 func (d *DB) GetAssetBucket(ctx context.Context, slug string) (*model.AssetBucket, error) {
 	row := d.sql.QueryRowContext(ctx, `
-		SELECT slug, name, description, route_profile, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at
+		SELECT slug, workspace_id, name, description, route_profile, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at
 		FROM asset_buckets WHERE slug = ?`, slug)
 	bucket, err := scanAssetBucket(row)
 	if err != nil {
@@ -563,26 +643,35 @@ func (d *DB) GetAssetBucket(ctx context.Context, slug string) (*model.AssetBucke
 }
 
 func (d *DB) ListAssetBuckets(ctx context.Context) ([]model.AssetBucket, error) {
-	rows, err := d.sql.QueryContext(ctx, `
-		SELECT slug, name, description, route_profile, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at
-		FROM asset_buckets ORDER BY slug`)
+	return d.ListAssetBucketsInWorkspace(ctx, "")
+}
+
+func (d *DB) ListAssetBucketsInWorkspace(ctx context.Context, workspaceID string) ([]model.AssetBucket, error) {
+	query := `
+		SELECT slug, workspace_id, name, description, route_profile, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at
+		FROM asset_buckets`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if workspaceID == "" {
+		rows, err = d.sql.QueryContext(ctx, query+` ORDER BY slug`)
+	} else {
+		rows, err = d.sql.QueryContext(ctx, query+` WHERE workspace_id = ? ORDER BY slug`, workspaceID)
+	}
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	var buckets []model.AssetBucket
 	for rows.Next() {
 		bucket, err := scanAssetBucket(rows)
 		if err != nil {
-			_ = rows.Close()
 			return nil, err
 		}
 		buckets = append(buckets, *bucket)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	for i := range buckets {
@@ -715,14 +804,28 @@ func (d *DB) DeleteAssetBucket(ctx context.Context, slug string) error {
 }
 
 func (d *DB) CreateSite(ctx context.Context, id, name, mode, routeProfile, deploymentTarget string, domains []string) (*model.Site, error) {
+	return d.CreateSiteInWorkspace(ctx, model.DefaultWorkspaceID, id, name, mode, routeProfile, deploymentTarget, domains)
+}
+
+func (d *DB) CreateSiteInWorkspace(ctx context.Context, workspaceID, id, name, mode, routeProfile, deploymentTarget string, domains []string) (*model.Site, error) {
+	if workspaceID == "" {
+		workspaceID = model.DefaultWorkspaceID
+	}
+	if existing, err := d.GetSite(ctx, id); err == nil {
+		if existing.WorkspaceID != workspaceID {
+			return nil, fmt.Errorf("site %q belongs to another workspace", id)
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
 	if mode == "" {
 		mode = "standard"
 	}
 	now := nowString()
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO sites(id, name, mode, route_profile, deployment_target, created_at)
-		VALUES(?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET name = excluded.name, mode = excluded.mode, route_profile = excluded.route_profile, deployment_target = excluded.deployment_target`, id, name, mode, routeProfile, deploymentTarget, now)
+		INSERT INTO sites(id, workspace_id, name, mode, route_profile, deployment_target, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET name = excluded.name, mode = excluded.mode, route_profile = excluded.route_profile, deployment_target = excluded.deployment_target`, id, workspaceID, name, mode, routeProfile, deploymentTarget, now)
 	if err != nil {
 		return nil, err
 	}
@@ -735,8 +838,8 @@ func (d *DB) CreateSite(ctx context.Context, id, name, mode, routeProfile, deplo
 func (d *DB) GetSite(ctx context.Context, id string) (*model.Site, error) {
 	var s model.Site
 	var created string
-	err := d.sql.QueryRowContext(ctx, `SELECT id, name, mode, route_profile, deployment_target, created_at FROM sites WHERE id = ?`, id).
-		Scan(&s.ID, &s.Name, &s.Mode, &s.RouteProfile, &s.DeploymentTarget, &created)
+	err := d.sql.QueryRowContext(ctx, `SELECT id, workspace_id, name, mode, route_profile, deployment_target, created_at FROM sites WHERE id = ?`, id).
+		Scan(&s.ID, &s.WorkspaceID, &s.Name, &s.Mode, &s.RouteProfile, &s.DeploymentTarget, &created)
 	if err != nil {
 		return nil, err
 	}
@@ -874,7 +977,7 @@ func scanAssetBucket(row scanner) (*model.AssetBucket, error) {
 	var bucket model.AssetBucket
 	var allowed, created, updated string
 	err := row.Scan(
-		&bucket.Slug, &bucket.Name, &bucket.Description, &bucket.RouteProfile, &allowed,
+		&bucket.Slug, &bucket.WorkspaceID, &bucket.Name, &bucket.Description, &bucket.RouteProfile, &allowed,
 		&bucket.MaxCapacityBytes, &bucket.MaxFileSizeBytes, &bucket.DefaultCacheControl, &bucket.Status, &created, &updated,
 	)
 	if err != nil {

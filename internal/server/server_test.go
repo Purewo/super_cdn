@@ -194,6 +194,69 @@ func TestResolveSiteDeploymentTargetUsesExistingSiteDomains(t *testing.T) {
 	}
 }
 
+func TestTeamInviteLoginAndRolePermissions(t *testing.T) {
+	app := newTestServer(t)
+	inviteToken := createInviteForTest(t, app, "alice", model.RoleMaintainer)
+	apiToken := acceptInviteForTest(t, app, inviteToken)
+
+	me := apiJSON(t, app, http.MethodGet, "/api/v1/auth/me", apiToken, nil)
+	if me.Code != http.StatusOK {
+		t.Fatalf("whoami status = %d body=%s", me.Code, me.Body.String())
+	}
+	if !strings.Contains(me.Body.String(), `"user_name":"alice"`) || !strings.Contains(me.Body.String(), `"role":"maintainer"`) {
+		t.Fatalf("unexpected whoami response: %s", me.Body.String())
+	}
+
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/sites", apiToken, map[string]any{
+		"id":            "team-site",
+		"route_profile": "overseas",
+		"mode":          "standard",
+	})
+	if create.Code != http.StatusOK {
+		t.Fatalf("maintainer create site status = %d body=%s", create.Code, create.Body.String())
+	}
+
+	invite := apiJSON(t, app, http.MethodPost, "/api/v1/auth/invites", apiToken, map[string]any{"name": "bob", "role": "viewer"})
+	if invite.Code != http.StatusForbidden {
+		t.Fatalf("maintainer invite status = %d body=%s", invite.Code, invite.Body.String())
+	}
+
+	cf := apiJSON(t, app, http.MethodGet, "/api/v1/cloudflare/status", apiToken, nil)
+	if cf.Code != http.StatusForbidden {
+		t.Fatalf("user cloudflare status = %d body=%s", cf.Code, cf.Body.String())
+	}
+
+	if _, err := app.db.SQL().ExecContext(context.Background(), `INSERT INTO workspaces(id, name, created_at) VALUES('other', 'Other', '2026-04-30T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.CreateSiteInWorkspace(context.Background(), "other", "private-site", "", "standard", "overseas", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	hidden := apiJSON(t, app, http.MethodGet, "/api/v1/sites/private-site/deployment-target", apiToken, nil)
+	if hidden.Code != http.StatusNotFound {
+		t.Fatalf("cross-workspace site status = %d body=%s", hidden.Code, hidden.Body.String())
+	}
+}
+
+func TestViewerCannotMutateTeamResources(t *testing.T) {
+	app := newTestServer(t)
+	inviteToken := createInviteForTest(t, app, "viewer", model.RoleViewer)
+	apiToken := acceptInviteForTest(t, app, inviteToken)
+
+	read := apiJSON(t, app, http.MethodGet, "/api/v1/auth/me", apiToken, nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("viewer whoami status = %d body=%s", read.Code, read.Body.String())
+	}
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/sites", apiToken, map[string]any{
+		"id":            "viewer-site",
+		"route_profile": "overseas",
+		"mode":          "standard",
+	})
+	if create.Code != http.StatusForbidden {
+		t.Fatalf("viewer create site status = %d body=%s", create.Code, create.Body.String())
+	}
+}
+
 func TestRecordCloudflareStaticDeployment(t *testing.T) {
 	app := newTestServer(t)
 	raw, _ := json.Marshal(map[string]any{
@@ -2045,6 +2108,70 @@ func uploadBucketObjectForTest(t *testing.T, app *Server, bucket, logicalPath st
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("upload bucket object status = %d body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+func apiJSON(t *testing.T, app *Server, method, apiPath, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req := httptest.NewRequest(method, apiPath, reader)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	return rec
+}
+
+func createInviteForTest(t *testing.T, app *Server, name, role string) string {
+	t.Helper()
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/auth/invites", "test-token", map[string]any{
+		"name": name,
+		"role": role,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create invite status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		InviteToken string `json:"invite_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.InviteToken == "" {
+		t.Fatalf("missing invite token: %s", rec.Body.String())
+	}
+	return resp.InviteToken
+}
+
+func acceptInviteForTest(t *testing.T, app *Server, inviteToken string) string {
+	t.Helper()
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/auth/accept-invite", "", map[string]any{
+		"invite_token": inviteToken,
+		"token_name":   "test",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("accept invite status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		APIToken string `json:"api_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.APIToken == "" {
+		t.Fatalf("missing api token: %s", rec.Body.String())
+	}
+	return resp.APIToken
 }
 
 func createDeployment(t *testing.T, app *Server, siteID string, files map[string]string, fields map[string]string) string {

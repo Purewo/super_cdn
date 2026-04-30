@@ -45,6 +45,17 @@ type Server struct {
 	transferSem chan struct{}
 }
 
+type authContextKey struct{}
+
+type authPrincipal struct {
+	Root        bool   `json:"root"`
+	UserID      int64  `json:"user_id,omitempty"`
+	UserName    string `json:"user_name,omitempty"`
+	WorkspaceID string `json:"workspace_id"`
+	Role        string `json:"role"`
+	TokenID     string `json:"token_id,omitempty"`
+}
+
 func New(ctx context.Context, cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -94,11 +105,21 @@ func (s *Server) Close() error {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/v1/") {
-		if !s.authorized(r) {
+		if s.publicAPI(r) {
+			http.StripPrefix("/api/v1", s.apiMux).ServeHTTP(w, r)
+			return
+		}
+		principal, ok := s.authenticate(r)
+		if !ok {
 			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 			return
 		}
-		http.StripPrefix("/api/v1", s.apiMux).ServeHTTP(w, r)
+		if !s.authorizeAPI(r, principal) {
+			writeError(w, http.StatusForbidden, "insufficient permissions")
+			return
+		}
+		ctx := context.WithValue(r.Context(), authContextKey{}, principal)
+		http.StripPrefix("/api/v1", s.apiMux).ServeHTTP(w, r.WithContext(ctx))
 		return
 	}
 	s.servePublic(w, r)
@@ -116,6 +137,12 @@ func (s *Server) StartJobs(ctx context.Context) {
 
 func (s *Server) routes() {
 	s.apiMux.HandleFunc("POST /projects", s.handleCreateProject)
+	s.apiMux.HandleFunc("POST /auth/invites", s.handleCreateInvite)
+	s.apiMux.HandleFunc("POST /auth/accept-invite", s.handleAcceptInvite)
+	s.apiMux.HandleFunc("GET /auth/me", s.handleAuthMe)
+	s.apiMux.HandleFunc("GET /users", s.handleListUsers)
+	s.apiMux.HandleFunc("POST /users/{id}/tokens", s.handleCreateUserToken)
+	s.apiMux.HandleFunc("DELETE /tokens/{id}", s.handleRevokeToken)
 	s.apiMux.HandleFunc("POST /preflight/upload", s.handlePreflightUpload)
 	s.apiMux.HandleFunc("POST /preflight/site-deploy", s.handlePreflightSiteDeploy)
 	s.apiMux.HandleFunc("POST /init/resource-libraries", s.handleInitResourceLibraries)
@@ -160,8 +187,360 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("POST /cache/purge", s.handlePurgeCache)
 }
 
-func (s *Server) authorized(r *http.Request) bool {
-	return r.Header.Get("Authorization") == "Bearer "+s.cfg.Server.AdminToken
+func (s *Server) publicAPI(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == "/api/v1/auth/accept-invite"
+}
+
+func (s *Server) authenticate(r *http.Request) (authPrincipal, bool) {
+	raw := strings.TrimSpace(r.Header.Get("Authorization"))
+	token, ok := strings.CutPrefix(raw, "Bearer ")
+	if !ok || token == "" {
+		return authPrincipal{}, false
+	}
+	if s.cfg.Server.AdminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.Server.AdminToken)) == 1 {
+		return authPrincipal{Root: true, WorkspaceID: model.DefaultWorkspaceID, Role: model.RoleOwner}, true
+	}
+	principal, err := s.db.TokenPrincipalByHash(r.Context(), hashSecret(token))
+	if err != nil {
+		return authPrincipal{}, false
+	}
+	_ = s.db.TouchAPIToken(r.Context(), principal.Token.ID)
+	return authPrincipal{
+		UserID:      principal.User.ID,
+		UserName:    principal.User.Name,
+		WorkspaceID: principal.Token.WorkspaceID,
+		Role:        principal.Role,
+		TokenID:     principal.Token.ID,
+	}, true
+}
+
+func (s *Server) authorizeAPI(r *http.Request, principal authPrincipal) bool {
+	if principal.Root {
+		return true
+	}
+	apiPath := strings.TrimPrefix(r.URL.Path, "/api/v1")
+	if apiPath == "/auth/me" {
+		return r.Method == http.MethodGet
+	}
+	if apiPath == "/auth/invites" || apiPath == "/users" || strings.HasPrefix(apiPath, "/users/") {
+		return principal.Role == model.RoleOwner
+	}
+	if strings.HasPrefix(apiPath, "/tokens/") {
+		return r.Method == http.MethodDelete
+	}
+	if s.rootOnlyAPI(apiPath) {
+		return false
+	}
+	if strings.Contains(apiPath, "/edge-manifest") && principal.Role == model.RoleViewer {
+		return false
+	}
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	return principal.Role == model.RoleOwner || principal.Role == model.RoleMaintainer
+}
+
+func (s *Server) rootOnlyAPI(apiPath string) bool {
+	return strings.HasPrefix(apiPath, "/init/") ||
+		strings.HasPrefix(apiPath, "/resource-libraries/") ||
+		strings.HasPrefix(apiPath, "/cloudflare/") ||
+		strings.HasPrefix(apiPath, "/jobs/") ||
+		strings.HasPrefix(apiPath, "/objects/") ||
+		apiPath == "/cache/purge" ||
+		strings.Contains(apiPath, "/dns") ||
+		strings.Contains(apiPath, "/worker-routes")
+}
+
+func currentPrincipal(ctx context.Context) authPrincipal {
+	if principal, ok := ctx.Value(authContextKey{}).(authPrincipal); ok {
+		return principal
+	}
+	return authPrincipal{Root: true, WorkspaceID: model.DefaultWorkspaceID, Role: model.RoleOwner}
+}
+
+func principalCanAccessWorkspace(principal authPrincipal, workspaceID string) bool {
+	if principal.Root {
+		return true
+	}
+	return workspaceID != "" && workspaceID == principal.WorkspaceID
+}
+
+func hashSecret(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func newSecret(prefix string) (string, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(raw[:]), nil
+}
+
+func newTokenID(prefix string) (string, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(raw[:]), nil
+}
+
+func validRole(role string) bool {
+	switch role {
+	case model.RoleOwner, model.RoleMaintainer, model.RoleViewer:
+		return true
+	default:
+		return false
+	}
+}
+
+func workspaceForContext(ctx context.Context) string {
+	workspaceID := currentPrincipal(ctx).WorkspaceID
+	if workspaceID == "" {
+		return model.DefaultWorkspaceID
+	}
+	return workspaceID
+}
+
+func (s *Server) getAssetBucketForAPI(w http.ResponseWriter, r *http.Request, slug string) (*model.AssetBucket, bool) {
+	bucket, err := s.db.GetAssetBucket(r.Context(), slug)
+	if err != nil {
+		if db.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "bucket not found")
+			return nil, false
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if !principalCanAccessWorkspace(currentPrincipal(r.Context()), bucket.WorkspaceID) {
+		writeError(w, http.StatusNotFound, "bucket not found")
+		return nil, false
+	}
+	return bucket, true
+}
+
+func (s *Server) getSiteForAPI(w http.ResponseWriter, r *http.Request, siteID string) (*model.Site, bool) {
+	site, err := s.db.GetSite(r.Context(), siteID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "site not found")
+		return nil, false
+	}
+	if !principalCanAccessWorkspace(currentPrincipal(r.Context()), site.WorkspaceID) {
+		writeError(w, http.StatusNotFound, "site not found")
+		return nil, false
+	}
+	return site, true
+}
+
+func (s *Server) ensureSiteAccessIfExists(w http.ResponseWriter, r *http.Request, siteID string) bool {
+	site, err := s.db.GetSite(r.Context(), siteID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
+	}
+	if !principalCanAccessWorkspace(currentPrincipal(r.Context()), site.WorkspaceID) {
+		writeError(w, http.StatusNotFound, "site not found")
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name             string `json:"name"`
+		Role             string `json:"role"`
+		ExpiresInSeconds int64  `json:"expires_in_seconds"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.Role = strings.ToLower(strings.TrimSpace(req.Role))
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.Role == "" {
+		req.Role = model.RoleViewer
+	}
+	if !validRole(req.Role) {
+		writeError(w, http.StatusBadRequest, "role must be owner, maintainer, or viewer")
+		return
+	}
+	if req.ExpiresInSeconds <= 0 {
+		req.ExpiresInSeconds = int64((7 * 24 * time.Hour).Seconds())
+	}
+	principal := currentPrincipal(r.Context())
+	inviteToken, err := newSecret("sci_")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	inviteID, err := newTokenID("inv_")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	invite, err := s.db.CreateInvite(r.Context(), model.Invite{
+		ID:          inviteID,
+		WorkspaceID: principal.WorkspaceID,
+		Name:        req.Name,
+		Role:        req.Role,
+		TokenHash:   hashSecret(inviteToken),
+		CreatedBy:   principal.UserID,
+		ExpiresAt:   time.Now().UTC().Add(time.Duration(req.ExpiresInSeconds) * time.Second),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"invite":       invite,
+		"invite_token": inviteToken,
+	})
+}
+
+func (s *Server) handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		InviteToken string `json:"invite_token"`
+		TokenName   string `json:"token_name"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.InviteToken = strings.TrimSpace(req.InviteToken)
+	if req.InviteToken == "" {
+		writeError(w, http.StatusBadRequest, "invite_token is required")
+		return
+	}
+	apiToken, err := newSecret("sct_")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tokenID, err := newTokenID("tok_")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	user, token, err := s.db.AcceptInvite(r.Context(), hashSecret(req.InviteToken), model.APIToken{
+		ID:        tokenID,
+		Name:      firstNonEmpty(strings.TrimSpace(req.TokenName), "default"),
+		TokenHash: hashSecret(apiToken),
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user":      user,
+		"api_token": apiToken,
+		"token":     token,
+	})
+}
+
+func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	principal := currentPrincipal(r.Context())
+	writeJSON(w, http.StatusOK, principal)
+}
+
+func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	principal := currentPrincipal(r.Context())
+	users, err := s.db.UsersInWorkspace(r.Context(), principal.WorkspaceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": users})
+}
+
+func (s *Server) handleCreateUserToken(w http.ResponseWriter, r *http.Request) {
+	principal := currentPrincipal(r.Context())
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "user id is required")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if _, err := s.db.UserInWorkspace(r.Context(), id, principal.WorkspaceID); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, sql.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, "user not found")
+		return
+	}
+	apiToken, err := newSecret("sct_")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tokenID, err := newTokenID("tok_")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	token, err := s.db.CreateAPIToken(r.Context(), model.APIToken{
+		ID:          tokenID,
+		UserID:      id,
+		WorkspaceID: principal.WorkspaceID,
+		Name:        firstNonEmpty(strings.TrimSpace(req.Name), "manual"),
+		TokenHash:   hashSecret(apiToken),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"api_token": apiToken,
+		"token":     token,
+	})
+}
+
+func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
+	principal := currentPrincipal(r.Context())
+	tokenID := strings.TrimSpace(r.PathValue("id"))
+	if tokenID == "" {
+		writeError(w, http.StatusBadRequest, "token id is required")
+		return
+	}
+	if !principal.Root {
+		token, err := s.db.GetAPIToken(r.Context(), tokenID)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, sql.ErrNoRows) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, "token not found")
+			return
+		}
+		if token.WorkspaceID != principal.WorkspaceID {
+			writeError(w, http.StatusNotFound, "token not found")
+			return
+		}
+		if principal.Role != model.RoleOwner && token.UserID != principal.UserID {
+			writeError(w, http.StatusForbidden, "insufficient permissions")
+			return
+		}
+	}
+	if err := s.db.RevokeAPIToken(r.Context(), tokenID); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, sql.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "token_id": tokenID})
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
@@ -176,9 +555,13 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	project, err := s.db.CreateProject(r.Context(), req.ID)
+	project, err := s.db.CreateProjectInWorkspace(r.Context(), req.ID, workspaceForContext(r.Context()))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "belongs to another workspace") {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, project)
@@ -824,6 +1207,10 @@ func (s *Server) handlePreflightSiteDeploy(w http.ResponseWriter, r *http.Reques
 	profileName := req.RouteProfile
 	site, err := s.db.GetSite(r.Context(), req.SiteID)
 	if err == nil {
+		if !principalCanAccessWorkspace(currentPrincipal(r.Context()), site.WorkspaceID) {
+			writeError(w, http.StatusNotFound, "site not found")
+			return
+		}
 		profileName = firstNonEmpty(profileName, site.RouteProfile)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -990,6 +1377,7 @@ func (s *Server) handleCreateAssetBucket(w http.ResponseWriter, r *http.Request)
 	}
 	bucket, err := s.db.CreateAssetBucket(r.Context(), model.AssetBucket{
 		Slug:                slug,
+		WorkspaceID:         workspaceForContext(r.Context()),
 		Name:                name,
 		Description:         strings.TrimSpace(req.Description),
 		RouteProfile:        profileName,
@@ -1007,7 +1395,12 @@ func (s *Server) handleCreateAssetBucket(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleListAssetBuckets(w http.ResponseWriter, r *http.Request) {
-	buckets, err := s.db.ListAssetBuckets(r.Context())
+	principal := currentPrincipal(r.Context())
+	workspaceID := ""
+	if !principal.Root {
+		workspaceID = principal.WorkspaceID
+	}
+	buckets, err := s.db.ListAssetBucketsInWorkspace(r.Context(), workspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1016,13 +1409,8 @@ func (s *Server) handleListAssetBuckets(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleGetAssetBucket(w http.ResponseWriter, r *http.Request) {
-	bucket, err := s.db.GetAssetBucket(r.Context(), cleanBucketSlug(r.PathValue("slug")))
-	if err != nil {
-		if db.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "bucket not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	bucket, ok := s.getAssetBucketForAPI(w, r, cleanBucketSlug(r.PathValue("slug")))
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, bucket)
@@ -1034,13 +1422,8 @@ func (s *Server) handleDeleteAssetBucket(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "bucket is required")
 		return
 	}
-	bucket, err := s.db.GetAssetBucket(r.Context(), slug)
-	if err != nil {
-		if db.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "bucket not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	bucket, ok := s.getAssetBucketForAPI(w, r, slug)
+	if !ok {
 		return
 	}
 	force, err := queryBool(r, "force", false)
@@ -1084,13 +1467,8 @@ func (s *Server) handleInitAssetBucket(w http.ResponseWriter, r *http.Request) {
 	if !decodeOptionalJSON(w, r, &req) {
 		return
 	}
-	bucket, err := s.db.GetAssetBucket(r.Context(), cleanBucketSlug(r.PathValue("slug")))
-	if err != nil {
-		if db.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "bucket not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	bucket, ok := s.getAssetBucketForAPI(w, r, cleanBucketSlug(r.PathValue("slug")))
+	if !ok {
 		return
 	}
 	result, err := s.initAssetBucket(r.Context(), bucket, req.DryRun)
@@ -1102,13 +1480,8 @@ func (s *Server) handleInitAssetBucket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePurgeAssetBucketCache(w http.ResponseWriter, r *http.Request) {
-	bucket, err := s.db.GetAssetBucket(r.Context(), cleanBucketSlug(r.PathValue("slug")))
-	if err != nil {
-		if db.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "bucket not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	bucket, ok := s.getAssetBucketForAPI(w, r, cleanBucketSlug(r.PathValue("slug")))
+	if !ok {
 		return
 	}
 	var req assetBucketCacheRequest
@@ -1119,13 +1492,8 @@ func (s *Server) handlePurgeAssetBucketCache(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleWarmupAssetBucket(w http.ResponseWriter, r *http.Request) {
-	bucket, err := s.db.GetAssetBucket(r.Context(), cleanBucketSlug(r.PathValue("slug")))
-	if err != nil {
-		if db.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "bucket not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	bucket, ok := s.getAssetBucketForAPI(w, r, cleanBucketSlug(r.PathValue("slug")))
+	if !ok {
 		return
 	}
 	var req assetBucketCacheRequest
@@ -1137,13 +1505,8 @@ func (s *Server) handleWarmupAssetBucket(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleUploadBucketObject(w http.ResponseWriter, r *http.Request) {
 	slug := cleanBucketSlug(r.PathValue("slug"))
-	bucket, err := s.db.GetAssetBucket(r.Context(), slug)
-	if err != nil {
-		if db.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "bucket not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	bucket, ok := s.getAssetBucketForAPI(w, r, slug)
+	if !ok {
 		return
 	}
 	if !s.overclockMode() && s.cfg.Limits.MaxUploadBytes > 0 {
@@ -1196,12 +1559,7 @@ func (s *Server) handleUploadBucketObject(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleListBucketObjects(w http.ResponseWriter, r *http.Request) {
 	slug := cleanBucketSlug(r.PathValue("slug"))
-	if _, err := s.db.GetAssetBucket(r.Context(), slug); err != nil {
-		if db.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "bucket not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if _, ok := s.getAssetBucketForAPI(w, r, slug); !ok {
 		return
 	}
 	prefix := strings.TrimPrefix(strings.ReplaceAll(r.URL.Query().Get("prefix"), "\\", "/"), "/")
@@ -1228,6 +1586,9 @@ func (s *Server) handleDeleteBucketObject(w http.ResponseWriter, r *http.Request
 	deleteRemote, err := queryBool(r, "delete_remote", true)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, ok := s.getAssetBucketForAPI(w, r, slug); !ok {
 		return
 	}
 	result, err := s.deleteBucketObject(r.Context(), slug, logicalPath, deleteRemote)
@@ -1290,8 +1651,12 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := s.db.CreateProject(r.Context(), projectID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if _, err := s.db.CreateProjectInWorkspace(r.Context(), projectID, workspaceForContext(r.Context())); err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "belongs to another workspace") {
+			status = http.StatusForbidden
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 	cacheControl := firstNonEmpty(r.FormValue("cache_control"), profile.DefaultCacheControl, "public, max-age=3600")
@@ -1355,10 +1720,14 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	site, err := s.db.CreateSite(r.Context(), req.ID, strings.TrimSpace(req.Name), req.Mode, req.RouteProfile, deploymentTarget, domains)
+	site, err := s.db.CreateSiteInWorkspace(r.Context(), workspaceForContext(r.Context()), req.ID, strings.TrimSpace(req.Name), req.Mode, req.RouteProfile, deploymentTarget, domains)
 	if err != nil {
 		if strings.Contains(err.Error(), "already bound") {
 			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "belongs to another workspace") {
+			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1373,9 +1742,8 @@ func (s *Server) handleBindSiteDomains(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "site id is required")
 		return
 	}
-	site, err := s.db.GetSite(r.Context(), siteID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "site not found")
+	site, ok := s.getSiteForAPI(w, r, siteID)
+	if !ok {
 		return
 	}
 	var req bindSiteDomainsRequest
@@ -1410,6 +1778,9 @@ func (s *Server) handleResolveSiteDeploymentTarget(w http.ResponseWriter, r *htt
 	siteID := cleanID(r.PathValue("id"))
 	if siteID == "" {
 		writeError(w, http.StatusBadRequest, "site id is required")
+		return
+	}
+	if !s.ensureSiteAccessIfExists(w, r, siteID) {
 		return
 	}
 	resp, err := s.resolveSiteDeploymentTarget(r.Context(), siteID, r.URL.Query().Get("route_profile"), firstNonEmpty(r.URL.Query().Get("deployment_target"), r.URL.Query().Get("target")))
@@ -1474,9 +1845,8 @@ func (s *Server) handleSyncSiteWorkerRoutes(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "site id is required")
 		return
 	}
-	site, err := s.db.GetSite(r.Context(), siteID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "site not found")
+	site, ok := s.getSiteForAPI(w, r, siteID)
+	if !ok {
 		return
 	}
 	var req syncWorkerRoutesRequest
@@ -1497,9 +1867,8 @@ func (s *Server) handleSyncSiteDNS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "site id is required")
 		return
 	}
-	site, err := s.db.GetSite(r.Context(), siteID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "site not found")
+	site, ok := s.getSiteForAPI(w, r, siteID)
+	if !ok {
 		return
 	}
 	var req syncSiteDNSRequest
@@ -1595,6 +1964,9 @@ func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "site id is required")
 		return
 	}
+	if !s.ensureSiteAccessIfExists(w, r, siteID) {
+		return
+	}
 	dep, payload, err := s.createSiteDeploymentFromRequest(w, r, siteID, "", false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1621,6 +1993,9 @@ func (s *Server) handleRecordCloudflareStaticDeployment(w http.ResponseWriter, r
 		writeError(w, http.StatusBadRequest, "site id is required")
 		return
 	}
+	if !s.ensureSiteAccessIfExists(w, r, siteID) {
+		return
+	}
 	var req recordCloudflareStaticDeploymentRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -1639,6 +2014,9 @@ func (s *Server) handleListSiteDeployments(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "site id is required")
 		return
 	}
+	if _, ok := s.getSiteForAPI(w, r, siteID); !ok {
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	deployments, err := s.db.ListSiteDeployments(r.Context(), siteID, limit)
 	if err != nil {
@@ -1655,6 +2033,9 @@ func (s *Server) handleListSiteDeployments(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleGetSiteDeployment(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
+	if _, ok := s.getSiteForAPI(w, r, siteID); !ok {
+		return
+	}
 	dep, err := s.db.GetSiteDeployment(r.Context(), deploymentID)
 	if err != nil || dep.SiteID != siteID {
 		writeError(w, http.StatusNotFound, "deployment not found")
@@ -1666,9 +2047,8 @@ func (s *Server) handleGetSiteDeployment(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleExportSiteEdgeManifest(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
-	site, err := s.db.GetSite(r.Context(), siteID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "site not found")
+	site, ok := s.getSiteForAPI(w, r, siteID)
+	if !ok {
 		return
 	}
 	dep, err := s.db.GetSiteDeployment(r.Context(), deploymentID)
@@ -1691,9 +2071,8 @@ func (s *Server) handleExportSiteEdgeManifest(w http.ResponseWriter, r *http.Req
 func (s *Server) handlePublishSiteEdgeManifest(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
-	site, err := s.db.GetSite(r.Context(), siteID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "site not found")
+	site, ok := s.getSiteForAPI(w, r, siteID)
+	if !ok {
 		return
 	}
 	dep, err := s.db.GetSiteDeployment(r.Context(), deploymentID)
@@ -1723,9 +2102,8 @@ func (s *Server) handlePurgeSiteCache(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "site id is required")
 		return
 	}
-	site, err := s.db.GetSite(r.Context(), siteID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "site not found")
+	site, ok := s.getSiteForAPI(w, r, siteID)
+	if !ok {
 		return
 	}
 	dep, err := s.db.ActiveSiteDeployment(r.Context(), siteID)
@@ -1743,9 +2121,8 @@ func (s *Server) handlePurgeSiteCache(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePurgeSiteDeploymentCache(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
-	site, err := s.db.GetSite(r.Context(), siteID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "site not found")
+	site, ok := s.getSiteForAPI(w, r, siteID)
+	if !ok {
 		return
 	}
 	dep, err := s.db.GetSiteDeployment(r.Context(), deploymentID)
@@ -1763,6 +2140,9 @@ func (s *Server) handlePurgeSiteDeploymentCache(w http.ResponseWriter, r *http.R
 func (s *Server) handlePromoteSiteDeployment(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
+	if _, ok := s.getSiteForAPI(w, r, siteID); !ok {
+		return
+	}
 	dep, err := s.db.GetSiteDeployment(r.Context(), deploymentID)
 	if err != nil || dep.SiteID != siteID {
 		writeError(w, http.StatusNotFound, "deployment not found")
@@ -1787,6 +2167,9 @@ func (s *Server) handlePromoteSiteDeployment(w http.ResponseWriter, r *http.Requ
 func (s *Server) handleDeleteSiteDeployment(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
+	if _, ok := s.getSiteForAPI(w, r, siteID); !ok {
+		return
+	}
 	dep, err := s.db.GetSiteDeployment(r.Context(), deploymentID)
 	if err != nil || dep.SiteID != siteID {
 		writeError(w, http.StatusNotFound, "deployment not found")
@@ -1815,6 +2198,9 @@ func (s *Server) handleSiteGC(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	if siteID == "" {
 		writeError(w, http.StatusBadRequest, "site id is required")
+		return
+	}
+	if _, ok := s.getSiteForAPI(w, r, siteID); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1871,10 +2257,12 @@ func (s *Server) createSiteDeploymentFromRequest(w http.ResponseWriter, r *http.
 		if deploymentTarget == "" {
 			deploymentTarget = defaultDeploymentTarget(profile)
 		}
-		site, err = s.db.CreateSite(r.Context(), siteID, "", "standard", profileName, deploymentTarget, nil)
+		site, err = s.db.CreateSiteInWorkspace(r.Context(), workspaceForContext(r.Context()), siteID, "", "standard", profileName, deploymentTarget, nil)
 		if err != nil {
 			return nil, deploySitePayload{}, err
 		}
+	} else if !principalCanAccessWorkspace(currentPrincipal(r.Context()), site.WorkspaceID) {
+		return nil, deploySitePayload{}, fmt.Errorf("site not found")
 	}
 	profileName = firstNonEmpty(profileName, site.RouteProfile, "overseas")
 	profile, ok := s.cfg.Profile(profileName)
@@ -1988,6 +2376,10 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return model.SiteDeployment{}, err
 	}
+	if site != nil && !principalCanAccessWorkspace(currentPrincipal(ctx), site.WorkspaceID) {
+		return model.SiteDeployment{}, fmt.Errorf("site not found")
+	}
+	workspaceID := workspaceForContext(ctx)
 	profileName := firstNonEmpty(strings.TrimSpace(req.RouteProfile), "overseas")
 	if site != nil {
 		profileName = firstNonEmpty(strings.TrimSpace(req.RouteProfile), site.RouteProfile, "overseas")
@@ -2010,13 +2402,13 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 		return model.SiteDeployment{}, err
 	}
 	if site == nil {
-		site, err = s.db.CreateSite(ctx, siteID, "", mode, profileName, target, requestedDomains)
+		site, err = s.db.CreateSiteInWorkspace(ctx, workspaceID, siteID, "", mode, profileName, target, requestedDomains)
 		if err != nil {
 			return model.SiteDeployment{}, err
 		}
 	} else {
 		domains := mergeDomains(site.Domains, requestedDomains)
-		site, err = s.db.CreateSite(ctx, siteID, site.Name, mode, profileName, target, domains)
+		site, err = s.db.CreateSiteInWorkspace(ctx, site.WorkspaceID, siteID, site.Name, mode, profileName, target, domains)
 		if err != nil {
 			return model.SiteDeployment{}, err
 		}
@@ -3070,7 +3462,7 @@ func (s *Server) putBucketObjectFromStaged(ctx context.Context, bucket *model.As
 		return nil, nil, nil, err
 	}
 	projectID := "bucket:" + bucket.Slug
-	if _, err := s.db.CreateProject(ctx, projectID); err != nil {
+	if _, err := s.db.CreateProjectInWorkspace(ctx, projectID, bucket.WorkspaceID); err != nil {
 		return nil, nil, nil, err
 	}
 	key := bucketPhysicalKey(bucket.Slug, assetType, logicalPath, fileName, staged.SHA256)

@@ -57,6 +57,18 @@ go run .\cmd\supercdnctl -- upload -project assets -file .\README.md -path /docs
 
 Open `http://127.0.0.1:8080/o/assets/docs/readme.txt`.
 
+## Team CLI use
+
+The server admin token remains the root/break-glass credential. For team use, create an invite with root or an owner token, then let each user log in to a local CLI profile:
+
+```powershell
+go run .\cmd\supercdnctl -- -token <root-token> invite-user -name alice -role maintainer
+go run .\cmd\supercdnctl -- -server https://qwk.ccwu.cc -profile alice login -invite-token sci_xxx
+go run .\cmd\supercdnctl -- -profile alice whoami
+```
+
+User tokens are stored in the local `supercdn/cli.json` profile and are scoped to a workspace. Owners can manage invites and tokens; maintainers can create and deploy sites/buckets; viewers are read-only. Cloudflare/R2/AList configuration commands stay root-only.
+
 ## Foundation check
 
 Before architecture changes, run the local baseline:

@@ -4,19 +4,23 @@
 
 ## 全局约定
 
-所有 `supercdnctl` 命令都调用 Super CDN HTTP API。管理 API 需要 Bearer Token：
+所有 `supercdnctl` 命令都调用 Super CDN HTTP API。控制面 API 需要 Bearer Token；个人/团队使用建议先通过邀请登录，把用户 token 保存到本机 CLI profile：
 
 ```powershell
 $env:SUPERCDN_TOKEN = "change-me"
 .\bin\supercdnctl.exe -server http://127.0.0.1:8080 <command> ...
+.\bin\supercdnctl.exe -server http://127.0.0.1:8080 login -invite-token sci_xxx
 ```
 
 全局参数：
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `-server` | `SUPERCDN_URL` | `http://127.0.0.1:8080` | Super CDN 服务地址 |
-| `-token` | `SUPERCDN_TOKEN` | 空 | 管理 Token，必填 |
+| `-server` | `SUPERCDN_URL` | profile 或 `http://127.0.0.1:8080` | Super CDN 服务地址 |
+| `-token` | `SUPERCDN_TOKEN` | profile | 管理 token 或用户 API token；显式传入时覆盖 profile |
+| `-profile` | `SUPERCDN_PROFILE` | 当前 profile 或 `default` | 本机 CLI profile 名 |
+
+本机 profile 保存位置默认是系统用户配置目录下的 `supercdn/cli.json`，可用 `SUPERCDN_CONFIG` 指定其他路径。`server.admin_token` 仍是 root/break-glass token，拥有完整配置权限；团队成员使用邀请生成的用户 token，不需要看到 Cloudflare、R2、AList 或 root token。
 
 返回值：
 
@@ -33,6 +37,12 @@ $env:SUPERCDN_TOKEN = "change-me"
 
 | 命令 | HTTP API | 用途 |
 | --- | --- | --- |
+| `login` | `POST /api/v1/auth/accept-invite` | 接受邀请并保存本机 CLI profile |
+| `logout` | 本地 profile 写入 | 删除本机 CLI profile |
+| `whoami` | `GET /api/v1/auth/me` | 查看当前 token 身份、workspace 和角色 |
+| `invite-user` | `POST /api/v1/auth/invites` | 创建一次性用户邀请 |
+| `list-users` | `GET /api/v1/users` | 列出当前 workspace 用户 |
+| `revoke-token` | `DELETE /api/v1/tokens/{id}` | 撤销用户 API token |
 | `create-project` | `POST /api/v1/projects` | 创建普通静态资源项目 |
 | `upload` | `POST /api/v1/preflight/upload` + `POST /api/v1/assets` | 上传普通静态资源 |
 | `create-site` | `POST /api/v1/sites` | 创建静态站点 |
@@ -77,6 +87,42 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `create-r2-credentials` | `POST /api/v1/cloudflare/r2/credentials` | 创建 R2 S3 凭证并可写回本地配置 |
 | `set-r2-credentials` | 本地配置写入 | 导入已有 R2 S3 凭证 |
 | `purge-site` | `POST /api/v1/sites/{id}/purge` | 按站点或部署 manifest 清 Cloudflare 缓存 |
+
+## 团队登录与用户隔离
+
+首版团队模型保留 `server.admin_token` 作为 root token。root 可以做所有事情，包括 Cloudflare/R2/AList 配置、资源库初始化、健康探针、DNS/Worker routes 和全局缓存清理。团队用户通过邀请加入默认 workspace，资源创建后会绑定到该 workspace；用户 token 看不到其他 workspace 的站点和桶。
+
+角色：
+
+| 角色 | 权限 |
+| --- | --- |
+| `owner` | 管理用户、邀请、撤销 token，并可创建/更新 workspace 内资源 |
+| `maintainer` | 创建/更新 workspace 内站点、部署和资源桶 |
+| `viewer` | 读取 workspace 内资源，不可写入 |
+
+root 创建邀请：
+
+```powershell
+.\bin\supercdnctl.exe -token <root-token> invite-user -name alice -role maintainer
+```
+
+成员接受邀请并保存本机 profile：
+
+```powershell
+.\bin\supercdnctl.exe -server https://qwk.ccwu.cc -profile alice login -invite-token sci_xxx
+.\bin\supercdnctl.exe -profile alice whoami
+.\bin\supercdnctl.exe -profile alice create-site -site demo -profile overseas
+```
+
+用户管理：
+
+```powershell
+.\bin\supercdnctl.exe list-users
+.\bin\supercdnctl.exe revoke-token -id tok_xxx
+.\bin\supercdnctl.exe logout
+```
+
+`login` 只在接受邀请时收到一次 API token，并写入本机 profile；之后普通命令不需要传 `-token`。`invite-user` 返回的一次性 `invite_token` 需要发给对应成员；用户 API token 不会通过 `list-users` 展示。
 
 ## 普通静态资源
 
