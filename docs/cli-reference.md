@@ -36,7 +36,11 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `create-project` | `POST /api/v1/projects` | 创建普通静态资源项目 |
 | `upload` | `POST /api/v1/preflight/upload` + `POST /api/v1/assets` | 上传普通静态资源 |
 | `create-site` | `POST /api/v1/sites` | 创建静态站点 |
+| `bind-domain` | `POST /api/v1/sites/{id}/domains` | 为站点追加或替换绑定域名 |
+| `domain-status` | `GET /api/v1/domains/{domain}/status` | 查询站点域名解析、绑定和证书状态 |
+| `cloudflare-status` | `GET /api/v1/cloudflare/status` | 查询 Cloudflare 账户、R2、DNS 和 Worker 配置状态 |
 | `deploy-site` | `GET /api/v1/sites/{id}/deployment-target` + deploy API | 部署静态站点产物包或目录 |
+| `inspect-site` | 本地目录/zip 检查 | 上传前检查站点产物、入口、资源引用和风险文件 |
 | `probe-site` | 本地 HTTP 探测 + 可选部署查询 | 验证线上 HTML、重定向 JS/CSS 的 MIME/CORS，以及可选 SPA fallback |
 | `list-deployments` | `GET /api/v1/sites/{id}/deployments` | 列出站点部署历史 |
 | `deployment` | `GET /api/v1/sites/{id}/deployments/{deployment}` | 查询单个部署 |
@@ -167,6 +171,51 @@ POST /api/v1/sites
 | `-mode` | 否 | `standard` | `standard` 或 `spa` |
 | `-domains` | 否 | 空 | 逗号分隔域名 |
 
+### bind-domain
+
+为已有站点追加或替换绑定域名，也可以重新分配默认子域名。
+
+```powershell
+.\bin\supercdnctl.exe bind-domain -site blog -domains blog.example.com,www.example.com
+.\bin\supercdnctl.exe bind-domain -site blog -domain-id blog -replace
+.\bin\supercdnctl.exe bind-domain -site blog -random-domain
+```
+
+HTTP:
+
+```http
+POST /api/v1/sites/{id}/domains
+```
+
+参数：
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-site` | 是 | 空 | 站点 ID |
+| `-domains` | 否 | 空 | 逗号分隔自定义域名 |
+| `-domain-id` | 否 | 空 | 默认站点域名前缀 |
+| `-random-domain` | 否 | `false` | 为默认域名追加随机后缀 |
+| `-no-default-domain` | 否 | `false` | 不分配默认站点域名 |
+| `-replace` | 否 | `false` | 替换现有绑定；默认追加 |
+
+### domain-status
+
+查询单个域名的 Super CDN/Cloudflare 接管状态。
+
+```powershell
+.\bin\supercdnctl.exe domain-status -domain blog.example.com
+```
+
+HTTP:
+
+```http
+GET /api/v1/domains/{domain}/status
+```
+
+参数：
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-domain` | 是 | 空 | 要查询的域名 |
+
 ### deploy-site
 
 部署静态站点。CLI 可以上传已有 zip 产物包，也可以把本地目录临时打包后上传。服务端会本地解压、生成 manifest，并按原始目录结构上传站点文件；远端资源库不需要支持在线解压。
@@ -263,6 +312,27 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 
 绑定正式域名后也可按 Host 访问。
 
+### inspect-site
+
+本地检查站点目录或 zip 包，不上传、不调用控制面。适合在 `deploy-site` 前确认入口文件、脚本/CSS 引用、service worker、wasm、字体等风险项。
+
+```powershell
+.\bin\supercdnctl.exe inspect-site -dir .\dist
+.\bin\supercdnctl.exe inspect-site -bundle .\dist.zip
+```
+
+HTTP:
+
+```text
+local only
+```
+
+参数：
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-dir` | 二选一 | 空 | 本地站点目录 |
+| `-bundle` | 二选一 | 空 | 本地 zip 产物包 |
+
 ### probe-site
 
 对已经上线的站点做 HTTP 级交付探测。`-site` 会通过管理 API 找到当前 active production deployment 的公开 URL；`-url` 可直接探测任意公开地址且不需要 token。指定 `-deployment` 时默认探测该 deployment 的 preview URL，传 `-production` 可改为生产 URL。
@@ -305,6 +375,136 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe gc-site -site blog
 ```
+
+#### list-deployments
+
+列出站点部署历史。
+
+HTTP: `GET /api/v1/sites/{id}/deployments?limit={limit}`
+
+参数：
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-site` | 是 | 空 | 站点 ID |
+| `-limit` | 否 | `100` | 最大返回数量 |
+
+#### deployment
+
+查询单个 deployment 详情。
+
+HTTP: `GET /api/v1/sites/{id}/deployments/{deployment}`
+
+参数：
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-site` | 是 | 空 | 站点 ID |
+| `-deployment` | 是 | 空 | Deployment ID |
+
+#### export-edge-manifest
+
+导出一个 deployment 的 edge manifest，可输出到文件或 stdout。
+
+HTTP: `GET /api/v1/sites/{id}/deployments/{deployment}/edge-manifest`
+
+参数：
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-site` | 是 | 空 | 站点 ID |
+| `-deployment` | 是 | 空 | Deployment ID |
+| `-out` | 否 | 空 | 输出文件路径；为空时打印 JSON |
+
+#### publish-edge-manifest
+
+将 deployment 的 edge manifest 写入 Cloudflare Workers KV。默认 dry-run，真实写入需要 `-dry-run=false`。
+
+HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish`
+
+参数：
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-site` | 是 | 空 | 站点 ID |
+| `-deployment` | 是 | 空 | Deployment ID |
+| `-domains` | 否 | 空 | 逗号分隔域名；为空表示全部绑定域名 |
+| `-cloudflare-account` | 否 | 自动匹配 | Cloudflare account 名称 |
+| `-cloudflare-library` | 否 | 自动匹配 | Cloudflare resource library 名称 |
+| `-kv-namespace-id` | 否 | 空 | Workers KV namespace ID |
+| `-kv-namespace` | 否 | 空 | Workers KV namespace 标题 |
+| `-key-prefix` | 否 | `sites/` | KV key 前缀 |
+| `-active-key` | 否 | 仅 active 自动写 | 是否写 active manifest key |
+| `-deployment-key` | 否 | `true` | 是否写 deployment manifest key |
+| `-dry-run` | 否 | `true` | 只规划，不写 Cloudflare |
+
+#### refresh-edge-manifest
+
+重新发布 active deployment 的 edge manifest，并默认执行 hybrid 探测。用于 AList/OpenList 签名路径失效后的快速恢复。
+
+HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish`
+
+参数：
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-site` | 是 | 空 | 站点 ID |
+| `-deployment` | 否 | active production | 指定 deployment；为空时解析 active production |
+| `-domains` | 否 | 空 | 逗号分隔域名；为空表示全部绑定域名 |
+| `-kv-namespace-id` | 否 | 空 | Workers KV namespace ID |
+| `-kv-namespace` | 否 | `supercdn-edge-manifest` | Workers KV namespace 标题 |
+| `-deployment-key` | 否 | `true` | 是否写 deployment manifest key |
+| `-dry-run` | 否 | `false` | 只规划，不写 Cloudflare |
+| `-probe` | 否 | `true` | 刷新后执行站点探测 |
+| `-probe-url` | 否 | deployment production URL | 自定义探测 URL |
+| `-spa-path` | 否 | 空 | 需要验证的 SPA 路径 |
+| `-resolver` | 否 | 系统 DNS | 探测使用的 DNS resolver |
+| `-max-assets` | 否 | `20` | 最多探测 JS/CSS 数量 |
+| `-timeout` | 否 | `30s` | 探测超时 |
+| `-hybrid-checks` | 否 | `true` | 要求 Cloudflare Static HTML 和 manifest-routed assets |
+| `-redact-probe-urls` | 否 | `true` | 遮蔽探测报告里的签名 URL query 值 |
+
+#### publish-cloudflare-static
+
+底层 Cloudflare Static canary/诊断入口，只调用本地 Wrangler 发布目录，不写 Super CDN deployment 记录。
+
+HTTP: `local wrangler deploy`
+
+参数：
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-site` | 是 | 空 | 站点 ID |
+| `-dir` | 是 | 空 | 本地站点目录 |
+| `-name` | 否 | `supercdn-{site}-static` | Worker 名称 |
+| `-domains` | 否 | 空 | 逗号分隔 Cloudflare Static custom domains |
+| `-compatibility-date` | 否 | 当前 UTC 日期 | Workers compatibility date |
+| `-env-file` | 否 | `configs/private/cloudflare.env` | Cloudflare 私有环境变量文件 |
+| `-wrangler` | 否 | `npx` | Wrangler 命令入口 |
+| `-prefix` | 否 | `worker` | `npx --prefix` 目录 |
+| `-message` | 否 | 空 | Cloudflare 部署说明 |
+| `-cache-policy` | 否 | `auto` | `_headers` 策略：`auto`、`force`、`none` |
+| `-spa` | 否 | `false` | 启用 Cloudflare Static SPA fallback |
+| `-not-found-handling` | 否 | `none` | Cloudflare Static not_found_handling |
+| `-dry-run` | 否 | `true` | 只生成计划，不发布 |
+
+#### promote-deployment
+
+将指定 deployment 提升为生产版本。
+
+HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/promote`
+
+参数：`-site`、`-deployment` 均必填。
+
+#### delete-deployment
+
+删除未 active 且未 pinned 的 deployment。
+
+HTTP: `DELETE /api/v1/sites/{id}/deployments/{deployment}`
+
+参数：`-site`、`-deployment` 均必填。
+
+#### gc-site
+
+站点内容清理入口。当前实现保守，不做破坏性清理。
+
+HTTP: `POST /api/v1/sites/{id}/gc`
+
+参数：`-site` 必填。
 
 注意：`cloudflare_static` 部署不会允许普通 `promote-deployment` 做元数据级回滚，因为 Cloudflare Worker 的真实资产版本不会因此自动切换。要回滚 Cloudflare Static，请重新发布目标产物，或后续使用专门的 Worker rollback 流程。`delete-deployment` 删除 `cloudflare_static` 时只删除 Super CDN 元数据，会在响应里提示不会删除 Worker versions/custom domains。
 
@@ -549,6 +749,27 @@ POST /api/v1/asset-buckets
 | `-line` | `mobile` | `mobile` -> `china_mobile`，`telecom` -> `china_telecom`，`unicom` -> `china_unicom`，`all` -> `china_all` |
 | `-profile` | 空 | 显式 route profile；传入后覆盖 `-line` |
 | `-cache-control` | `public, max-age=86400` | 国内桶默认缓存 1 天，固定路径误缓存风险低于 immutable |
+
+### create-mobile-cdn-bucket
+
+创建移动线路 CDN 资源桶，是 `create-domestic-cdn-bucket -line mobile` 的快捷命令。默认 `route_profile=china_mobile`，默认缓存为 `public, max-age=86400`。
+
+```powershell
+.\bin\supercdnctl.exe create-mobile-cdn-bucket -slug mobile-posters -types image
+.\bin\supercdnctl.exe create-mobile-cdn-bucket -slug mobile-downloads -types archive -cache-control "public, max-age=3600"
+```
+
+HTTP:
+
+```http
+POST /api/v1/asset-buckets
+```
+
+参数同 `create-bucket`，但默认值不同：
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-profile` | `china_mobile` | 移动线路资源库 |
+| `-cache-control` | `public, max-age=86400` | 国内资源默认缓存 1 天 |
 
 ### init-bucket
 
