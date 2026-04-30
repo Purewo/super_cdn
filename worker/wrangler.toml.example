@@ -10,6 +10,20 @@ EDGE_DEFAULT_CACHE_CONTROL = "public, max-age=300"
 # deployment edge manifest has been written to KV.
 EDGE_MANIFEST_DRY_RUN = "false"
 EDGE_MANIFEST_KEY_PREFIX = "sites/"
+# off: keep origin-assisted behavior.
+# route: directly serve manifest-backed redirects, then fall back to origin.
+# enforce: never fall back to origin when the manifest cannot serve a request.
+EDGE_MANIFEST_MODE = "off"
+# When this Worker is deployed with Cloudflare Static Assets, set this to true
+# so unresolved HTML/origin routes are served by env.ASSETS instead of Go.
+EDGE_STATIC_ASSETS = "false"
+
+# Hybrid no-Go site example:
+# [assets]
+# directory = "../dist"
+# binding = "ASSETS"
+# run_worker_first = true
+# not_found_handling = "single-page-application"
 
 # Example:
 # [[kv_namespaces]]

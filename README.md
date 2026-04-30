@@ -442,6 +442,10 @@ Runtime behavior:
 
 Zero-origin migration diagnostics are available as an explicit dry-run path. Bind a KV namespace as `EDGE_MANIFEST`, publish a deployment manifest with `publish-edge-manifest`, then set `EDGE_MANIFEST_DRY_RUN=true`. Requests with `?__supercdn_edge_manifest=dry-run` or `X-SuperCDN-Edge-Manifest-Dry-Run: true` return the Worker route decision as JSON without fetching origin or storage.
 
+To start moving real traffic off the Go origin, set `EDGE_MANIFEST_MODE=route`. In this mode the Worker reads the active KV manifest and directly returns manifest-backed storage redirects for matching assets and site redirect rules; unresolved HTML/origin routes still fall back to the existing origin-assisted path. `EDGE_MANIFEST_MODE=enforce` disables that fallback and is intended only after entry HTML is served by Cloudflare-native static hosting.
+
+For the hybrid no-Go website path, deploy this Worker with a Cloudflare Static Assets `ASSETS` binding, `run_worker_first = true`, and `EDGE_STATIC_ASSETS=true`. Manifest-backed assets are redirected before static handling; entry HTML and SPA fallback are then served by `env.ASSETS.fetch(request)`, so public website traffic no longer needs the Go origin.
+
 For production fallback, set a shared secret in both places:
 
 ```powershell

@@ -46,6 +46,15 @@ class MemoryKV {
   }
 }
 
+class MemoryAssets {
+  constructor(private readonly handler: (request: Request) => Promise<Response>) {}
+
+  async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const request = input instanceof Request ? input : new Request(input, init);
+    return this.handler(request);
+  }
+}
+
 function ctx(): ExecutionContext {
   return {
     waitUntil(promise: Promise<unknown>) {
@@ -195,6 +204,200 @@ describe("edge proxy", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("origin");
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes manifest storage redirects without contacting origin", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called for manifest routes");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js"),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(manifest()),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("https://storage.example.com/assets/app.js?sign=fresh");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("X-Test-Asset")).toBe("yes");
+    expect(res.headers.get("X-SuperCDN-Edge-Manifest")).toBe("route");
+    expect(res.headers.get("X-SuperCDN-Edge-Action")).toBe("route");
+    expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("manifest");
+    expect(res.headers.get("X-SuperCDN-Edge-File")).toBe("assets/app.js");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("routes manifest redirects before range bypasses", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called for manifest range redirects");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js", { headers: { Range: "bytes=0-3" } }),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(manifest()),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("https://storage.example.com/assets/app.js?sign=fresh");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("routes manifest site redirects without contacting origin", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called for manifest site redirects");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/old"),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(
+            manifest({ rules: { redirects: [{ from: "/old", to: "/new", status: 301 }] } }),
+          ),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(301);
+    expect(res.headers.get("Location")).toBe("/new");
+    expect(res.headers.get("X-SuperCDN-Edge-Manifest")).toBe("route");
+    expect(res.headers.get("X-SuperCDN-Edge-Action")).toBe("site_redirect");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back to origin for manifest origin routes in route mode", async () => {
+    vi.stubGlobal("caches", { default: new MemoryCache() });
+    const fetchSpy = vi.fn(async () => new Response("<html></html>", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/"),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(manifest()),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("<html></html>");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks origin fallback for unresolved manifest routes in enforce mode", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called in enforce mode");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/"),
+      env({
+        EDGE_MANIFEST_MODE: "enforce",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(manifest()),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("X-SuperCDN-Edge-Manifest")).toBe("route");
+    expect(res.headers.get("X-SuperCDN-Edge-Error")).toBe("manifest_direct_route_unavailable");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("serves Cloudflare Static Assets after manifest origin routes without contacting origin", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called when static assets are enabled");
+    });
+    const assetsFetch = vi.fn(async () => {
+      return new Response("<html>static</html>", {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "public, max-age=0, must-revalidate",
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/"),
+      env({
+        EDGE_MANIFEST_MODE: "enforce",
+        EDGE_STATIC_ASSETS: "true",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(manifest()),
+        }) as unknown as KVNamespace,
+        ASSETS: new MemoryAssets(assetsFetch) as unknown as Fetcher,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("cloudflare_static");
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0, must-revalidate");
+    expect(await res.text()).toBe("<html>static</html>");
+    expect(assetsFetch).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses Cloudflare Static Assets without requiring an edge manifest", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called for static asset mode");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/movie/123"),
+      env({
+        EDGE_STATIC_ASSETS: "true",
+        ASSETS: new MemoryAssets(async () => new Response("<html>spa</html>", { status: 200 })) as unknown as Fetcher,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("cloudflare_static");
+    expect(await res.text()).toBe("<html>spa</html>");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not send non-GET traffic to origin when static assets are enabled", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called for static asset methods");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/api", { method: "POST" }),
+      env({ EDGE_STATIC_ASSETS: "true" }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(405);
+    expect(res.headers.get("Allow")).toBe("GET, HEAD");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("follows marked storage redirects and returns same-origin-safe content", async () => {

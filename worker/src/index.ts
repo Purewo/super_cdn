@@ -1,4 +1,5 @@
 export interface Env {
+  ASSETS?: Fetcher;
   ORIGIN_BASE_URL: string;
   EDGE_BYPASS_SECRET?: string;
   EDGE_DEFAULT_CACHE_CONTROL?: string;
@@ -7,6 +8,8 @@ export interface Env {
   EDGE_MANIFEST_JSON?: string;
   EDGE_MANIFEST_KEY?: string;
   EDGE_MANIFEST_KEY_PREFIX?: string;
+  EDGE_MANIFEST_MODE?: string;
+  EDGE_STATIC_ASSETS?: string;
 }
 
 export interface EdgeManifest {
@@ -100,7 +103,20 @@ export default {
     }
 
     if (request.method !== "GET" && request.method !== "HEAD") {
+      if (edgeStaticAssetsEnabled(env)) {
+        return methodNotAllowedResponse();
+      }
       return fetch(originRequest(request, env));
+    }
+
+    const manifestResponse = await edgeManifestRouteResponse(request, env);
+    if (manifestResponse) {
+      return manifestResponse;
+    }
+
+    const staticResponse = await edgeStaticAssetsResponse(request, env);
+    if (staticResponse) {
+      return staticResponse;
     }
 
     if (request.headers.has("Range")) {
@@ -162,6 +178,47 @@ export async function edgeManifestDryRunResponse(request: Request, env: Env): Pr
     decision,
     warnings: loaded.manifest.warnings || [],
   });
+}
+
+export async function edgeManifestRouteResponse(request: Request, env: Env): Promise<Response | undefined> {
+  if (!edgeManifestRoutingEnabled(env)) {
+    return undefined;
+  }
+  const loaded = await loadEdgeManifest(request, env);
+  if (!loaded.manifest) {
+    if (edgeManifestRoutingStrict(env) && !edgeStaticAssetsEnabled(env)) {
+      return edgeManifestRouteErrorResponse(503, "manifest_unavailable", loaded.error || "edge manifest unavailable");
+    }
+    return undefined;
+  }
+  const decision = resolveEdgeManifestDecision(request, loaded.manifest);
+  const response = directEdgeManifestResponse(decision);
+  if (response) {
+    return response;
+  }
+  if (edgeManifestRoutingStrict(env) && !edgeStaticAssetsEnabled(env)) {
+    return unresolvedEdgeManifestDecisionResponse(decision);
+  }
+  return undefined;
+}
+
+export async function edgeStaticAssetsResponse(request: Request, env: Env): Promise<Response | undefined> {
+  if (!edgeStaticAssetsEnabled(env)) {
+    return undefined;
+  }
+  if (!env.ASSETS) {
+    return edgeStaticAssetsErrorResponse(503, "cloudflare_static_binding_missing", "ASSETS binding is not configured");
+  }
+  try {
+    const response = await env.ASSETS.fetch(request);
+    return withEdgeHeader(normalizeResponse(response, request, undefined, env), "X-SuperCDN-Edge-Source", "cloudflare_static");
+  } catch (error) {
+    return edgeStaticAssetsErrorResponse(
+      502,
+      "cloudflare_static_fetch_failed",
+      `Cloudflare Static Assets fetch failed: ${errorMessage(error)}`,
+    );
+  }
 }
 
 export async function loadEdgeManifest(request: Request, env: Env): Promise<LoadedEdgeManifest> {
@@ -430,6 +487,103 @@ function withEdgeHeader(response: Response, name: string, value: string): Respon
   return out;
 }
 
+function directEdgeManifestResponse(decision: EdgeManifestDecision): Response | undefined {
+  if (decision.action === "site_redirect" && decision.location) {
+    return edgeManifestRedirectResponse(decision);
+  }
+  if (decision.route_type === "redirect" && decision.location) {
+    return edgeManifestRedirectResponse(decision);
+  }
+  return undefined;
+}
+
+function edgeManifestRedirectResponse(decision: EdgeManifestDecision): Response {
+  const headers = new Headers();
+  headers.set("Location", decision.location || "/");
+  applyManifestHeaders(headers, decision);
+
+  if (!headers.has("Cache-Control") && decision.route_type === "redirect") {
+    headers.set("Cache-Control", "no-store");
+  }
+  headers.set("X-SuperCDN-Edge-Manifest", "route");
+  headers.set("X-SuperCDN-Edge-Action", decision.action);
+  headers.set("X-SuperCDN-Edge-Source", "manifest");
+  if (decision.file) {
+    headers.set("X-SuperCDN-Edge-File", decision.file);
+  }
+
+  return new Response(null, {
+    status: redirectStatus(decision.status),
+    headers,
+  });
+}
+
+function unresolvedEdgeManifestDecisionResponse(decision: EdgeManifestDecision): Response {
+  const status = decision.action === "miss" ? 404 : decision.status >= 400 ? decision.status : 502;
+  const reason = decision.action === "miss" ? "manifest_route_not_found" : "manifest_direct_route_unavailable";
+  return edgeManifestRouteErrorResponse(
+    status,
+    reason,
+    `edge manifest cannot serve ${decision.request_path} without origin fallback`,
+  );
+}
+
+function edgeManifestRouteErrorResponse(status: number, reason: string, message: string): Response {
+  return new Response(`${message}\n`, {
+    status,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-SuperCDN-Edge-Manifest": "route",
+      "X-SuperCDN-Edge-Error": reason,
+    },
+  });
+}
+
+function edgeStaticAssetsErrorResponse(status: number, reason: string, message: string): Response {
+  return new Response(`${message}\n`, {
+    status,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-SuperCDN-Edge-Source": "cloudflare_static",
+      "X-SuperCDN-Edge-Error": reason,
+    },
+  });
+}
+
+function applyManifestHeaders(headers: Headers, decision: EdgeManifestDecision): void {
+  for (const [name, value] of Object.entries(decision.headers || {})) {
+    setManifestHeader(headers, name, value);
+  }
+  if (decision.cache_control) {
+    headers.set("Cache-Control", decision.cache_control);
+  }
+}
+
+function setManifestHeader(headers: Headers, name: string, value: string): void {
+  const normalized = name.trim().toLowerCase();
+  if (
+    normalized === "" ||
+    normalized === "location" ||
+    normalized === "set-cookie" ||
+    normalized === "content-length" ||
+    normalized === "content-encoding" ||
+    hopByHopHeaders.has(normalized)
+  ) {
+    return;
+  }
+  try {
+    headers.set(name, value);
+  } catch {
+    // Ignore invalid custom header names or values from a manifest.
+  }
+}
+
+function redirectStatus(status: number): number {
+  return storageRedirectStatus.has(status) ? status : 302;
+}
+
 function shouldStore(response: Response): boolean {
   if (!cacheableStatus.has(response.status) || response.status === 206) {
     return false;
@@ -555,6 +709,36 @@ function edgeManifestJSON(body: unknown, status = 200): Response {
 function enabled(value: string | undefined): boolean {
   const normalized = (value || "").trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function edgeManifestRoutingEnabled(env: Env): boolean {
+  const mode = edgeManifestRoutingMode(env);
+  return mode === "route" || mode === "active" || mode === "strict" || mode === "enforce";
+}
+
+function edgeManifestRoutingStrict(env: Env): boolean {
+  const mode = edgeManifestRoutingMode(env);
+  return mode === "strict" || mode === "enforce";
+}
+
+function edgeManifestRoutingMode(env: Env): string {
+  return (env.EDGE_MANIFEST_MODE || "").trim().toLowerCase();
+}
+
+function edgeStaticAssetsEnabled(env: Env): boolean {
+  return enabled(env.EDGE_STATIC_ASSETS);
+}
+
+function methodNotAllowedResponse(): Response {
+  return new Response("method not allowed\n", {
+    status: 405,
+    headers: {
+      Allow: "GET, HEAD",
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-SuperCDN-Edge-Source": "cloudflare_static",
+    },
+  });
 }
 
 function contentTypeByPath(pathname: string): string {
