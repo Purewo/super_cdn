@@ -12,6 +12,8 @@ Next-session priority note: start with the resource capability model, then repli
 
 Web hosting boundary note: the current product rule is recorded in `docs/web-hosting-boundaries.md`. Go entry delivery is for tests/integration/compatibility; preferred Web hosting is Cloudflare entry plus non-entry resources on AList/OpenList, Cloudflare-native static assets or IPFS/Pinata. R2 remains a CDN/object acceleration line; R2-backed Web hosting is legacy compatibility and not the mainstream path. Static-resource failover must never fall back to Go.
 
+GitHub operation note: for GitHub network operations such as `git push`, `git fetch`, tag push and release API calls, prefer using the local proxy at `http://127.0.0.1:10808` when direct access is slow or reset. Do not configure a permanent global, system or repository Git proxy. Use per-command temporary proxy flags instead, for example `git -c http.proxy=http://127.0.0.1:10808 -c https.proxy=http://127.0.0.1:10808 push origin main`.
+
 Current local service:
 
 ```text
