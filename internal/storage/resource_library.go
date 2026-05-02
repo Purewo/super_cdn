@@ -98,8 +98,48 @@ func (s *ResourceLibraryStore) Put(ctx context.Context, opts PutOptions) (string
 	if err != nil {
 		return "", err
 	}
+	locator, err = waitResourceLibraryPutVisible(ctx, binding.Store, opts.Key, locator)
+	if err != nil {
+		return "", fmt.Errorf("resource library %q binding %q upload %q not visible: %w", s.name, binding.Name, opts.Key, err)
+	}
 	rollbackUsage = false
 	return encodeResourceLocator(binding.Name, locator), nil
+}
+
+var (
+	resourceLibraryPutStatAttempts = 60
+	resourceLibraryPutStatDelay    = 2 * time.Second
+)
+
+func waitResourceLibraryPutVisible(ctx context.Context, store Store, key, fallbackLocator string) (string, error) {
+	attempts := resourceLibraryPutStatAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		stat, err := store.Stat(ctx, key)
+		if err == nil {
+			return firstNonEmpty(stat.Locator, fallbackLocator), nil
+		}
+		lastErr = err
+		if i == attempts-1 {
+			break
+		}
+		delay := resourceLibraryPutStatDelay
+		if delay <= 0 {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", ErrNotFound
 }
 
 func (s *ResourceLibraryStore) PreflightPut(_ context.Context, opts PreflightOptions) (*PreflightResult, error) {

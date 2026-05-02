@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -150,6 +151,7 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("GET /resource-libraries/status", s.handleResourceLibraryStatus)
 	s.apiMux.HandleFunc("POST /resource-libraries/health-check", s.handleResourceLibraryHealthCheck)
 	s.apiMux.HandleFunc("POST /resource-libraries/e2e-probe", s.handleResourceLibraryE2EProbe)
+	s.apiMux.HandleFunc("GET /routing-policies/status", s.handleRoutingPolicyStatus)
 	s.apiMux.HandleFunc("POST /asset-buckets", s.handleCreateAssetBucket)
 	s.apiMux.HandleFunc("GET /asset-buckets", s.handleListAssetBuckets)
 	s.apiMux.HandleFunc("GET /asset-buckets/{slug}", s.handleGetAssetBucket)
@@ -169,6 +171,8 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("GET /sites/{id}/deployment-target", s.handleResolveSiteDeploymentTarget)
 	s.apiMux.HandleFunc("GET /domains/{host}/status", s.handleDomainStatus)
 	s.apiMux.HandleFunc("GET /cloudflare/status", s.handleCloudflareStatus)
+	s.apiMux.HandleFunc("GET /ipfs/status", s.handleIPFSStatus)
+	s.apiMux.HandleFunc("POST /ipfs/pins/refresh", s.handleRefreshIPFSPins)
 	s.apiMux.HandleFunc("POST /cloudflare/r2/sync", s.handleSyncCloudflareR2)
 	s.apiMux.HandleFunc("POST /cloudflare/r2/provision", s.handleProvisionCloudflareR2)
 	s.apiMux.HandleFunc("POST /cloudflare/r2/credentials", s.handleCreateCloudflareR2Credentials)
@@ -244,6 +248,7 @@ func (s *Server) rootOnlyAPI(apiPath string) bool {
 	return strings.HasPrefix(apiPath, "/init/") ||
 		strings.HasPrefix(apiPath, "/resource-libraries/") ||
 		strings.HasPrefix(apiPath, "/cloudflare/") ||
+		strings.HasPrefix(apiPath, "/ipfs/") ||
 		strings.HasPrefix(apiPath, "/jobs/") ||
 		strings.HasPrefix(apiPath, "/objects/") ||
 		apiPath == "/cache/purge" ||
@@ -673,11 +678,37 @@ type resourceLibraryE2EProbeResult struct {
 	Errors          []string `json:"errors,omitempty"`
 }
 
+type routingPolicyStatusResponse struct {
+	Policies []routingPolicyStatusView `json:"policies"`
+}
+
+type routingPolicyStatusView struct {
+	Name               string                          `json:"name"`
+	Mode               string                          `json:"mode"`
+	DefaultRegionGroup string                          `json:"default_region_group"`
+	SourceCount        int                             `json:"source_count"`
+	Sources            []routingPolicySourceStatusView `json:"sources"`
+	Errors             []string                        `json:"errors,omitempty"`
+}
+
+type routingPolicySourceStatusView struct {
+	Target       string                       `json:"target"`
+	TargetType   string                       `json:"target_type,omitempty"`
+	RegionGroup  string                       `json:"region_group"`
+	Weight       int                          `json:"weight"`
+	Priority     int                          `json:"priority"`
+	FallbackOnly bool                         `json:"fallback_only,omitempty"`
+	Status       string                       `json:"status"`
+	Health       *model.ResourceLibraryHealth `json:"health,omitempty"`
+	Error        string                       `json:"error,omitempty"`
+}
+
 type createAssetBucketRequest struct {
 	Slug                string   `json:"slug"`
 	Name                string   `json:"name"`
 	Description         string   `json:"description"`
 	RouteProfile        string   `json:"route_profile"`
+	RoutingPolicy       string   `json:"routing_policy"`
 	AllowedTypes        []string `json:"allowed_types"`
 	MaxCapacityBytes    int64    `json:"max_capacity_bytes"`
 	MaxFileSizeBytes    int64    `json:"max_file_size_bytes"`
@@ -724,6 +755,30 @@ type deleteAssetBucketResult struct {
 	DeletedBucket  bool                       `json:"deleted_bucket"`
 	DeletedProject bool                       `json:"deleted_project,omitempty"`
 	Errors         []string                   `json:"errors,omitempty"`
+}
+
+type deleteSiteDeploymentObjectResult struct {
+	Role         string                `json:"role"`
+	Path         string                `json:"path,omitempty"`
+	ObjectID     int64                 `json:"object_id,omitempty"`
+	Key          string                `json:"key,omitempty"`
+	DeleteRemote bool                  `json:"delete_remote"`
+	Remote       []deleteReplicaResult `json:"remote,omitempty"`
+	DeletedLocal bool                  `json:"deleted_local"`
+	Errors       []string              `json:"errors,omitempty"`
+}
+
+type deleteSiteDeploymentResult struct {
+	SiteID            string                             `json:"site_id"`
+	DeploymentID      string                             `json:"deployment_id"`
+	Deleted           bool                               `json:"deleted"`
+	DeleteObjects     bool                               `json:"delete_objects"`
+	DeleteRemote      bool                               `json:"delete_remote"`
+	ObjectCount       int                                `json:"object_count"`
+	Objects           []deleteSiteDeploymentObjectResult `json:"objects,omitempty"`
+	DeletedDeployment bool                               `json:"deleted_deployment"`
+	Warning           string                             `json:"warning,omitempty"`
+	Errors            []string                           `json:"errors,omitempty"`
 }
 
 type assetBucketCacheRequest struct {
@@ -874,6 +929,19 @@ type createCloudflareR2CredentialsAccountResult struct {
 	Result        cloudflare.R2CredentialsResult `json:"result"`
 }
 
+type refreshIPFSPinsRequest struct {
+	ObjectID int64  `json:"object_id"`
+	Target   string `json:"target,omitempty"`
+}
+
+type refreshIPFSPinsResponse struct {
+	Status   string          `json:"status"`
+	ObjectID int64           `json:"object_id"`
+	Target   string          `json:"target,omitempty"`
+	Pins     []model.IPFSPin `json:"pins,omitempty"`
+	Errors   []string        `json:"errors,omitempty"`
+}
+
 type cloudflareR2SyncTarget struct {
 	Account config.CloudflareAccountConfig
 	Library string
@@ -885,6 +953,7 @@ type createSiteRequest struct {
 	Mode                  string   `json:"mode"`
 	RouteProfile          string   `json:"route_profile"`
 	DeploymentTarget      string   `json:"deployment_target"`
+	RoutingPolicy         string   `json:"routing_policy"`
 	Domains               []string `json:"domains"`
 	DefaultDomainID       string   `json:"default_domain_id"`
 	RandomDefaultDomain   bool     `json:"random_default_domain"`
@@ -896,6 +965,8 @@ type recordCloudflareStaticDeploymentRequest struct {
 	Environment        string   `json:"environment"`
 	RouteProfile       string   `json:"route_profile"`
 	DeploymentTarget   string   `json:"deployment_target"`
+	RoutingPolicy      string   `json:"routing_policy"`
+	ResourceFailover   bool     `json:"resource_failover"`
 	Mode               string   `json:"mode"`
 	WorkerName         string   `json:"worker_name"`
 	VersionID          string   `json:"version_id"`
@@ -1046,6 +1117,8 @@ type siteDeployManifest struct {
 	Environment      string                            `json:"environment"`
 	RouteProfile     string                            `json:"route_profile"`
 	DeploymentTarget string                            `json:"deployment_target"`
+	RoutingPolicy    string                            `json:"routing_policy,omitempty"`
+	ResourceFailover bool                              `json:"resource_failover"`
 	CreatedAtUTC     string                            `json:"created_at_utc"`
 	FileCount        int                               `json:"file_count"`
 	TotalSize        int64                             `json:"total_size"`
@@ -1077,6 +1150,8 @@ type edgeManifest struct {
 	Status           string                       `json:"status"`
 	RouteProfile     string                       `json:"route_profile"`
 	DeploymentTarget string                       `json:"deployment_target"`
+	RoutingPolicy    string                       `json:"routing_policy,omitempty"`
+	ResourceFailover bool                         `json:"resource_failover"`
 	Mode             string                       `json:"mode"`
 	GeneratedAtUTC   string                       `json:"generated_at_utc"`
 	Rules            siteRules                    `json:"rules,omitempty"`
@@ -1087,19 +1162,60 @@ type edgeManifest struct {
 }
 
 type edgeManifestRoute struct {
-	Type               string            `json:"type"`
-	Delivery           string            `json:"delivery"`
-	File               string            `json:"file"`
-	Status             int               `json:"status"`
-	Location           string            `json:"location,omitempty"`
-	ContentType        string            `json:"content_type,omitempty"`
-	CacheControl       string            `json:"cache_control,omitempty"`
-	ObjectCacheControl string            `json:"object_cache_control,omitempty"`
-	Size               int64             `json:"size"`
-	SHA256             string            `json:"sha256,omitempty"`
-	ObjectID           int64             `json:"object_id"`
-	ObjectKey          string            `json:"object_key,omitempty"`
-	Headers            map[string]string `json:"headers,omitempty"`
+	Type               string               `json:"type"`
+	Delivery           string               `json:"delivery"`
+	File               string               `json:"file"`
+	Status             int                  `json:"status"`
+	Location           string               `json:"location,omitempty"`
+	ContentType        string               `json:"content_type,omitempty"`
+	CacheControl       string               `json:"cache_control,omitempty"`
+	ObjectCacheControl string               `json:"object_cache_control,omitempty"`
+	Size               int64                `json:"size"`
+	SHA256             string               `json:"sha256,omitempty"`
+	ObjectID           int64                `json:"object_id"`
+	ObjectKey          string               `json:"object_key,omitempty"`
+	IPFS               []edgeManifestIPFS   `json:"ipfs,omitempty"`
+	GatewayFallbacks   []string             `json:"gateway_fallbacks,omitempty"`
+	RoutingPolicy      *edgeRoutingPolicy   `json:"routing_policy,omitempty"`
+	Candidates         []edgeRouteCandidate `json:"candidates,omitempty"`
+	Headers            map[string]string    `json:"headers,omitempty"`
+}
+
+type edgeRoutingPolicy struct {
+	Name               string                    `json:"name"`
+	Mode               string                    `json:"mode"`
+	DefaultRegionGroup string                    `json:"default_region_group"`
+	Sources            []edgeRoutingPolicySource `json:"sources"`
+}
+
+type edgeRoutingPolicySource struct {
+	Target       string `json:"target"`
+	RegionGroup  string `json:"region_group"`
+	Weight       int    `json:"weight"`
+	Priority     int    `json:"priority"`
+	FallbackOnly bool   `json:"fallback_only,omitempty"`
+}
+
+type edgeRouteCandidate struct {
+	Target       string            `json:"target"`
+	TargetType   string            `json:"target_type,omitempty"`
+	Type         string            `json:"type"`
+	RegionGroup  string            `json:"region_group"`
+	Weight       int               `json:"weight"`
+	Priority     int               `json:"priority"`
+	FallbackOnly bool              `json:"fallback_only,omitempty"`
+	URL          string            `json:"url"`
+	Status       string            `json:"status"`
+	IPFS         *edgeManifestIPFS `json:"ipfs,omitempty"`
+}
+
+type edgeManifestIPFS struct {
+	Target        string `json:"target"`
+	Provider      string `json:"provider"`
+	CID           string `json:"cid"`
+	GatewayURL    string `json:"gateway_url,omitempty"`
+	PinStatus     string `json:"pin_status,omitempty"`
+	ProviderPinID string `json:"provider_pin_id,omitempty"`
 }
 
 type publishEdgeManifestRequest struct {
@@ -1292,6 +1408,101 @@ func (s *Server) handleResourceLibraryStatus(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, resourceLibraryStatusResponse{Libraries: views})
 }
 
+func (s *Server) handleRoutingPolicyStatus(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("policy"))
+	resp := routingPolicyStatusResponse{}
+	for _, policy := range s.cfg.RoutingPolicies {
+		if name != "" && policy.Name != name {
+			continue
+		}
+		resp.Policies = append(resp.Policies, s.routingPolicyStatusView(r.Context(), policy))
+	}
+	if name != "" && len(resp.Policies) == 0 {
+		writeError(w, http.StatusNotFound, "routing policy not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) routingPolicyStatusView(ctx context.Context, policy config.RoutingPolicy) routingPolicyStatusView {
+	view := routingPolicyStatusView{
+		Name:               policy.Name,
+		Mode:               policy.Mode,
+		DefaultRegionGroup: policy.DefaultRegionGroup,
+		SourceCount:        len(policy.Sources),
+	}
+	if len(policy.Sources) < 2 {
+		view.Errors = append(view.Errors, "routing policy requires at least two sources")
+	}
+	for _, source := range policy.Sources {
+		item := routingPolicySourceStatusView{
+			Target:       source.Target,
+			RegionGroup:  source.RegionGroup,
+			Weight:       source.Weight,
+			Priority:     source.Priority,
+			FallbackOnly: source.FallbackOnly,
+			Status:       "configured",
+		}
+		if store, ok := s.stores.Get(source.Target); ok {
+			item.TargetType = store.Type()
+		} else {
+			item.Status = "missing"
+			item.Error = "storage target is not configured"
+			view.Errors = append(view.Errors, source.Target+": "+item.Error)
+		}
+		if health, ok := s.routingPolicySourceHealth(ctx, source.Target); ok {
+			item.Health = &health
+			if health.Status != storage.HealthStatusOK {
+				item.Status = health.Status
+				item.Error = firstNonEmpty(health.LastError, health.Status)
+			}
+		}
+		view.Sources = append(view.Sources, item)
+	}
+	return view
+}
+
+func (s *Server) routingPolicySourceHealth(ctx context.Context, target string) (model.ResourceLibraryHealth, bool) {
+	config, ok := s.resourceLibraryConfig(target)
+	if !ok || len(config.Bindings) == 0 {
+		return model.ResourceLibraryHealth{}, false
+	}
+	health, err := s.db.GetResourceLibraryHealth(ctx, target, bindingConfigName(config.Bindings[0], 0))
+	if err != nil || health == nil {
+		return model.ResourceLibraryHealth{}, false
+	}
+	return *health, true
+}
+
+func (s *Server) routingPolicyForProfile(name, profileName string, profile config.RouteProfile) (config.RoutingPolicy, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return config.RoutingPolicy{}, fmt.Errorf("routing_policy is required")
+	}
+	policy, ok := s.cfg.RoutingPolicy(name)
+	if !ok {
+		return config.RoutingPolicy{}, fmt.Errorf("unknown routing_policy %q", name)
+	}
+	if len(policy.Sources) < 2 {
+		return config.RoutingPolicy{}, fmt.Errorf("routing_policy %q requires at least two sources", name)
+	}
+	allowed := map[string]bool{}
+	if profile.Primary != "" {
+		allowed[profile.Primary] = true
+	}
+	for _, target := range profile.Backups {
+		if target != "" {
+			allowed[target] = true
+		}
+	}
+	for _, source := range policy.Sources {
+		if !allowed[source.Target] {
+			return config.RoutingPolicy{}, fmt.Errorf("routing_policy %q source %q is not included in route_profile %q", name, source.Target, profileName)
+		}
+	}
+	return policy, nil
+}
+
 func (s *Server) handleResourceLibraryHealthCheck(w http.ResponseWriter, r *http.Request) {
 	var req resourceLibraryHealthRequest
 	if !decodeJSON(w, r, &req) {
@@ -1357,9 +1568,17 @@ func (s *Server) handleCreateAssetBucket(w http.ResponseWriter, r *http.Request)
 		name = slug
 	}
 	profileName := firstNonEmpty(req.RouteProfile, "china_all")
-	if _, ok := s.cfg.Profile(profileName); !ok {
+	profile, ok := s.cfg.Profile(profileName)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "unknown route_profile")
 		return
+	}
+	routingPolicy := strings.TrimSpace(req.RoutingPolicy)
+	if routingPolicy != "" {
+		if _, err := s.routingPolicyForProfile(routingPolicy, profileName, profile); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	allowed, err := normalizeAssetTypes(req.AllowedTypes)
 	if err != nil {
@@ -1381,6 +1600,7 @@ func (s *Server) handleCreateAssetBucket(w http.ResponseWriter, r *http.Request)
 		Name:                name,
 		Description:         strings.TrimSpace(req.Description),
 		RouteProfile:        profileName,
+		RoutingPolicy:       routingPolicy,
 		AllowedTypes:        allowed,
 		MaxCapacityBytes:    req.MaxCapacityBytes,
 		MaxFileSizeBytes:    req.MaxFileSizeBytes,
@@ -1538,6 +1758,7 @@ func (s *Server) handleUploadBucketObject(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	item.IPFS = obj.IPFS
 	publicURL := s.assetBucketPublicURL("", bucket.Slug, item.LogicalPath)
 	urls := []string{publicURL}
 	resp := map[string]any{
@@ -1547,6 +1768,9 @@ func (s *Server) handleUploadBucketObject(w http.ResponseWriter, r *http.Request
 		"jobs":          jobs,
 		"url":           item.URL,
 		"public_url":    publicURL,
+	}
+	if len(obj.IPFS) > 0 {
+		resp["ipfs"] = obj.IPFS
 	}
 	if cdnURL, err := s.objectRedirectURL(r.Context(), obj); err == nil {
 		resp["cdn_url"] = cdnURL
@@ -1565,6 +1789,11 @@ func (s *Server) handleListBucketObjects(w http.ResponseWriter, r *http.Request)
 	prefix := strings.TrimPrefix(strings.ReplaceAll(r.URL.Query().Get("prefix"), "\\", "/"), "/")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.db.ListAssetBucketObjects(r.Context(), slug, prefix, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	items, err = s.hydrateBucketObjectsIPFS(r.Context(), items)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1715,12 +1944,19 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 	if deploymentTarget == "" {
 		deploymentTarget = defaultDeploymentTarget(profile)
 	}
+	routingPolicy := strings.TrimSpace(req.RoutingPolicy)
+	if routingPolicy != "" {
+		if _, err := s.routingPolicyForProfile(routingPolicy, req.RouteProfile, profile); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	domains, err := s.siteDomainsFromRequest(req.ID, req.Domains, req.DefaultDomainID, req.RandomDefaultDomain, req.SkipDefaultDomain, req.AllocateDefaultDomain)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	site, err := s.db.CreateSiteInWorkspace(r.Context(), workspaceForContext(r.Context()), req.ID, strings.TrimSpace(req.Name), req.Mode, req.RouteProfile, deploymentTarget, domains)
+	site, err := s.db.CreateSiteInWorkspace(r.Context(), workspaceForContext(r.Context()), req.ID, strings.TrimSpace(req.Name), req.Mode, req.RouteProfile, deploymentTarget, routingPolicy, domains)
 	if err != nil {
 		if strings.Contains(err.Error(), "already bound") {
 			writeError(w, http.StatusConflict, err.Error())
@@ -1929,6 +2165,73 @@ func (s *Server) handleCloudflareStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, s.cloudflareClient().Status(r.Context()))
+}
+
+func (s *Server) handleIPFSStatus(w http.ResponseWriter, r *http.Request) {
+	target := strings.TrimSpace(r.URL.Query().Get("target"))
+	names := s.stores.Names()
+	sort.Strings(names)
+	providers := make([]storage.ProviderStatus, 0)
+	for _, name := range names {
+		store, ok := s.stores.Get(name)
+		if !ok {
+			continue
+		}
+		if target != "" && name != target {
+			continue
+		}
+		if store.Type() != "pinata" {
+			if target != "" {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("storage target %q is %q, not an IPFS provider", target, store.Type()))
+				return
+			}
+			continue
+		}
+		statuser, ok := store.(storage.ProviderStatusStore)
+		if !ok {
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("storage target %q does not expose provider status", name))
+			return
+		}
+		providers = append(providers, statuser.ProviderStatus(r.Context()))
+	}
+	if target != "" && len(providers) == 0 {
+		if _, ok := s.stores.Get(target); ok {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("storage target %q is not an IPFS provider", target))
+			return
+		}
+		writeError(w, http.StatusNotFound, "ipfs provider not found")
+		return
+	}
+	ok := len(providers) > 0
+	for _, provider := range providers {
+		ok = ok && provider.OK
+	}
+	resp := map[string]any{
+		"configured": len(providers) > 0,
+		"ok":         ok,
+		"providers":  providers,
+	}
+	if len(providers) == 0 {
+		resp["warnings"] = []string{"no IPFS/Pinata storage target is configured"}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleRefreshIPFSPins(w http.ResponseWriter, r *http.Request) {
+	var req refreshIPFSPinsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.refreshIPFSPins(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	status := http.StatusOK
+	if resp.Status == "partial" || resp.Status == "failed" {
+		status = http.StatusBadGateway
+	}
+	writeJSON(w, status, resp)
 }
 
 func (s *Server) handleSyncCloudflareR2(w http.ResponseWriter, r *http.Request) {
@@ -2183,15 +2486,50 @@ func (s *Server) handleDeleteSiteDeployment(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusConflict, "pinned deployment cannot be deleted")
 		return
 	}
-	if err := s.db.DeleteSiteDeployment(r.Context(), siteID, deploymentID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	deleteObjects, err := queryBool(r, "delete_objects", false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	resp := map[string]any{"deleted": true, "deployment_id": deploymentID}
-	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic {
-		resp["warning"] = "deleted Super CDN metadata only; Cloudflare Worker versions and custom domains are not deleted by this command"
+	deleteRemote, err := queryBool(r, "delete_remote", true)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	result := &deleteSiteDeploymentResult{
+		SiteID:        siteID,
+		DeploymentID:  deploymentID,
+		DeleteObjects: deleteObjects,
+		DeleteRemote:  deleteRemote,
+	}
+	if deleteObjects {
+		deleted, err := s.deleteSiteDeploymentObjects(r.Context(), dep, deleteRemote)
+		if deleted != nil {
+			result.Objects = deleted
+			result.ObjectCount = len(deleted)
+			for _, item := range deleted {
+				result.Errors = append(result.Errors, item.Errors...)
+			}
+		}
+		if err != nil {
+			if len(result.Errors) == 0 {
+				result.Errors = append(result.Errors, err.Error())
+			}
+			writeJSON(w, http.StatusBadGateway, result)
+			return
+		}
+	}
+	if err := s.db.DeleteSiteDeployment(r.Context(), siteID, deploymentID); err != nil {
+		result.Errors = append(result.Errors, err.Error())
+		writeJSON(w, http.StatusInternalServerError, result)
+		return
+	}
+	result.DeletedDeployment = true
+	result.Deleted = true
+	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic {
+		result.Warning = "deleted Super CDN metadata only; Cloudflare Worker versions and custom domains are not deleted by this command"
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleSiteGC(w http.ResponseWriter, r *http.Request) {
@@ -2257,7 +2595,7 @@ func (s *Server) createSiteDeploymentFromRequest(w http.ResponseWriter, r *http.
 		if deploymentTarget == "" {
 			deploymentTarget = defaultDeploymentTarget(profile)
 		}
-		site, err = s.db.CreateSiteInWorkspace(r.Context(), workspaceForContext(r.Context()), siteID, "", "standard", profileName, deploymentTarget, nil)
+		site, err = s.db.CreateSiteInWorkspace(r.Context(), workspaceForContext(r.Context()), siteID, "", "standard", profileName, deploymentTarget, "", nil)
 		if err != nil {
 			return nil, deploySitePayload{}, err
 		}
@@ -2271,6 +2609,24 @@ func (s *Server) createSiteDeploymentFromRequest(w http.ResponseWriter, r *http.
 	}
 	if deploymentTarget == "" {
 		deploymentTarget = firstNonEmpty(site.DeploymentTarget, defaultDeploymentTarget(profile))
+	}
+	routingPolicy := strings.TrimSpace(r.FormValue("routing_policy"))
+	if routingPolicy == "" {
+		routingPolicy = strings.TrimSpace(site.RoutingPolicy)
+	}
+	if routingPolicy != "" {
+		if _, err := s.routingPolicyForProfile(routingPolicy, profileName, profile); err != nil {
+			return nil, deploySitePayload{}, err
+		}
+	}
+	resourceFailover, err := parseFormBool(r, "resource_failover", false)
+	if err != nil {
+		return nil, deploySitePayload{}, err
+	}
+	if resourceFailover {
+		if err := validateResourceFailoverProfile(profileName, profile); err != nil {
+			return nil, deploySitePayload{}, err
+		}
 	}
 	file, header, err := firstFormFile(r, "artifact", "bundle", "file")
 	if err != nil {
@@ -2301,6 +2657,8 @@ func (s *Server) createSiteDeploymentFromRequest(w http.ResponseWriter, r *http.
 		Status:           model.SiteDeploymentQueued,
 		RouteProfile:     profileName,
 		DeploymentTarget: deploymentTarget,
+		RoutingPolicy:    routingPolicy,
+		ResourceFailover: resourceFailover,
 		Version:          deploymentID,
 		Pinned:           pinned,
 		ExpiresAt:        expiresAt,
@@ -2372,6 +2730,9 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 	if target != model.SiteDeploymentTargetCloudflareStatic {
 		return model.SiteDeployment{}, fmt.Errorf("cloudflare static deployment requires deployment_target cloudflare_static")
 	}
+	if req.ResourceFailover {
+		return model.SiteDeployment{}, fmt.Errorf("resource_failover is not supported for cloudflare_static deployments")
+	}
 	site, err := s.db.GetSite(ctx, siteID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return model.SiteDeployment{}, err
@@ -2384,8 +2745,18 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 	if site != nil {
 		profileName = firstNonEmpty(strings.TrimSpace(req.RouteProfile), site.RouteProfile, "overseas")
 	}
-	if _, ok := s.cfg.Profile(profileName); !ok {
+	profile, ok := s.cfg.Profile(profileName)
+	if !ok {
 		return model.SiteDeployment{}, fmt.Errorf("unknown route_profile")
+	}
+	routingPolicy := strings.TrimSpace(req.RoutingPolicy)
+	if routingPolicy == "" && site != nil {
+		routingPolicy = strings.TrimSpace(site.RoutingPolicy)
+	}
+	if routingPolicy != "" {
+		if _, err := s.routingPolicyForProfile(routingPolicy, profileName, profile); err != nil {
+			return model.SiteDeployment{}, err
+		}
 	}
 	mode := normalizeSiteMode(req.Mode)
 	if mode == "" {
@@ -2402,13 +2773,13 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 		return model.SiteDeployment{}, err
 	}
 	if site == nil {
-		site, err = s.db.CreateSiteInWorkspace(ctx, workspaceID, siteID, "", mode, profileName, target, requestedDomains)
+		site, err = s.db.CreateSiteInWorkspace(ctx, workspaceID, siteID, "", mode, profileName, target, routingPolicy, requestedDomains)
 		if err != nil {
 			return model.SiteDeployment{}, err
 		}
 	} else {
 		domains := mergeDomains(site.Domains, requestedDomains)
-		site, err = s.db.CreateSiteInWorkspace(ctx, site.WorkspaceID, siteID, site.Name, mode, profileName, target, domains)
+		site, err = s.db.CreateSiteInWorkspace(ctx, site.WorkspaceID, siteID, site.Name, mode, profileName, target, routingPolicy, domains)
 		if err != nil {
 			return model.SiteDeployment{}, err
 		}
@@ -2453,6 +2824,8 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 		Environment:      environment,
 		RouteProfile:     profileName,
 		DeploymentTarget: target,
+		RoutingPolicy:    routingPolicy,
+		ResourceFailover: false,
 		CreatedAtUTC:     publishedAt.Format(time.RFC3339Nano),
 		FileCount:        req.FileCount,
 		TotalSize:        req.TotalSize,
@@ -2470,6 +2843,8 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 		Status:           model.SiteDeploymentReady,
 		RouteProfile:     profileName,
 		DeploymentTarget: target,
+		RoutingPolicy:    routingPolicy,
+		ResourceFailover: false,
 		Version:          deploymentID,
 		Pinned:           req.Pinned,
 		FileCount:        req.FileCount,
@@ -2567,6 +2942,8 @@ func (s *Server) buildSiteDeployment(ctx context.Context, dep *model.SiteDeploym
 		Environment:      dep.Environment,
 		RouteProfile:     dep.RouteProfile,
 		DeploymentTarget: dep.DeploymentTarget,
+		RoutingPolicy:    dep.RoutingPolicy,
+		ResourceFailover: dep.ResourceFailover,
 		CreatedAtUTC:     time.Now().UTC().Format(time.RFC3339Nano),
 		Rules:            rules,
 		Inspect:          &inspect,
@@ -2723,7 +3100,7 @@ func (s *Server) handleObjectReplicas(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid object id")
 		return
 	}
-	replicas, err := s.db.Replicas(r.Context(), id)
+	replicas, err := s.hydrateReplicasIPFS(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -2825,6 +3202,11 @@ func (s *Server) serveBucketAsset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "asset not found")
 		return
 	}
+	bucketConfig, err := s.db.GetAssetBucket(r.Context(), bucket)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "asset not found")
+		return
+	}
 	item, err := s.db.GetAssetBucketObject(r.Context(), bucket, objectPath)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "asset not found")
@@ -2835,7 +3217,49 @@ func (s *Server) serveBucketAsset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "asset not found")
 		return
 	}
+	if target, policyName, reason, candidate, ok := s.bucketRoutingRedirect(r.Context(), r, bucketConfig, obj); ok {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-SuperCDN-Redirect", "storage")
+		w.Header().Set("X-SuperCDN-Route-Policy", policyName)
+		w.Header().Set("X-SuperCDN-Route-Target", candidate.Target)
+		w.Header().Set("X-SuperCDN-Route-Reason", reason)
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
 	s.streamObject(w, r, obj, http.StatusOK)
+}
+
+func (s *Server) bucketRoutingRedirect(ctx context.Context, r *http.Request, bucket *model.AssetBucket, obj *model.Object) (string, string, string, edgeRouteCandidate, bool) {
+	if bucket == nil || obj == nil || strings.TrimSpace(bucket.RoutingPolicy) == "" {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	if r.Header.Get("Range") != "" {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	profile, ok := s.cfg.Profile(bucket.RouteProfile)
+	if !ok {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	policy, err := s.routingPolicyForProfile(bucket.RoutingPolicy, bucket.RouteProfile, profile)
+	if err != nil {
+		s.logger.Warn("bucket routing policy unavailable", "bucket", bucket.Slug, "policy", bucket.RoutingPolicy, "error", err)
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	candidates, warnings := s.routingPolicyCandidates(ctx, policy, obj)
+	for _, warning := range warnings {
+		s.logger.Warn("bucket routing candidate warning", "bucket", bucket.Slug, "object_id", obj.ID, "warning", warning)
+	}
+	if len(candidates) < 2 {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	selected, reason, ok := selectRoutingCandidateForRequest(policy, candidates, r)
+	if !ok || selected.URL == "" {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	return selected.URL, policy.Name, reason, selected, true
 }
 
 func (s *Server) serveDownloadRedirect(w http.ResponseWriter, r *http.Request) {
@@ -2997,7 +3421,20 @@ func (s *Server) writeSiteFile(w http.ResponseWriter, r *http.Request, site *mod
 		w.Header().Set(key, value)
 	}
 	if s.shouldRedirectSiteFile(r, rules, objectPath, status) {
-		target, err := s.objectRedirectURL(r.Context(), obj)
+		if target, policyName, reason, candidate, ok := s.siteRoutingRedirect(r.Context(), r, site, dep, obj); ok {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("X-SuperCDN-Redirect", "storage")
+			w.Header().Set("X-SuperCDN-Route-Policy", policyName)
+			w.Header().Set("X-SuperCDN-Route-Target", candidate.Target)
+			w.Header().Set("X-SuperCDN-Route-Reason", reason)
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+		resourceFailover := dep != nil && dep.ResourceFailover
+		target, err := s.objectPrimaryRedirectURL(r.Context(), obj)
+		if resourceFailover && (err != nil || target == "") {
+			target, err = s.objectRedirectURL(r.Context(), obj)
+		}
 		if err == nil && target != "" {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("X-SuperCDN-Redirect", "storage")
@@ -3005,6 +3442,10 @@ func (s *Server) writeSiteFile(w http.ResponseWriter, r *http.Request, site *mod
 			return
 		}
 		s.logger.Warn("site file storage redirect unavailable", "site", site.ID, "deployment", dep.ID, "path", objectPath, "object_id", obj.ID, "err", err)
+		if resourceFailover {
+			writeError(w, http.StatusBadGateway, "resource_failover has no ready storage target")
+			return
+		}
 	}
 	s.streamObject(w, r, obj, status)
 }
@@ -3020,6 +3461,37 @@ func (s *Server) shouldRedirectSiteFile(r *http.Request, rules siteRules, object
 		return false
 	}
 	return siteDeliveryMode(rules, objectPath) == "redirect"
+}
+
+func (s *Server) siteRoutingRedirect(ctx context.Context, r *http.Request, site *model.Site, dep *model.SiteDeployment, obj *model.Object) (string, string, string, edgeRouteCandidate, bool) {
+	if site == nil || dep == nil || obj == nil {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	policyName := strings.TrimSpace(firstNonEmpty(dep.RoutingPolicy, site.RoutingPolicy))
+	if policyName == "" {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	profile, ok := s.cfg.Profile(dep.RouteProfile)
+	if !ok {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	policy, err := s.routingPolicyForProfile(policyName, dep.RouteProfile, profile)
+	if err != nil {
+		s.logger.Warn("site routing policy unavailable", "site", site.ID, "deployment", dep.ID, "policy", policyName, "error", err)
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	candidates, warnings := s.routingPolicyCandidates(ctx, policy, obj)
+	for _, warning := range warnings {
+		s.logger.Warn("site routing candidate warning", "site", site.ID, "deployment", dep.ID, "object_id", obj.ID, "warning", warning)
+	}
+	if len(candidates) == 0 {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	selected, reason, ok := selectRoutingCandidateForRequest(policy, candidates, r)
+	if !ok || selected.URL == "" {
+		return "", "", "", edgeRouteCandidate{}, false
+	}
+	return selected.URL, policy.Name, reason, selected, true
 }
 
 func (s *Server) edgeOriginDeliveryRequested(r *http.Request) bool {
@@ -3060,7 +3532,7 @@ func (s *Server) streamObject(w http.ResponseWriter, r *http.Request, obj *model
 		if !ok {
 			continue
 		}
-		if target := s.objectReplicaRedirectURL(r, obj, replica, statusOverride); target != "" {
+		if target := s.objectReplicaRedirectURL(r, obj, replica, store, statusOverride); target != "" {
 			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}
@@ -3080,7 +3552,7 @@ func (s *Server) streamObject(w http.ResponseWriter, r *http.Request, obj *model
 	writeError(w, http.StatusNotFound, "ready replica not found")
 }
 
-func (s *Server) objectReplicaRedirectURL(r *http.Request, obj *model.Object, replica model.Replica, statusOverride int) string {
+func (s *Server) objectReplicaRedirectURL(r *http.Request, obj *model.Object, replica model.Replica, store storage.Store, statusOverride int) string {
 	if statusOverride != http.StatusOK || r.Header.Get("Range") != "" || replica.Locator == "" {
 		return ""
 	}
@@ -3088,7 +3560,10 @@ func (s *Server) objectReplicaRedirectURL(r *http.Request, obj *model.Object, re
 	if !ok || !profile.AllowRedirect {
 		return ""
 	}
-	return directLocatorURL(replica.Locator)
+	if target := directLocatorURL(replica.Locator); target != "" {
+		return target
+	}
+	return s.ipfsGatewayURLForReplica(r.Context(), replica, store)
 }
 
 func (s *Server) objectRedirectURL(ctx context.Context, obj *model.Object) (string, error) {
@@ -3109,28 +3584,575 @@ func (s *Server) objectRedirectURL(ctx context.Context, obj *model.Object) (stri
 		if replica.Status != model.ReplicaReady {
 			continue
 		}
-		store, ok := s.stores.Get(replica.Target)
-		if ok {
-			stat, err := store.Stat(ctx, obj.Key)
-			if err == nil {
-				if target := directLocatorURL(stat.Locator); target != "" {
-					return target, nil
-				}
-			}
-		}
-		if target := directLocatorURL(replica.Locator); target != "" {
+		if target, err := s.objectReplicaDirectURL(ctx, obj, replica); err == nil && target != "" {
 			return target, nil
 		}
-		if !ok {
+	}
+	return "", fmt.Errorf("direct storage URL not available for object %d", obj.ID)
+}
+
+func (s *Server) objectPrimaryRedirectURL(ctx context.Context, obj *model.Object) (string, error) {
+	if obj == nil || obj.ID == 0 {
+		return "", fmt.Errorf("object is required")
+	}
+	primary := strings.TrimSpace(obj.PrimaryTarget)
+	if primary == "" {
+		return "", fmt.Errorf("primary storage target is empty for object %d", obj.ID)
+	}
+	replicas, err := s.db.Replicas(ctx, obj.ID)
+	if err != nil {
+		return "", err
+	}
+	for _, replica := range replicas {
+		if replica.Target != primary {
 			continue
+		}
+		if replica.Status != model.ReplicaReady {
+			return "", fmt.Errorf("primary replica %q is %s for object %d", primary, firstNonEmpty(replica.Status, "unknown"), obj.ID)
+		}
+		if target, err := s.objectReplicaDirectURL(ctx, obj, replica); err == nil && target != "" {
+			return target, nil
+		} else if err != nil {
+			return "", fmt.Errorf("primary replica %q direct URL unavailable for object %d: %w", primary, obj.ID, err)
+		}
+	}
+	return "", fmt.Errorf("ready primary replica %q not found for object %d", primary, obj.ID)
+}
+
+func (s *Server) objectReplicaDirectURL(ctx context.Context, obj *model.Object, replica model.Replica) (string, error) {
+	var lastErr error
+	store, ok := s.stores.Get(replica.Target)
+	if ok {
+		stat, err := store.Stat(ctx, obj.Key)
+		if err == nil {
+			if target := directLocatorURL(stat.Locator); target != "" {
+				return target, nil
+			}
+		} else {
+			lastErr = err
+		}
+	}
+	if target := directLocatorURL(replica.Locator); target != "" {
+		return target, nil
+	}
+	if ok {
+		if target := s.ipfsGatewayURLForReplica(ctx, replica, store); target != "" {
+			return target, nil
 		}
 		if public := store.PublicURL(obj.Key); public != "" {
 			if target := directLocatorURL(public); target != "" {
 				return target, nil
 			}
 		}
+	} else {
+		lastErr = fmt.Errorf("storage target %q is not configured", replica.Target)
 	}
-	return "", fmt.Errorf("direct storage URL not available for object %d", obj.ID)
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("direct storage URL not available for object %d replica %q", obj.ID, replica.Target)
+}
+
+func edgeRoutingPolicySnapshot(policy config.RoutingPolicy) *edgeRoutingPolicy {
+	out := edgeRoutingPolicy{
+		Name:               policy.Name,
+		Mode:               policy.Mode,
+		DefaultRegionGroup: policy.DefaultRegionGroup,
+		Sources:            make([]edgeRoutingPolicySource, 0, len(policy.Sources)),
+	}
+	for _, source := range policy.Sources {
+		out.Sources = append(out.Sources, edgeRoutingPolicySource{
+			Target:       source.Target,
+			RegionGroup:  source.RegionGroup,
+			Weight:       source.Weight,
+			Priority:     source.Priority,
+			FallbackOnly: source.FallbackOnly,
+		})
+	}
+	return &out
+}
+
+func (s *Server) routingPolicyCandidates(ctx context.Context, policy config.RoutingPolicy, obj *model.Object) ([]edgeRouteCandidate, []string) {
+	if obj == nil || obj.ID == 0 {
+		return nil, []string{"routing policy candidates unavailable: object is missing"}
+	}
+	replicas, err := s.hydrateReplicasIPFS(ctx, obj.ID)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("routing policy %q replicas unavailable for object %d: %v", policy.Name, obj.ID, err)}
+	}
+	byTarget := map[string]model.Replica{}
+	for _, replica := range replicas {
+		if replica.Target != "" {
+			byTarget[replica.Target] = replica
+		}
+	}
+	var (
+		out      []edgeRouteCandidate
+		warnings []string
+	)
+	for _, source := range policy.Sources {
+		store, ok := s.stores.Get(source.Target)
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q is not configured", policy.Name, source.Target))
+			continue
+		}
+		if reason, unhealthy := s.recentResourceLibraryHealthFailure(ctx, source.Target); unhealthy {
+			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q skipped by health: %s", policy.Name, source.Target, reason))
+			continue
+		}
+		replica, ok := byTarget[source.Target]
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q has no replica for object %d", policy.Name, source.Target, obj.ID))
+			continue
+		}
+		if replica.Status != model.ReplicaReady {
+			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q replica is %s", policy.Name, source.Target, firstNonEmpty(replica.Status, "unknown")))
+			continue
+		}
+		targetURL, ipfs := s.routingCandidateURL(ctx, obj, replica, store)
+		if targetURL == "" {
+			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q has no direct URL for object %d", policy.Name, source.Target, obj.ID))
+			continue
+		}
+		candidateType := "redirect"
+		if ipfs != nil {
+			candidateType = "ipfs"
+		}
+		out = append(out, edgeRouteCandidate{
+			Target:       source.Target,
+			TargetType:   store.Type(),
+			Type:         candidateType,
+			RegionGroup:  firstNonEmpty(source.RegionGroup, policy.DefaultRegionGroup, "overseas"),
+			Weight:       positiveWeight(source.Weight),
+			Priority:     source.Priority,
+			FallbackOnly: source.FallbackOnly,
+			URL:          targetURL,
+			Status:       model.ReplicaReady,
+			IPFS:         ipfs,
+		})
+	}
+	return out, warnings
+}
+
+func (s *Server) resourceFailoverCandidates(ctx context.Context, profileName string, obj *model.Object) ([]edgeRouteCandidate, []string) {
+	if obj == nil || obj.ID == 0 {
+		return nil, []string{"resource_failover candidates unavailable: object is missing"}
+	}
+	profile, ok := s.cfg.Profile(profileName)
+	if !ok {
+		return nil, []string{fmt.Sprintf("resource_failover route_profile %q is not configured", profileName)}
+	}
+	targets := routeProfileFailoverTargets(profile)
+	replicas, err := s.hydrateReplicasIPFS(ctx, obj.ID)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("resource_failover replicas unavailable for object %d: %v", obj.ID, err)}
+	}
+	byTarget := map[string]model.Replica{}
+	for _, replica := range replicas {
+		if replica.Target != "" {
+			byTarget[replica.Target] = replica
+		}
+	}
+	var (
+		out      []edgeRouteCandidate
+		warnings []string
+	)
+	for i, target := range targets {
+		store, ok := s.stores.Get(target)
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("resource_failover source %q is not configured", target))
+			continue
+		}
+		if reason, unhealthy := s.recentResourceLibraryHealthFailure(ctx, target); unhealthy {
+			warnings = append(warnings, fmt.Sprintf("resource_failover source %q skipped by health: %s", target, reason))
+			continue
+		}
+		replica, ok := byTarget[target]
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("resource_failover source %q has no replica for object %d", target, obj.ID))
+			continue
+		}
+		if replica.Status != model.ReplicaReady {
+			warnings = append(warnings, fmt.Sprintf("resource_failover source %q replica is %s", target, firstNonEmpty(replica.Status, "unknown")))
+			continue
+		}
+		targetURL, ipfs := s.routingCandidateURL(ctx, obj, replica, store)
+		if targetURL == "" {
+			warnings = append(warnings, fmt.Sprintf("resource_failover source %q has no direct URL for object %d", target, obj.ID))
+			continue
+		}
+		candidateType := "redirect"
+		if ipfs != nil {
+			candidateType = "ipfs"
+		}
+		out = append(out, edgeRouteCandidate{
+			Target:      target,
+			TargetType:  store.Type(),
+			Type:        candidateType,
+			RegionGroup: "failover",
+			Weight:      1,
+			Priority:    i,
+			URL:         targetURL,
+			Status:      model.ReplicaReady,
+			IPFS:        ipfs,
+		})
+	}
+	return out, warnings
+}
+
+func (s *Server) routingCandidateURL(ctx context.Context, obj *model.Object, replica model.Replica, store storage.Store) (string, *edgeManifestIPFS) {
+	if store != nil {
+		if stat, err := store.Stat(ctx, obj.Key); err == nil {
+			if target := directLocatorURL(stat.Locator); target != "" {
+				return target, nil
+			}
+		}
+	}
+	if target := directLocatorURL(replica.Locator); target != "" {
+		return target, nil
+	}
+	if ipfs, ok := s.edgeManifestIPFSForReplica(ctx, replica, store); ok && ipfs.GatewayURL != "" {
+		return ipfs.GatewayURL, &ipfs
+	}
+	if store != nil {
+		if public := store.PublicURL(obj.Key); public != "" {
+			if target := directLocatorURL(public); target != "" {
+				return target, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func (s *Server) edgeManifestIPFSForReplica(ctx context.Context, replica model.Replica, store storage.Store) (edgeManifestIPFS, bool) {
+	var pin model.IPFSPin
+	if replica.IPFS != nil {
+		pin = *replica.IPFS
+	} else if saved, err := s.db.GetIPFSPin(ctx, replica.ObjectID, replica.Target); err == nil {
+		pin = *saved
+	} else if derived, ok := ipfsPinFromReplica(replica.ObjectID, replica.Target, store, replica.Locator); ok {
+		pin = derived
+	} else {
+		return edgeManifestIPFS{}, false
+	}
+	if pin.CID == "" {
+		return edgeManifestIPFS{}, false
+	}
+	gateway := firstNonEmpty(pin.GatewayURL, s.ipfsGatewayURLForReplica(ctx, replica, store))
+	return edgeManifestIPFS{
+		Target:        pin.Target,
+		Provider:      pin.Provider,
+		CID:           pin.CID,
+		GatewayURL:    gateway,
+		PinStatus:     pin.PinStatus,
+		ProviderPinID: pin.ProviderPinID,
+	}, true
+}
+
+func edgeManifestRouteForSingleRoutingCandidate(route edgeManifestRoute, candidate edgeRouteCandidate, cacheControl string, routingPolicy *config.RoutingPolicy) edgeManifestRoute {
+	route.Location = candidate.URL
+	route.RoutingPolicy = edgeRoutingPolicySnapshot(*routingPolicy)
+	route.Candidates = []edgeRouteCandidate{candidate}
+	if candidate.Type == "ipfs" {
+		route.Type = "ipfs"
+		route.Status = http.StatusOK
+		route.CacheControl = cacheControl
+		if candidate.IPFS != nil {
+			route.IPFS = []edgeManifestIPFS{*candidate.IPFS}
+			if candidate.IPFS.GatewayURL != "" {
+				route.GatewayFallbacks = []string{candidate.IPFS.GatewayURL}
+			}
+		}
+		return route
+	}
+	route.Type = "redirect"
+	route.Status = http.StatusFound
+	route.CacheControl = "no-store"
+	return route
+}
+
+func positiveWeight(value int) int {
+	if value <= 0 {
+		return 1
+	}
+	return value
+}
+
+func selectRoutingCandidateForRequest(policy config.RoutingPolicy, candidates []edgeRouteCandidate, r *http.Request) (edgeRouteCandidate, string, bool) {
+	candidates = readyRoutingCandidates(candidates)
+	if len(candidates) == 0 {
+		return edgeRouteCandidate{}, "no_ready_candidates", false
+	}
+	region := requestRegionGroup(policy, r)
+	active := filterRoutingCandidates(candidates, func(candidate edgeRouteCandidate) bool {
+		return !candidate.FallbackOnly
+	})
+	if len(active) == 0 {
+		selected := weightedRoutingCandidate(candidates, routingHashKey(policy, r))
+		return selected, "fallback_only", true
+	}
+	switch policy.Mode {
+	case "global_accel":
+		if regionCandidates := routingCandidatesForRegion(active, region); len(regionCandidates) > 0 {
+			return firstPriorityRoutingCandidate(regionCandidates), "region:" + region, true
+		}
+		return firstPriorityRoutingCandidate(active), "region_fallback:" + region, true
+	case "global_load_balance":
+		if regionCandidates := routingCandidatesForRegion(active, region); len(regionCandidates) > 0 {
+			return weightedRoutingCandidate(regionCandidates, routingHashKey(policy, r)), "region_balance:" + region, true
+		}
+		return weightedRoutingCandidate(active, routingHashKey(policy, r)), "region_balance_fallback:" + region, true
+	default:
+		return weightedRoutingCandidate(active, routingHashKey(policy, r)), "load_balance", true
+	}
+}
+
+func readyRoutingCandidates(candidates []edgeRouteCandidate) []edgeRouteCandidate {
+	return filterRoutingCandidates(candidates, func(candidate edgeRouteCandidate) bool {
+		return candidate.URL != "" && candidate.Status == model.ReplicaReady
+	})
+}
+
+func routingCandidatesForRegion(candidates []edgeRouteCandidate, region string) []edgeRouteCandidate {
+	return filterRoutingCandidates(candidates, func(candidate edgeRouteCandidate) bool {
+		return strings.EqualFold(candidate.RegionGroup, region)
+	})
+}
+
+func filterRoutingCandidates(candidates []edgeRouteCandidate, keep func(edgeRouteCandidate) bool) []edgeRouteCandidate {
+	out := make([]edgeRouteCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if keep(candidate) {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func firstPriorityRoutingCandidate(candidates []edgeRouteCandidate) edgeRouteCandidate {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Priority != candidates[j].Priority {
+			return candidates[i].Priority < candidates[j].Priority
+		}
+		if candidates[i].Weight != candidates[j].Weight {
+			return candidates[i].Weight > candidates[j].Weight
+		}
+		return candidates[i].Target < candidates[j].Target
+	})
+	return candidates[0]
+}
+
+func weightedRoutingCandidate(candidates []edgeRouteCandidate, key string) edgeRouteCandidate {
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	total := 0
+	for _, candidate := range candidates {
+		total += positiveWeight(candidate.Weight)
+	}
+	if total <= 0 {
+		return candidates[0]
+	}
+	slot := int(hashString32(key) % uint32(total))
+	for _, candidate := range candidates {
+		slot -= positiveWeight(candidate.Weight)
+		if slot < 0 {
+			return candidate
+		}
+	}
+	return candidates[len(candidates)-1]
+}
+
+func requestRegionGroup(policy config.RoutingPolicy, r *http.Request) string {
+	if r != nil {
+		if strings.EqualFold(strings.TrimSpace(r.Header.Get("CF-IPCountry")), "CN") {
+			return "china"
+		}
+		if country := strings.TrimSpace(r.Header.Get("CF-IPCountry")); country != "" {
+			return "overseas"
+		}
+	}
+	return firstNonEmpty(policy.DefaultRegionGroup, "overseas")
+}
+
+func routingHashKey(policy config.RoutingPolicy, r *http.Request) string {
+	var pathValue, client string
+	if r != nil {
+		if r.URL != nil {
+			pathValue = r.URL.Path
+		}
+		client = firstNonEmpty(r.Header.Get("CF-Connecting-IP"), firstForwardedFor(r.Header.Get("X-Forwarded-For")), r.RemoteAddr)
+	}
+	return policy.Name + "|" + pathValue + "|" + client
+}
+
+func firstForwardedFor(value string) string {
+	first, _, _ := strings.Cut(value, ",")
+	return strings.TrimSpace(first)
+}
+
+func hashString32(value string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(value))
+	return h.Sum32()
+}
+
+func (s *Server) recordIPFSReplica(ctx context.Context, objectID int64, target string, store storage.Store, locator string) error {
+	pin, ok := ipfsPinFromReplica(objectID, target, store, locator)
+	if !ok {
+		return s.db.DeleteIPFSPin(ctx, objectID, target)
+	}
+	_, err := s.db.UpsertIPFSPin(ctx, pin)
+	return err
+}
+
+func ipfsPinFromReplica(objectID int64, target string, store storage.Store, locator string) (model.IPFSPin, bool) {
+	cid, ok := storage.IPFSCIDFromLocator(locator)
+	if !ok {
+		return model.IPFSPin{}, false
+	}
+	provider := "ipfs"
+	gatewayURL := ""
+	if store != nil {
+		provider = firstNonEmpty(store.Type(), provider)
+		if provider == "pinata" {
+			gatewayURL = store.PublicURL(locator)
+		}
+	}
+	return model.IPFSPin{
+		ObjectID:      objectID,
+		Target:        target,
+		Provider:      provider,
+		CID:           cid,
+		GatewayURL:    gatewayURL,
+		Locator:       locator,
+		PinStatus:     "pinned",
+		ProviderPinID: storage.IPFSProviderPinIDFromLocator(locator),
+	}, true
+}
+
+func (s *Server) ipfsGatewayURLForReplica(ctx context.Context, replica model.Replica, store storage.Store) string {
+	if replica.IPFS != nil && replica.IPFS.GatewayURL != "" {
+		return replica.IPFS.GatewayURL
+	}
+	if pin, err := s.db.GetIPFSPin(ctx, replica.ObjectID, replica.Target); err == nil && pin.GatewayURL != "" {
+		return pin.GatewayURL
+	}
+	if pin, ok := ipfsPinFromReplica(replica.ObjectID, replica.Target, store, replica.Locator); ok {
+		return pin.GatewayURL
+	}
+	return ""
+}
+
+func (s *Server) hydrateObjectIPFS(ctx context.Context, obj *model.Object) (*model.Object, error) {
+	if obj == nil {
+		return nil, nil
+	}
+	pins, err := s.db.IPFSPins(ctx, obj.ID)
+	if err != nil {
+		return nil, err
+	}
+	obj.IPFS = pins
+	return obj, nil
+}
+
+func (s *Server) hydrateReplicasIPFS(ctx context.Context, objectID int64) ([]model.Replica, error) {
+	replicas, err := s.db.Replicas(ctx, objectID)
+	if err != nil {
+		return nil, err
+	}
+	pins, err := s.db.IPFSPins(ctx, objectID)
+	if err != nil {
+		return nil, err
+	}
+	byTarget := map[string]model.IPFSPin{}
+	for _, pin := range pins {
+		byTarget[pin.Target] = pin
+	}
+	for i := range replicas {
+		if pin, ok := byTarget[replicas[i].Target]; ok {
+			replicas[i].IPFS = &pin
+		}
+	}
+	return replicas, nil
+}
+
+func (s *Server) hydrateBucketObjectsIPFS(ctx context.Context, items []model.AssetBucketObject) ([]model.AssetBucketObject, error) {
+	objectIDs := make([]int64, 0, len(items))
+	for _, item := range items {
+		objectIDs = append(objectIDs, item.ObjectID)
+	}
+	pinsByObject, err := s.db.IPFSPinsByObjectIDs(ctx, objectIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].IPFS = pinsByObject[items[i].ObjectID]
+	}
+	return items, nil
+}
+
+func (s *Server) refreshIPFSPins(ctx context.Context, req refreshIPFSPinsRequest) (refreshIPFSPinsResponse, error) {
+	if req.ObjectID <= 0 {
+		return refreshIPFSPinsResponse{}, fmt.Errorf("object_id is required")
+	}
+	pins, err := s.db.IPFSPins(ctx, req.ObjectID)
+	if err != nil {
+		return refreshIPFSPinsResponse{}, err
+	}
+	target := strings.TrimSpace(req.Target)
+	resp := refreshIPFSPinsResponse{
+		Status:   "ok",
+		ObjectID: req.ObjectID,
+		Target:   target,
+	}
+	for _, pin := range pins {
+		if target != "" && pin.Target != target {
+			continue
+		}
+		store, ok := s.stores.Get(pin.Target)
+		if !ok {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: storage target is not configured", pin.Target))
+			continue
+		}
+		refresher, ok := store.(storage.IPFSPinStatusStore)
+		if !ok {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: storage target does not support IPFS pin refresh", pin.Target))
+			continue
+		}
+		status, err := refresher.RefreshIPFSPin(ctx, pin.CID)
+		if err != nil {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s/%s: %s", pin.Target, pin.CID, err.Error()))
+			continue
+		}
+		updated := pin
+		updated.Provider = firstNonEmpty(status.Provider, pin.Provider)
+		updated.CID = firstNonEmpty(status.CID, pin.CID)
+		updated.GatewayURL = firstNonEmpty(status.GatewayURL, pin.GatewayURL)
+		updated.Locator = storage.PreserveIPFSProviderQuery(firstNonEmpty(status.Locator, pin.Locator), pin.Locator)
+		updated.PinStatus = firstNonEmpty(status.PinStatus, pin.PinStatus)
+		updated.ProviderPinID = firstNonEmpty(status.ProviderPinID, pin.ProviderPinID)
+		saved, err := s.db.UpsertIPFSPin(ctx, updated)
+		if err != nil {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s/%s: %s", pin.Target, pin.CID, err.Error()))
+			continue
+		}
+		resp.Pins = append(resp.Pins, *saved)
+	}
+	if target != "" && len(resp.Pins) == 0 && len(resp.Errors) == 0 {
+		return refreshIPFSPinsResponse{}, fmt.Errorf("ipfs pin for object %d target %q not found", req.ObjectID, target)
+	}
+	if len(resp.Pins) == 0 && len(resp.Errors) == 0 {
+		return refreshIPFSPinsResponse{}, fmt.Errorf("object %d has no IPFS pins", req.ObjectID)
+	}
+	if len(resp.Errors) > 0 {
+		if len(resp.Pins) > 0 {
+			resp.Status = "partial"
+		} else {
+			resp.Status = "failed"
+		}
+	}
+	return resp, nil
 }
 
 func (s *Server) writeObjectStream(w http.ResponseWriter, r *http.Request, obj *model.Object, stream *storage.ObjectStream, statusOverride int) {
@@ -3385,6 +4407,23 @@ func (s *Server) checkRecentResourceLibraryHealth(ctx context.Context, target st
 	return nil
 }
 
+func (s *Server) recentResourceLibraryHealthFailure(ctx context.Context, target string) (string, bool) {
+	config, ok := s.resourceLibraryConfig(target)
+	if !ok || len(config.Bindings) == 0 || s.cfg.Limits.ResourceHealthMinIntervalSeconds <= 0 {
+		return "", false
+	}
+	binding := bindingConfigName(config.Bindings[0], 0)
+	health, err := s.db.GetResourceLibraryHealth(ctx, target, binding)
+	if err != nil || health == nil || health.Status == storage.HealthStatusOK {
+		return "", false
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(s.cfg.Limits.ResourceHealthMinIntervalSeconds) * time.Second)
+	if health.LastCheckedAt.Before(cutoff) {
+		return "", false
+	}
+	return fmt.Sprintf("binding %q is %s: %s", binding, health.Status, firstNonEmpty(health.LastError, health.Status)), true
+}
+
 func (s *Server) initAssetBucket(ctx context.Context, bucket *model.AssetBucket, dryRun bool) (*initAssetBucketResult, error) {
 	dirs := bucketInitDirs(bucket.Slug)
 	result := &initAssetBucketResult{Bucket: bucket.Slug, DryRun: dryRun, Directories: dirs, Status: "skipped"}
@@ -3474,6 +4513,7 @@ func (s *Server) putBucketObjectFromStaged(ctx context.Context, bucket *model.As
 		ProfileName:    profileName,
 		CacheControl:   firstNonEmpty(strings.TrimSpace(cacheControl), bucket.DefaultCacheControl, profile.DefaultCacheControl, "public, max-age=3600"),
 		ContentType:    staged.ContentType,
+		Group:          storageGroupForBucket(bucket.Slug),
 		FilePath:       staged.Path,
 		FileName:       firstNonEmpty(fileName, path.Base(logicalPath)),
 		Size:           staged.Size,
@@ -3497,6 +4537,23 @@ func (s *Server) putBucketObjectFromStaged(ctx context.Context, bucket *model.As
 		return nil, nil, nil, err
 	}
 	return item, obj, jobs, nil
+}
+
+func storageGroupForBucket(slug string) string {
+	slug = cleanBucketSlug(slug)
+	if slug == "" {
+		return ""
+	}
+	return "bucket-" + slug
+}
+
+func storageGroupFromProjectID(projectID string) string {
+	projectID = strings.TrimSpace(projectID)
+	const prefix = "bucket:"
+	if !strings.HasPrefix(projectID, prefix) {
+		return ""
+	}
+	return storageGroupForBucket(strings.TrimPrefix(projectID, prefix))
 }
 
 func (s *Server) deleteBucketObject(ctx context.Context, bucketSlug, logicalPath string, deleteRemote bool) (*deleteBucketObjectResult, error) {
@@ -3590,18 +4647,103 @@ func (s *Server) deleteBucketObjectItem(ctx context.Context, bucket *model.Asset
 	return result, nil
 }
 
+type siteDeploymentObjectRef struct {
+	Role     string
+	Path     string
+	ObjectID int64
+}
+
+func (s *Server) deleteSiteDeploymentObjects(ctx context.Context, dep *model.SiteDeployment, deleteRemote bool) ([]deleteSiteDeploymentObjectResult, error) {
+	refs := []siteDeploymentObjectRef{}
+	seen := map[int64]bool{}
+	addRef := func(role, path string, objectID int64) {
+		if objectID <= 0 || seen[objectID] {
+			return
+		}
+		seen[objectID] = true
+		refs = append(refs, siteDeploymentObjectRef{Role: role, Path: path, ObjectID: objectID})
+	}
+	files, err := s.db.ListSiteDeploymentFiles(ctx, dep.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range files {
+		addRef("file", file.Path, file.ObjectID)
+	}
+	addRef("artifact", dep.ArtifactKey, dep.ArtifactObjectID)
+	addRef("manifest", dep.ManifestKey, dep.ManifestObjectID)
+	results := make([]deleteSiteDeploymentObjectResult, 0, len(refs))
+	var errs []string
+	for _, ref := range refs {
+		item, err := s.deleteSiteDeploymentObject(ctx, ref, deleteRemote)
+		results = append(results, item)
+		if err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return results, errors.New(strings.Join(errs, "; "))
+	}
+	return results, nil
+}
+
+func (s *Server) deleteSiteDeploymentObject(ctx context.Context, ref siteDeploymentObjectRef, deleteRemote bool) (deleteSiteDeploymentObjectResult, error) {
+	result := deleteSiteDeploymentObjectResult{
+		Role:         ref.Role,
+		Path:         ref.Path,
+		ObjectID:     ref.ObjectID,
+		DeleteRemote: deleteRemote,
+	}
+	obj, err := s.db.GetObject(ctx, ref.ObjectID)
+	if err != nil {
+		if db.IsNotFound(err) {
+			result.DeletedLocal = true
+			return result, nil
+		}
+		result.Errors = append(result.Errors, err.Error())
+		return result, err
+	}
+	result.Key = obj.Key
+	if deleteRemote {
+		if err := s.withTransferSlot(ctx, func() error {
+			remote, err := s.deleteObjectRemoteReplicaResults(ctx, obj)
+			result.Remote = remote
+			return err
+		}); err != nil {
+			result.Errors = append(result.Errors, err.Error())
+			return result, err
+		}
+	}
+	if err := s.db.DeleteObject(ctx, obj.ID); err != nil {
+		result.Errors = append(result.Errors, err.Error())
+		return result, err
+	}
+	result.DeletedLocal = true
+	return result, nil
+}
+
 func (s *Server) deleteObjectRemoteReplicas(ctx context.Context, obj *model.Object, result *deleteBucketObjectResult) error {
+	remote, err := s.deleteObjectRemoteReplicaResults(ctx, obj)
+	result.Remote = append(result.Remote, remote...)
+	return err
+}
+
+func (s *Server) deleteObjectRemoteReplicaResults(ctx context.Context, obj *model.Object) ([]deleteReplicaResult, error) {
 	replicas, err := s.db.Replicas(ctx, obj.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	targets := map[string]bool{}
+	locators := map[string]string{}
 	if obj.PrimaryTarget != "" {
 		targets[obj.PrimaryTarget] = true
 	}
 	for _, replica := range replicas {
 		if replica.Target != "" {
 			targets[replica.Target] = true
+			if replica.Locator != "" {
+				locators[replica.Target] = replica.Locator
+			}
 		}
 	}
 	names := make([]string, 0, len(targets))
@@ -3610,6 +4752,7 @@ func (s *Server) deleteObjectRemoteReplicas(ctx context.Context, obj *model.Obje
 	}
 	sort.Strings(names)
 	var errs []string
+	results := make([]deleteReplicaResult, 0, len(names))
 	for _, target := range names {
 		item := deleteReplicaResult{Target: target}
 		store, ok := s.stores.Get(target)
@@ -3617,10 +4760,24 @@ func (s *Server) deleteObjectRemoteReplicas(ctx context.Context, obj *model.Obje
 			item.Status = "error"
 			item.Error = fmt.Sprintf("storage %q is not configured", target)
 			errs = append(errs, item.Error)
-			result.Remote = append(result.Remote, item)
+			results = append(results, item)
 			continue
 		}
-		if err := store.Delete(ctx, obj.Key); err != nil {
+		locator := locators[target]
+		keepShared, err := s.keepSharedIPFSPin(ctx, obj.ID, target, locator)
+		if err != nil {
+			item.Status = "error"
+			item.Error = err.Error()
+			errs = append(errs, fmt.Sprintf("%s: %s", target, err.Error()))
+			results = append(results, item)
+			continue
+		}
+		if keepShared {
+			item.Status = "kept_shared"
+			results = append(results, item)
+			continue
+		}
+		if err := deleteStoreObject(ctx, store, obj.Key, locator); err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				item.Status = "not_found"
 			} else {
@@ -3631,12 +4788,38 @@ func (s *Server) deleteObjectRemoteReplicas(ctx context.Context, obj *model.Obje
 		} else {
 			item.Status = "deleted"
 		}
-		result.Remote = append(result.Remote, item)
+		results = append(results, item)
 	}
 	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
+		return results, errors.New(strings.Join(errs, "; "))
 	}
-	return nil
+	return results, nil
+}
+
+func (s *Server) keepSharedIPFSPin(ctx context.Context, objectID int64, target, locator string) (bool, error) {
+	if providerPinID := storage.IPFSProviderPinIDFromLocator(locator); providerPinID != "" {
+		refs, err := s.db.IPFSPinProviderPinIDReferenceCount(ctx, target, providerPinID, objectID)
+		if err != nil {
+			return false, err
+		}
+		return refs > 0, nil
+	}
+	cid, ok := storage.IPFSCIDFromLocator(locator)
+	if !ok {
+		return false, nil
+	}
+	refs, err := s.db.IPFSPinReferenceCount(ctx, target, cid, objectID)
+	if err != nil {
+		return false, err
+	}
+	return refs > 0, nil
+}
+
+func deleteStoreObject(ctx context.Context, store storage.Store, key, locator string) error {
+	if deleter, ok := store.(storage.LocatorDeleteStore); ok {
+		return deleter.DeleteLocator(ctx, key, locator)
+	}
+	return store.Delete(ctx, key)
 }
 
 func (s *Server) runResourceLibraryE2EProbe(ctx context.Context, req resourceLibraryE2EProbeRequest) (*resourceLibraryE2EProbeResult, error) {
@@ -4013,6 +5196,7 @@ type putObjectInput struct {
 	ProfileName    string
 	CacheControl   string
 	ContentType    string
+	Group          string
 	FilePath       string
 	FileName       string
 	Size           int64
@@ -4033,6 +5217,7 @@ func (s *Server) putObjectFromFile(ctx context.Context, in putObjectInput) (*mod
 			FilePath:       in.FilePath,
 			ContentType:    in.ContentType,
 			CacheControl:   in.CacheControl,
+			Group:          in.Group,
 			SHA256:         in.SHA256,
 			Size:           in.Size,
 			FileName:       in.FileName,
@@ -4061,6 +5246,9 @@ func (s *Server) putObjectFromFile(ctx context.Context, in putObjectInput) (*mod
 	if _, err := s.db.UpsertReplica(ctx, obj.ID, in.Profile.Primary, model.ReplicaReady, locator, ""); err != nil {
 		return nil, nil, err
 	}
+	if err := s.recordIPFSReplica(ctx, obj.ID, in.Profile.Primary, primary, locator); err != nil {
+		return nil, nil, err
+	}
 	var jobs []model.Job
 	for _, target := range in.Profile.Backups {
 		if target == "" || target == in.Profile.Primary {
@@ -4072,12 +5260,19 @@ func (s *Server) putObjectFromFile(ctx context.Context, in putObjectInput) (*mod
 		if _, err := s.db.UpsertReplica(ctx, obj.ID, target, model.ReplicaPending, "", ""); err != nil {
 			return nil, nil, err
 		}
+		if err := s.db.DeleteIPFSPin(ctx, obj.ID, target); err != nil {
+			return nil, nil, err
+		}
 		payload, _ := json.Marshal(replicatePayload{ObjectID: obj.ID, Target: target})
 		job, err := s.db.CreateJob(ctx, model.JobReplicateObject, string(payload))
 		if err != nil {
 			return nil, nil, err
 		}
 		jobs = append(jobs, *job)
+	}
+	obj, err = s.hydrateObjectIPFS(ctx, obj)
+	if err != nil {
+		return nil, nil, err
 	}
 	return obj, jobs, nil
 }
@@ -4153,6 +5348,11 @@ type replicatePayload struct {
 	Target   string `json:"target"`
 }
 
+var (
+	replicateSourceGetAttempts = 60
+	replicateSourceGetDelay    = 2 * time.Second
+)
+
 func (s *Server) replicateObject(ctx context.Context, payload replicatePayload) error {
 	obj, err := s.db.GetObject(ctx, payload.ObjectID)
 	if err != nil {
@@ -4189,9 +5389,10 @@ func (s *Server) replicateObject(ctx context.Context, payload replicatePayload) 
 	if !ok {
 		return fmt.Errorf("source storage %q is not configured", sourceReplica.Target)
 	}
-	stream, err := source.Get(ctx, obj.Key, storage.GetOptions{Locator: sourceReplica.Locator})
+	stream, err := getReplicaSourceStream(ctx, source, obj.Key, sourceReplica.Locator)
 	if err != nil {
 		_, _ = s.db.UpsertReplica(ctx, obj.ID, payload.Target, model.ReplicaFailed, "", err.Error())
+		_ = s.db.DeleteIPFSPin(ctx, obj.ID, payload.Target)
 		return err
 	}
 	defer stream.Body.Close()
@@ -4212,6 +5413,7 @@ func (s *Server) replicateObject(ctx context.Context, payload replicatePayload) 
 			FilePath:       tmpPath,
 			ContentType:    obj.ContentType,
 			CacheControl:   obj.CacheControl,
+			Group:          storageGroupFromProjectID(obj.ProjectID),
 			SHA256:         obj.SHA256,
 			Size:           obj.Size,
 			FileName:       path.Base(obj.Path),
@@ -4222,10 +5424,42 @@ func (s *Server) replicateObject(ctx context.Context, payload replicatePayload) 
 	})
 	if err != nil {
 		_, _ = s.db.UpsertReplica(ctx, obj.ID, payload.Target, model.ReplicaFailed, "", err.Error())
+		_ = s.db.DeleteIPFSPin(ctx, obj.ID, payload.Target)
 		return err
 	}
 	_, err = s.db.UpsertReplica(ctx, obj.ID, payload.Target, model.ReplicaReady, locator, "")
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recordIPFSReplica(ctx, obj.ID, payload.Target, target, locator)
+}
+
+func getReplicaSourceStream(ctx context.Context, source storage.Store, key, locator string) (*storage.ObjectStream, error) {
+	attempts := replicateSourceGetAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		stream, err := source.Get(ctx, key, storage.GetOptions{Locator: locator})
+		if err == nil {
+			return stream, nil
+		}
+		lastErr = err
+		if i == attempts-1 {
+			break
+		}
+		delay := replicateSourceGetDelay
+		if delay <= 0 {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return nil, lastErr
 }
 
 func (s *Server) siteDomainsFromRequest(siteID string, requested []string, defaultID string, randomDefault, skipDefault bool, allocateDefault *bool) ([]string, error) {
@@ -5338,6 +6572,19 @@ func (s *Server) buildSiteEdgeManifest(ctx context.Context, site *model.Site, de
 	}
 	rules := deploymentRules(dep, site)
 	mode := firstNonEmpty(rules.Mode, site.Mode, "standard")
+	routingPolicyName := strings.TrimSpace(firstNonEmpty(dep.RoutingPolicy, site.RoutingPolicy))
+	var routingPolicy *config.RoutingPolicy
+	if routingPolicyName != "" {
+		profile, ok := s.cfg.Profile(dep.RouteProfile)
+		if !ok {
+			return nil, fmt.Errorf("unknown route_profile %q", dep.RouteProfile)
+		}
+		policy, err := s.routingPolicyForProfile(routingPolicyName, dep.RouteProfile, profile)
+		if err != nil {
+			return nil, err
+		}
+		routingPolicy = &policy
+	}
 	manifest := &edgeManifest{
 		Version:          1,
 		Kind:             "supercdn-edge-manifest",
@@ -5347,6 +6594,8 @@ func (s *Server) buildSiteEdgeManifest(ctx context.Context, site *model.Site, de
 		Status:           dep.Status,
 		RouteProfile:     dep.RouteProfile,
 		DeploymentTarget: dep.DeploymentTarget,
+		RoutingPolicy:    routingPolicyName,
+		ResourceFailover: dep.ResourceFailover,
 		Mode:             mode,
 		GeneratedAtUTC:   time.Now().UTC().Format(time.RFC3339Nano),
 		Rules:            rules,
@@ -5361,7 +6610,7 @@ func (s *Server) buildSiteEdgeManifest(ctx context.Context, site *model.Site, de
 		}
 		objects[file.Path] = obj
 		fileByPath[file.Path] = file
-		route, warnings := s.edgeManifestRouteForFile(ctx, rules, file, obj, http.StatusOK)
+		route, warnings := s.edgeManifestRouteForFile(ctx, rules, dep.RouteProfile, dep.ResourceFailover, file, obj, http.StatusOK, routingPolicy)
 		manifest.Warnings = append(manifest.Warnings, warnings...)
 		addEdgeManifestRoute(manifest.Routes, edgeRoutePathForFile(file.Path), route, true)
 	}
@@ -5376,7 +6625,7 @@ func (s *Server) buildSiteEdgeManifest(ctx context.Context, site *model.Site, de
 	}
 	if mode == "spa" {
 		if file, ok := fileByPath["index.html"]; ok {
-			route, warnings := s.edgeManifestRouteForFile(ctx, rules, file, objects[file.Path], http.StatusOK)
+			route, warnings := s.edgeManifestRouteForFile(ctx, rules, dep.RouteProfile, dep.ResourceFailover, file, objects[file.Path], http.StatusOK, routingPolicy)
 			manifest.Warnings = append(manifest.Warnings, warnings...)
 			manifest.Fallback = &route
 		} else {
@@ -5385,7 +6634,7 @@ func (s *Server) buildSiteEdgeManifest(ctx context.Context, site *model.Site, de
 	}
 	notFoundPath := firstNonEmpty(rules.NotFound, "404.html")
 	if file, ok := fileByPath[notFoundPath]; ok {
-		route, warnings := s.edgeManifestRouteForFile(ctx, rules, file, objects[file.Path], http.StatusNotFound)
+		route, warnings := s.edgeManifestRouteForFile(ctx, rules, dep.RouteProfile, dep.ResourceFailover, file, objects[file.Path], http.StatusNotFound, routingPolicy)
 		manifest.Warnings = append(manifest.Warnings, warnings...)
 		manifest.NotFound = &route
 	}
@@ -5513,7 +6762,7 @@ func (s *Server) publishSiteEdgeManifest(ctx context.Context, site *model.Site, 
 	return resp, nil
 }
 
-func (s *Server) edgeManifestRouteForFile(ctx context.Context, rules siteRules, file model.SiteDeploymentFile, obj *model.Object, status int) (edgeManifestRoute, []string) {
+func (s *Server) edgeManifestRouteForFile(ctx context.Context, rules siteRules, profileName string, resourceFailover bool, file model.SiteDeploymentFile, obj *model.Object, status int, routingPolicy *config.RoutingPolicy) (edgeManifestRoute, []string) {
 	headers := siteHeadersForPath(rules, "/"+file.Path)
 	cacheControl := firstNonEmpty(file.CacheControl, obj.CacheControl)
 	for key, value := range headers {
@@ -5525,6 +6774,7 @@ func (s *Server) edgeManifestRouteForFile(ctx context.Context, rules siteRules, 
 	if len(headers) == 0 {
 		headers = nil
 	}
+	ipfsPins, gatewayFallbacks, warnings := s.edgeManifestIPFSForObject(ctx, obj)
 	delivery := siteDeliveryMode(rules, file.Path)
 	route := edgeManifestRoute{
 		Type:               "origin",
@@ -5538,23 +6788,119 @@ func (s *Server) edgeManifestRouteForFile(ctx context.Context, rules siteRules, 
 		SHA256:             file.SHA256,
 		ObjectID:           file.ObjectID,
 		ObjectKey:          obj.Key,
+		IPFS:               ipfsPins,
+		GatewayFallbacks:   gatewayFallbacks,
 		Headers:            headers,
 	}
 	if status != http.StatusOK || delivery != "redirect" {
-		return route, nil
+		return route, warnings
 	}
-	target, err := s.objectRedirectURL(ctx, obj)
+	if routingPolicy != nil {
+		candidates, candidateWarnings := s.routingPolicyCandidates(ctx, *routingPolicy, obj)
+		warnings = append(warnings, candidateWarnings...)
+		if len(candidates) >= 2 {
+			route.Type = "smart"
+			route.Status = http.StatusFound
+			route.Location = candidates[0].URL
+			route.CacheControl = "no-store"
+			route.RoutingPolicy = edgeRoutingPolicySnapshot(*routingPolicy)
+			route.Candidates = candidates
+			return route, warnings
+		}
+		if len(candidates) == 1 {
+			route = edgeManifestRouteForSingleRoutingCandidate(route, candidates[0], cacheControl, routingPolicy)
+			warnings = append(warnings, fmt.Sprintf("routing_policy %q has 1 ready candidate for %s; route will use degraded single-source delivery", routingPolicy.Name, file.Path))
+			return route, warnings
+		}
+		warnings = append(warnings, fmt.Sprintf("routing_policy %q has %d ready candidates for %s; route will use single-source delivery", routingPolicy.Name, len(candidates), file.Path))
+	}
+	if resourceFailover && routingPolicy == nil {
+		candidates, candidateWarnings := s.resourceFailoverCandidates(ctx, profileName, obj)
+		warnings = append(warnings, candidateWarnings...)
+		route.Type = "failover"
+		route.Delivery = "failover"
+		route.CacheControl = "no-store"
+		if len(candidates) > 0 {
+			route.Status = http.StatusOK
+			route.Location = candidates[0].URL
+			route.CacheControl = cacheControl
+			route.Candidates = candidates
+			return route, warnings
+		}
+		route.Status = http.StatusBadGateway
+		warnings = append(warnings, fmt.Sprintf("resource_failover has no ready candidates for %s; route will return edge error", file.Path))
+		return route, warnings
+	}
+	target, err := s.objectPrimaryRedirectURL(ctx, obj)
 	if err != nil || target == "" {
 		if err == nil {
 			err = fmt.Errorf("direct storage URL is empty")
 		}
-		return route, []string{fmt.Sprintf("redirect URL unavailable for %s: %v; route will use origin delivery", file.Path, err)}
+		warnings = append(warnings, fmt.Sprintf("primary redirect URL unavailable for %s: %v; route will use origin delivery", file.Path, err))
+		return route, warnings
+	}
+	if len(gatewayFallbacks) > 0 && isIPFSGatewayTarget(target, gatewayFallbacks) {
+		route.Type = "ipfs"
+		route.Status = http.StatusOK
+		route.Location = target
+		route.CacheControl = cacheControl
+		return route, warnings
 	}
 	route.Type = "redirect"
 	route.Status = http.StatusFound
 	route.Location = target
 	route.CacheControl = "no-store"
-	return route, nil
+	return route, warnings
+}
+
+func (s *Server) edgeManifestIPFSForObject(ctx context.Context, obj *model.Object) ([]edgeManifestIPFS, []string, []string) {
+	if obj == nil || obj.ID == 0 {
+		return nil, nil, nil
+	}
+	pins, err := s.db.IPFSPins(ctx, obj.ID)
+	if err != nil {
+		return nil, nil, []string{fmt.Sprintf("IPFS metadata unavailable for object %d: %v", obj.ID, err)}
+	}
+	if len(pins) == 0 {
+		return nil, nil, nil
+	}
+	seenGateways := map[string]bool{}
+	out := make([]edgeManifestIPFS, 0, len(pins))
+	gateways := make([]string, 0, len(pins))
+	for _, pin := range pins {
+		if pin.CID == "" {
+			continue
+		}
+		out = append(out, edgeManifestIPFS{
+			Target:        pin.Target,
+			Provider:      pin.Provider,
+			CID:           pin.CID,
+			GatewayURL:    pin.GatewayURL,
+			PinStatus:     pin.PinStatus,
+			ProviderPinID: pin.ProviderPinID,
+		})
+		if pin.GatewayURL != "" && !seenGateways[pin.GatewayURL] {
+			seenGateways[pin.GatewayURL] = true
+			gateways = append(gateways, pin.GatewayURL)
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil, nil
+	}
+	return out, gateways, nil
+}
+
+func isIPFSGatewayTarget(target string, gatewayFallbacks []string) bool {
+	if target == "" {
+		return false
+	}
+	for _, fallback := range gatewayFallbacks {
+		if target == fallback {
+			return true
+		}
+	}
+	_, ok := storage.IPFSCIDFromLocator(target)
+	return ok
 }
 
 func addEdgeManifestRoute(routes map[string]edgeManifestRoute, routePath string, route edgeManifestRoute, overwrite bool) {
@@ -6339,6 +7685,27 @@ func defaultDeploymentTarget(profile config.RouteProfile) string {
 		return profile.DeploymentTarget
 	}
 	return model.SiteDeploymentTargetOriginAssisted
+}
+
+func validateResourceFailoverProfile(profileName string, profile config.RouteProfile) error {
+	if len(routeProfileFailoverTargets(profile)) < 2 {
+		return fmt.Errorf("resource_failover for route_profile %q requires primary plus at least one backup resource library", profileName)
+	}
+	return nil
+}
+
+func routeProfileFailoverTargets(profile config.RouteProfile) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, target := range append([]string{profile.Primary}, profile.Backups...) {
+		target = strings.TrimSpace(target)
+		if target == "" || seen[target] {
+			continue
+		}
+		seen[target] = true
+		out = append(out, target)
+	}
+	return out
 }
 
 func parseFormBool(r *http.Request, key string, fallback bool) (bool, error) {

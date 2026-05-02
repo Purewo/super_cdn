@@ -45,6 +45,7 @@ func BuildManager(ctx context.Context, cfg *config.Config) (*Manager, error) {
 				UseProxyURL:   s.AList.UseProxyURL,
 				PublicBaseURL: s.AList.PublicBaseURL,
 				ProxyURL:      s.AList.ProxyURL,
+				Network:       s.AList.Network,
 			})
 			if err != nil {
 				return nil, err
@@ -52,9 +53,12 @@ func BuildManager(ctx context.Context, cfg *config.Config) (*Manager, error) {
 			stores = append(stores, store)
 		case "pinata":
 			store, err := NewPinataStore(PinataOptions{
+				APIBaseURL:     s.Pinata.APIBaseURL,
+				UploadBaseURL:  s.Pinata.UploadBaseURL,
 				Name:           s.Name,
 				JWT:            s.Pinata.JWT,
 				GatewayBaseURL: s.Pinata.GatewayBaseURL,
+				GroupPrefix:    s.Pinata.GroupPrefix,
 				ProxyURL:       s.Pinata.ProxyURL,
 			})
 			if err != nil {
@@ -92,6 +96,7 @@ func BuildManager(ctx context.Context, cfg *config.Config) (*Manager, error) {
 					UseProxyURL:   mount.AList.UseProxyURL,
 					PublicBaseURL: mount.AList.PublicBaseURL,
 					ProxyURL:      mount.AList.ProxyURL,
+					Network:       mount.AList.Network,
 				})
 				if err != nil {
 					return nil, err

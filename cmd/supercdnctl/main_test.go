@@ -173,7 +173,9 @@ func TestWriteHybridEdgeWranglerConfig(t *testing.T) {
 		`main = "C:/repo/worker/src/index.ts"`,
 		`compatibility_date = "2026-04-30"`,
 		`ORIGIN_BASE_URL = "https://origin.example.com"`,
+		`EDGE_ENTRY_ORIGIN_FALLBACK = "false"`,
 		`EDGE_MANIFEST_MODE = "route"`,
+		`EDGE_ORIGIN_FALLBACK = "false"`,
 		`EDGE_STATIC_ASSETS = "true"`,
 		`[assets]`,
 		`directory = "C:/repo/dist"`,
@@ -187,6 +189,84 @@ func TestWriteHybridEdgeWranglerConfig(t *testing.T) {
 		if !strings.Contains(cfg, want) {
 			t.Fatalf("hybrid config missing %q:\n%s", want, cfg)
 		}
+	}
+}
+
+func TestEdgeManifestCandidateReadinessAcceptsSmartRoutes(t *testing.T) {
+	report, err := edgeManifestCandidateReadiness([]byte(`{
+		"site_id":"demo",
+		"deployment_id":"dpl",
+		"routes":{
+			"/":{"type":"origin","delivery":"origin","file":"index.html","status":200},
+			"/assets/app.js":{
+				"type":"smart",
+				"delivery":"redirect",
+				"file":"assets/app.js",
+				"status":302,
+				"candidates":[
+					{"target":"repo_china_mobile","url":"https://alist.example/app.js","status":"ready"},
+					{"target":"ipfs_pinata","url":"https://gateway.example/ipfs/cid","status":"ready"}
+				]
+			}
+		}
+	}`), "routing_policy", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "ok" || report.RequiredRoutes != 1 || report.ReadyRoutes != 1 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+}
+
+func TestEdgeManifestCandidateReadinessWaitsForSingleSourceFallback(t *testing.T) {
+	report, err := edgeManifestCandidateReadiness([]byte(`{
+		"site_id":"demo",
+		"deployment_id":"dpl",
+		"routes":{
+			"/assets/app.js":{
+				"type":"ipfs",
+				"delivery":"redirect",
+				"file":"assets/app.js",
+				"status":200,
+				"candidates":[
+					{"target":"ipfs_pinata","url":"https://gateway.example/ipfs/cid","status":"ready"}
+				]
+			}
+		}
+	}`), "routing_policy", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "pending" || report.RequiredRoutes != 1 || report.ReadyRoutes != 0 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if len(report.Routes) != 1 || report.Routes[0].OK || !strings.Contains(report.Routes[0].Message, "smart route") {
+		t.Fatalf("unexpected route status: %+v", report.Routes)
+	}
+}
+
+func TestEdgeManifestCandidateReadinessAcceptsFailoverRoutes(t *testing.T) {
+	report, err := edgeManifestCandidateReadiness([]byte(`{
+		"site_id":"demo",
+		"deployment_id":"dpl",
+		"routes":{
+			"/assets/app.js":{
+				"type":"failover",
+				"delivery":"failover",
+				"file":"assets/app.js",
+				"status":200,
+				"candidates":[
+					{"target":"primary","url":"https://primary.example/app.js","status":"ready"},
+					{"target":"backup","url":"https://backup.example/app.js","status":"ready"}
+				]
+			}
+		}
+	}`), "resource_failover", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "ok" || report.RequiredRoutes != 1 || report.ReadyRoutes != 1 {
+		t.Fatalf("unexpected report: %+v", report)
 	}
 }
 
@@ -211,6 +291,333 @@ func TestResolveSiteDeploymentTargetCallsControlPlane(t *testing.T) {
 	}
 	if defaults.DeploymentTarget != "cloudflare_static" || len(defaults.Domains) != 1 || defaults.Domains[0] != "demo.sites.example.com" {
 		t.Fatalf("unexpected defaults: %+v", defaults)
+	}
+}
+
+func TestIPFSStatusUsesTargetQuery(t *testing.T) {
+	saw := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/ipfs/status" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.String())
+		}
+		if got := r.URL.Query().Get("target"); got != "ipfs_pinata" {
+			t.Fatalf("target query = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"configured":true,"ok":true,"providers":[]}`))
+	}))
+	defer srv.Close()
+
+	err := ipfsStatus(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-target", "ipfs_pinata"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("server was not called")
+	}
+}
+
+func TestRefreshIPFSPinsPostsObjectIDAndTarget(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/ipfs/pins/refresh" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.String())
+		}
+		if gotAuth := r.Header.Get("Authorization"); gotAuth != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", gotAuth)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","object_id":123,"pins":[]}`))
+	}))
+	defer srv.Close()
+
+	err := refreshIPFSPins(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-object-id", "123", "-target", "ipfs_pinata"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["object_id"] != float64(123) || got["target"] != "ipfs_pinata" {
+		t.Fatalf("request body = %#v", got)
+	}
+}
+
+func TestIPFSSmokeUploadsProbesAndRefreshes(t *testing.T) {
+	var (
+		srv        *httptest.Server
+		sawStatus  bool
+		sawCreate  bool
+		sawUpload  bool
+		sawRefresh bool
+		sawHead    bool
+		sawRange   bool
+		sawGet     bool
+	)
+	const cid = "bafybeigdyrztcli"
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+				t.Fatalf("Authorization = %q", auth)
+			}
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/ipfs/status":
+			sawStatus = true
+			if got := r.URL.Query().Get("target"); got != "ipfs_pinata" {
+				t.Fatalf("target = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"configured":true,"ok":true,"providers":[{"target":"ipfs_pinata","ok":true}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/asset-buckets":
+			sawCreate = true
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req["slug"] != "ipfs-smoke" || req["route_profile"] != "ipfs_archive" {
+				t.Fatalf("create request = %#v", req)
+			}
+			_, _ = w.Write([]byte(`{"slug":"ipfs-smoke"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/asset-buckets/ipfs-smoke/objects":
+			sawUpload = true
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.FormValue("path"); got != "smoke/file.txt" {
+				t.Fatalf("upload path = %q", got)
+			}
+			gatewayURL := srv.URL + "/ipfs/" + cid
+			_, _ = w.Write([]byte(`{
+				"object":{"id":123,"ipfs":[{"object_id":123,"target":"ipfs_pinata","provider":"pinata","cid":"` + cid + `","gateway_url":"` + gatewayURL + `"}]},
+				"public_url":"https://origin.example/a/ipfs-smoke/smoke/file.txt",
+				"cdn_url":"` + gatewayURL + `",
+				"ipfs":[{"object_id":123,"target":"ipfs_pinata","provider":"pinata","cid":"` + cid + `","gateway_url":"` + gatewayURL + `"}]
+			}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/ipfs/pins/refresh":
+			sawRefresh = true
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req["object_id"] != float64(123) || req["target"] != "ipfs_pinata" {
+				t.Fatalf("refresh request = %#v", req)
+			}
+			_, _ = w.Write([]byte(`{"status":"ok","object_id":123,"pins":[{"target":"ipfs_pinata","cid":"` + cid + `","pin_status":"pinned"}]}`))
+		case r.Method == http.MethodHead && r.URL.Path == "/ipfs/"+cid:
+			sawHead = true
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", "10")
+		case r.Method == http.MethodGet && r.URL.Path == "/ipfs/"+cid && r.Header.Get("Range") != "":
+			sawRange = true
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Content-Range", "bytes 0-4/10")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("hello"))
+		case r.Method == http.MethodGet && r.URL.Path == "/ipfs/"+cid:
+			sawGet = true
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("hello ipfs"))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+
+	file := filepath.Join(t.TempDir(), "file.txt")
+	writeTestFile(t, file, "hello ipfs")
+	var smokeErr error
+	out := captureStdout(t, func() {
+		smokeErr = ipfsSmoke(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+			"-file", file,
+			"-bucket", "ipfs-smoke",
+			"-path", "smoke/file.txt",
+			"-download-runs", "1",
+		})
+	})
+	if smokeErr != nil {
+		t.Fatal(smokeErr)
+	}
+	for name, saw := range map[string]bool{
+		"status":  sawStatus,
+		"create":  sawCreate,
+		"upload":  sawUpload,
+		"refresh": sawRefresh,
+		"head":    sawHead,
+		"range":   sawRange,
+		"get":     sawGet,
+	} {
+		if !saw {
+			t.Fatalf("missing %s request", name)
+		}
+	}
+	var result ipfsSmokeResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "ok" || result.CID != cid || result.GatewayURL != srv.URL+"/ipfs/"+cid || len(result.Probes) != 3 {
+		t.Fatalf("unexpected smoke result: %+v", result)
+	}
+}
+
+func TestIPFSWebSmokeDeploysExportsAndProbes(t *testing.T) {
+	var (
+		srv           *httptest.Server
+		sawStatus     bool
+		sawCreate     bool
+		sawDeploy     bool
+		sawWait       bool
+		sawManifest   bool
+		sawRoot       bool
+		sawAssetHop   bool
+		sawGateway    bool
+		sawRange      bool
+		sawGatewayGet bool
+		sawCleanup    bool
+	)
+	const cid = "bafybeigdyrztweb"
+	const site = "ipfs-web-smoke"
+	const deployment = "dpl-ipfs"
+	const assetPath = "assets/demo.txt"
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+				t.Fatalf("Authorization = %q", auth)
+			}
+		}
+		gatewayURL := srv.URL + "/ipfs/" + cid
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/ipfs/status":
+			sawStatus = true
+			if got := r.URL.Query().Get("target"); got != "ipfs_pinata" {
+				t.Fatalf("target = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"configured":true,"ok":true,"providers":[{"target":"ipfs_pinata","ok":true}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sites":
+			sawCreate = true
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req["id"] != site || req["route_profile"] != "ipfs_archive" || req["deployment_target"] != "origin_assisted" {
+				t.Fatalf("create site request = %#v", req)
+			}
+			_, _ = w.Write([]byte(`{"id":"` + site + `","route_profile":"ipfs_archive","deployment_target":"origin_assisted"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sites/"+site+"/deployments":
+			sawDeploy = true
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatal(err)
+			}
+			if r.FormValue("route_profile") != "ipfs_archive" || r.FormValue("deployment_target") != "origin_assisted" || r.FormValue("environment") != "preview" || r.FormValue("pinned") != "false" {
+				t.Fatalf("deploy form profile=%q target=%q env=%q pinned=%q", r.FormValue("route_profile"), r.FormValue("deployment_target"), r.FormValue("environment"), r.FormValue("pinned"))
+			}
+			_, _ = w.Write([]byte(`{"deployment_id":"` + deployment + `"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sites/"+site+"/deployments/"+deployment:
+			sawWait = true
+			_, _ = w.Write([]byte(`{"id":"` + deployment + `","site_id":"` + site + `","status":"ready","route_profile":"ipfs_archive","deployment_target":"origin_assisted","preview_url":"/p/` + site + `/` + deployment + `/"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sites/"+site+"/deployments/"+deployment+"/edge-manifest":
+			sawManifest = true
+			_, _ = w.Write([]byte(`{
+				"site_id":"` + site + `",
+				"deployment_id":"` + deployment + `",
+				"route_profile":"ipfs_archive",
+				"routes":{
+					"/` + assetPath + `":{
+						"type":"ipfs",
+						"location":"` + gatewayURL + `",
+						"ipfs":[{"target":"ipfs_pinata","provider":"pinata","cid":"` + cid + `","gateway_url":"` + gatewayURL + `"}],
+						"gateway_fallbacks":["` + gatewayURL + `"]
+					}
+				}
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/p/"+site+"/"+deployment+"/":
+			sawRoot = true
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(`<a href="` + assetPath + `">asset</a>`))
+		case r.Method == http.MethodHead && r.URL.Path == "/p/"+site+"/"+deployment+"/"+assetPath:
+			sawAssetHop = true
+			w.Header().Set("Location", gatewayURL)
+			w.Header().Set("X-SuperCDN-Redirect", "storage")
+			w.WriteHeader(http.StatusFound)
+		case r.Method == http.MethodHead && r.URL.Path == "/ipfs/"+cid:
+			sawGateway = true
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", "10")
+		case r.Method == http.MethodGet && r.URL.Path == "/ipfs/"+cid && r.Header.Get("Range") != "":
+			sawRange = true
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Content-Range", "bytes 0-4/10")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("hello"))
+		case r.Method == http.MethodGet && r.URL.Path == "/ipfs/"+cid:
+			sawGatewayGet = true
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("hello ipfs"))
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/sites/"+site+"/deployments/"+deployment:
+			sawCleanup = true
+			if got := r.URL.Query().Get("delete_objects"); got != "true" {
+				t.Fatalf("delete_objects = %q", got)
+			}
+			if got := r.URL.Query().Get("delete_remote"); got != "true" {
+				t.Fatalf("delete_remote = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"deleted_deployment":true,"delete_objects":true,"delete_remote":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+
+	file := filepath.Join(t.TempDir(), "demo.txt")
+	writeTestFile(t, file, "hello web ipfs")
+	var smokeErr error
+	out := captureStdout(t, func() {
+		smokeErr = ipfsWebSmoke(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+			"-file", file,
+			"-site", site,
+			"-asset-path", assetPath,
+			"-download-runs", "1",
+			"-timeout", "2s",
+			"-cleanup",
+		})
+	})
+	if smokeErr != nil {
+		t.Fatal(smokeErr)
+	}
+	for name, saw := range map[string]bool{
+		"status":      sawStatus,
+		"create":      sawCreate,
+		"deploy":      sawDeploy,
+		"wait":        sawWait,
+		"manifest":    sawManifest,
+		"root":        sawRoot,
+		"asset_hop":   sawAssetHop,
+		"gateway":     sawGateway,
+		"range":       sawRange,
+		"gateway_get": sawGatewayGet,
+		"cleanup":     sawCleanup,
+	} {
+		if !saw {
+			t.Fatalf("missing %s request", name)
+		}
+	}
+	var result ipfsWebSmokeResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "ok" || result.CID != cid || result.GatewayURL != srv.URL+"/ipfs/"+cid || result.ManifestRoute.Type != "ipfs" {
+		t.Fatalf("unexpected web smoke result: %+v", result)
+	}
+	if !result.Cleanup || len(result.Deleted) == 0 {
+		t.Fatalf("cleanup result missing: %+v", result)
+	}
+	if len(result.Probes) != 5 || result.Probes[1].HTTPStatus != http.StatusFound || result.Probes[1].Location != result.GatewayURL {
+		t.Fatalf("unexpected probes: %+v", result.Probes)
 	}
 }
 
@@ -440,6 +847,38 @@ func TestCreateMobileCDNBucketUsesMobileDefaults(t *testing.T) {
 	}
 	if got["default_cache_control"] != "public, max-age=86400" {
 		t.Fatalf("default_cache_control = %#v", got["default_cache_control"])
+	}
+}
+
+func TestCreateIPFSBucketUsesArchiveDefaults(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/asset-buckets" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"slug":"ipfs"}`))
+	}))
+	defer srv.Close()
+
+	err := createIPFSBucket(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+		"-slug", "ipfs",
+		"-types", "image,archive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["route_profile"] != "ipfs_archive" {
+		t.Fatalf("route_profile = %#v", got["route_profile"])
+	}
+	if got["default_cache_control"] != "public, max-age=31536000, immutable" {
+		t.Fatalf("default_cache_control = %#v", got["default_cache_control"])
+	}
+	types, ok := got["allowed_types"].([]any)
+	if !ok || len(types) != 2 || types[0] != "image" || types[1] != "archive" {
+		t.Fatalf("allowed_types = %#v", got["allowed_types"])
 	}
 }
 

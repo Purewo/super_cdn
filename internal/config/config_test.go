@@ -126,6 +126,49 @@ func TestRouteProfileRejectsUnknownDeploymentTarget(t *testing.T) {
 	}
 }
 
+func TestRoutingPolicyValidatesSourcesAndNormalizesMode(t *testing.T) {
+	cfg := minimalConfig(t)
+	cfg.Storage = append(cfg.Storage, StorageConfig{Name: "backup", Type: "local"})
+	cfg.RouteProfiles[0].Backups = []string{"backup"}
+	cfg.RoutingPolicies = []RoutingPolicy{{
+		Name:               "global_smart",
+		Mode:               "geo_lb",
+		DefaultRegionGroup: "cn",
+		Sources: []RoutingPolicySource{
+			{Target: "local_default", RegionGroup: "china", Weight: 0},
+			{Target: "backup", RegionGroup: "intl", Weight: 3},
+		},
+	}}
+	if err := cfg.ApplyDefaults(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := cfg.RoutingPolicy("global_smart")
+	if !ok {
+		t.Fatal("routing policy not found")
+	}
+	if policy.Mode != "global_load_balance" || policy.DefaultRegionGroup != "china" {
+		t.Fatalf("unexpected normalized policy: %+v", policy)
+	}
+	if policy.Sources[0].Weight != 1 || policy.Sources[1].RegionGroup != "overseas" {
+		t.Fatalf("unexpected normalized sources: %+v", policy.Sources)
+	}
+}
+
+func TestRoutingPolicyRejectsUnknownSource(t *testing.T) {
+	cfg := minimalConfig(t)
+	cfg.RoutingPolicies = []RoutingPolicy{{
+		Name: "bad",
+		Mode: "load_balance",
+		Sources: []RoutingPolicySource{
+			{Target: "local_default"},
+			{Target: "missing"},
+		},
+	}}
+	if err := cfg.ApplyDefaults(t.TempDir()); err == nil {
+		t.Fatal("expected missing routing policy source to fail")
+	}
+}
+
 func TestCloudflareAccountAllowsControlPlaneOnlyR2Config(t *testing.T) {
 	cfg := minimalConfig(t)
 	cfg.CloudflareAccounts = []CloudflareAccountConfig{{

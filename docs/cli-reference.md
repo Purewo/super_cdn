@@ -49,6 +49,10 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `bind-domain` | `POST /api/v1/sites/{id}/domains` | 为站点追加或替换绑定域名 |
 | `domain-status` | `GET /api/v1/domains/{domain}/status` | 查询站点域名解析、绑定和证书状态 |
 | `cloudflare-status` | `GET /api/v1/cloudflare/status` | 查询 Cloudflare 账户、R2、DNS 和 Worker 配置状态 |
+| `ipfs-status` | `GET /api/v1/ipfs/status` | 检查 Pinata/IPFS provider 是否就绪，不上传测试文件 |
+| `ipfs-smoke` | `GET /api/v1/ipfs/status` + bucket APIs | 上传一个文件到 IPFS/Pinata bucket，返回 CID/gateway，并探测 HEAD/Range/GET |
+| `ipfs-web-smoke` | site deployment + edge manifest APIs | 部署一个 IPFS-backed preview site，并验证 Web/manifest/gateway 路径 |
+| `refresh-ipfs-pins` | `POST /api/v1/ipfs/pins/refresh` | 刷新已知对象的 Pinata/IPFS pin 状态 |
 | `deploy-site` | `GET /api/v1/sites/{id}/deployment-target` + deploy API | 部署静态站点产物包或目录 |
 | `inspect-site` | 本地目录/zip 检查 | 上传前检查站点产物、入口、资源引用和风险文件 |
 | `probe-site` | 本地 HTTP 探测 + 可选部署查询 | 验证线上 HTML、重定向 JS/CSS 的 MIME/CORS，以及可选 SPA fallback |
@@ -64,12 +68,14 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `init-libraries` | `POST /api/v1/init/resource-libraries` | 初始化资源库目录结构 |
 | `init-job` | `GET /api/v1/init/jobs/{id}` | 查询初始化任务 |
 | `resource-status` | `GET /api/v1/resource-libraries/status` | 查询资源库状态和本地健康缓存 |
+| `routing-policy-status` | `GET /api/v1/routing-policies/status` | 查询智能路由策略和源状态 |
 | `health-check` | `POST /api/v1/resource-libraries/health-check` | 执行资源库健康检查 |
 | `e2e-probe` | `POST /api/v1/resource-libraries/e2e-probe` | 执行真实上传/读取/清理探针 |
 | `create-bucket` | `POST /api/v1/asset-buckets` | 创建静态资源桶 |
 | `create-cdn-bucket` | `POST /api/v1/asset-buckets` | 创建海外 CDN 资源桶快捷命令 |
 | `create-domestic-cdn-bucket` | `POST /api/v1/asset-buckets` | 创建国内 AList/OpenList CDN 资源桶快捷命令 |
 | `create-mobile-cdn-bucket` | `POST /api/v1/asset-buckets` | 创建移动线路 CDN 资源桶快捷命令 |
+| `create-ipfs-bucket` | `POST /api/v1/asset-buckets` | 创建 IPFS/Pinata durable asset 桶快捷命令 |
 | `init-bucket` | `POST /api/v1/asset-buckets/{slug}/init` | 初始化桶目录结构 |
 | `upload-bucket` | `POST /api/v1/asset-buckets/{slug}/objects` | 上传桶对象 |
 | `list-bucket` | `GET /api/v1/asset-buckets/{slug}/objects` | 列出桶对象 |
@@ -274,7 +280,13 @@ GET /api/v1/domains/{domain}/status
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -profile overseas
 ```
 
-`deploy-site` also accepts `-target origin_assisted|cloudflare_static|hybrid_edge`. `deployment_target` is the website hosting target, not the storage route profile. For ordinary overseas static sites use `cloudflare_static`; keep R2 for large objects such as video, images and archives; use `hybrid_edge` when Worker/KV routing should split resources between Cloudflare and AList/OpenList.
+`deploy-site` also accepts `-target origin_assisted|cloudflare_static|hybrid_edge`. `deployment_target` is the website hosting target, not the storage route profile. For ordinary overseas static sites use `cloudflare_static`; use `hybrid_edge` when Worker/KV routing should split resources between Cloudflare entry delivery and AList/OpenList, Cloudflare-native static assets, or IPFS/Pinata. R2-backed website resources are legacy compatibility; keep R2 for object-CDN buckets and large files such as video, images and archives.
+
+`-resource-failover` is an explicit Web resource failover switch. It requires a route profile with a primary target plus at least one backup target. When enabled, edge manifests emit `failover` routes for non-entry resources and the Worker tries the resource-library candidates in order. If every candidate fails, the request returns an edge error instead of falling back to Go origin.
+
+For `hybrid_edge`, deployments with `-routing-policy` or `-resource-failover` default to `-edge-candidate-wait=true`. The CLI repeatedly exports the deployment edge manifest and waits until each non-entry resource route has at least two ready candidates before writing the active manifest to Workers KV. This prevents a smart-routing or failover deployment from going live with only a single storage line because backup replication is still catching up. Use `-edge-candidate-wait=false` only for diagnostics.
+
+`-entry-origin-fallback` is a separate explicit temporary fallback for `hybrid_edge` entry HTML/SPAs. It writes `EDGE_ENTRY_ORIGIN_FALLBACK=true` to the Worker config and only applies to root, directory, or extensionless HTML requests after Cloudflare Static entry delivery fails. JS/CSS/images and other static resources still cannot fall back to Go origin.
 
 When `-target` is omitted, `deploy-site` calls `GET /api/v1/sites/{id}/deployment-target` to resolve the existing site target or the route-profile default. If the resolved target is `cloudflare_static` and `-domains` is empty, the server returns existing site domains or a one-level subdomain under `cloudflare.root_domain`, and the CLI passes them to Wrangler automatically. This keeps Cloudflare Static custom domains on hosts like `blog.qwk.ccwu.cc`; the nested `cloudflare.site_domain_suffix` pattern is kept for Go-origin default site domains.
 
@@ -315,6 +327,10 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 | `-timeout` | 否 | `30m` | 等待超时时间 |
 | `-profile` | 否 | 站点默认线路 | 覆盖站点默认路由 |
 | `-target` | 否 | 线路默认值 | `origin_assisted`、`cloudflare_static` 或 `hybrid_edge` |
+| `-resource-failover` | 否 | `false` | 显式启用 Web 静态资源库失败回退；需要 route profile 至少包含 primary + backup |
+| `-edge-candidate-wait` | 否 | `true` | `hybrid_edge` 启用 `-routing-policy` 或 `-resource-failover` 时，发布 KV 前等待每个资源路由至少两个 ready candidates |
+| `-edge-candidate-timeout` | 否 | `10m` | 等待 `hybrid_edge` 智能分流/失败回退候选资源就绪的最长时间 |
+| `-entry-origin-fallback` | 否 | `false` | 显式启用 `hybrid_edge` 首页/SPA 临时回 Go；不适用于静态资源 |
 | `-domains` | 否 | 空 | `cloudflare_static` 自定义域名，逗号分隔 |
 | `-static-name` | 否 | `supercdn-{site}-static` | `cloudflare_static` Worker 名称 |
 | `-compatibility-date` | 否 | 当前 UTC 日期 | `cloudflare_static` Worker compatibility date |
@@ -343,6 +359,7 @@ POST /api/v1/sites/{id}/cloudflare-static/deployments
 - `cloudflare_static` 的 `auto` 缓存策略会生成临时 `_headers`，不会修改源目录；如果源目录已有 `_headers`，默认尊重已有文件。
 - `cloudflare_static` 的 SPA fallback 通过临时 Wrangler 配置文件实现，不会写入源目录。
 - `cloudflare_static` 默认发布后会先验证 HTTPS 域名可访问；验证失败时不会写入 active deployment，除非使用 `-static-verify warn` 或 `none`。
+- `hybrid_edge` 在启用 `-routing-policy` 或 `-resource-failover` 时，默认先等待资源候选就绪再发布 active edge manifest；等待失败时不会更新 Workers KV。
 - 公共访问使用当前 active deployment；preview 访问自动加 `X-Robots-Tag: noindex`。
 - 站点公开访问时，根目录 `index.html` 由 Go origin 直出；其他成功命中的站点文件（非 Range、非 404）会 `302` 到可用的存储直链。普通 `/o/...` 资产仍按 route profile 的 `allow_redirect` 策略处理。
 - deployment 响应包含 `inspect`，只提示 module script、dynamic import、CSS 相对资源、字体、wasm、service worker 等风险，不阻止部署。
@@ -419,6 +436,7 @@ local only
 .\bin\supercdnctl.exe publish-cloudflare-static -site blog -dir .\dist -domains blog-static-test.example.com -dry-run=false
 .\bin\supercdnctl.exe promote-deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc
+.\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc -delete-objects -delete-remote=true
 .\bin\supercdnctl.exe gc-site -site blog
 ```
 
@@ -538,11 +556,11 @@ HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/promote`
 
 #### delete-deployment
 
-删除未 active 且未 pinned 的 deployment。
+删除未 active 且未 pinned 的 deployment。默认只删除 deployment 元数据；传 `-delete-objects` 时会删除该 deployment 跟踪的站点文件、artifact 和 manifest 对象，`-delete-remote=true` 会同步删除远端副本。
 
-HTTP: `DELETE /api/v1/sites/{id}/deployments/{deployment}`
+HTTP: `DELETE /api/v1/sites/{id}/deployments/{deployment}?delete_objects=false&delete_remote=true`
 
-参数：`-site`、`-deployment` 均必填。
+参数：`-site`、`-deployment` 均必填；`-delete-objects` 默认 `false`，`-delete-remote` 默认 `true`。
 
 #### gc-site
 
@@ -552,7 +570,7 @@ HTTP: `POST /api/v1/sites/{id}/gc`
 
 参数：`-site` 必填。
 
-注意：`cloudflare_static` 部署不会允许普通 `promote-deployment` 做元数据级回滚，因为 Cloudflare Worker 的真实资产版本不会因此自动切换。要回滚 Cloudflare Static，请重新发布目标产物，或后续使用专门的 Worker rollback 流程。`delete-deployment` 删除 `cloudflare_static` 时只删除 Super CDN 元数据，会在响应里提示不会删除 Worker versions/custom domains。
+注意：`cloudflare_static` 部署不会允许普通 `promote-deployment` 做元数据级回滚，因为 Cloudflare Worker 的真实资产版本不会因此自动切换。要回滚 Cloudflare Static，请重新发布目标产物，或后续使用专门的 Worker rollback 流程。`delete-deployment` 删除 `cloudflare_static` 时只删除 Super CDN 元数据，会在响应里提示不会删除 Worker versions/custom domains。origin-assisted/IPFS 站点部署可用 `-delete-objects -delete-remote=true` 对齐 bucket 的远端清理语义。
 
 说明：
 
@@ -564,6 +582,9 @@ HTTP: `POST /api/v1/sites/{id}/gc`
 - `deploy-site -target cloudflare_static` 是正式的 Cloudflare-native 静态托管入口：它本地调用 Wrangler 发布 Workers Static Assets，然后把部署记录写回 Super CDN。
 - `deploy-site -target hybrid_edge` 会执行完整 no-Go 网站流程：上传线路 deployment、发布 active edge manifest 到 Workers KV、部署带 `ASSETS` 和 `run_worker_first` 的 Worker，然后验证 HTML/SPA 和被 manifest 重定向的资源。
 - `hybrid_edge` readiness 会额外检查 root/SPA 的 `X-SuperCDN-Edge-Source: cloudflare_static`，以及 JS/CSS 首跳的 `X-SuperCDN-Edge-Manifest: route`，用来确认请求没有回到 Go origin。
+- `hybrid_edge` Worker 配置会写入 `EDGE_ORIGIN_FALLBACK=false`。只有显式改成 `true` 时，manifest 模式才允许回 Go origin。
+- `hybrid_edge` Worker 默认也会写入 `EDGE_ENTRY_ORIGIN_FALLBACK=false`。只有 `deploy-site -entry-origin-fallback` 会打开首页/SPA 临时回源；静态资源仍不能回退到 Go origin。
+- `hybrid_edge` 静态资源失败回退只能通过 `-resource-failover` 显式开启，只在已就绪的资源库之间切换，不能回退到 Go origin；首页回退到 Go 只能作为显式、临时的兼容动作。
 - `publish-cloudflare-static` 是更底层的 Cloudflare canary/诊断入口，只发布本地目录，不写 Super CDN deployment 记录；默认 dry-run，真实发布需要 `-dry-run=false`。它读取 `configs/private/cloudflare.env` 中的 `CF_API_TOKEN` / `CF_ACCOUNT_ID`，不会读取或打印密钥值。
 - `gc-site` 当前是保守入口，不做破坏性清理；后续可按 manifest 引用计数清理未引用对象。
 
@@ -665,6 +686,21 @@ HTTP:
 
 ```http
 GET /api/v1/resource-libraries/status?library=repo_china_all
+```
+
+### routing-policy-status
+
+查询显式配置的智能路由策略、候选源和已缓存健康状态。
+
+```powershell
+.\bin\supercdnctl.exe routing-policy-status
+.\bin\supercdnctl.exe routing-policy-status -policy global_smart
+```
+
+HTTP:
+
+```http
+GET /api/v1/routing-policies/status?policy=global_smart
 ```
 
 ### health-check
@@ -817,6 +853,22 @@ POST /api/v1/asset-buckets
 | `-profile` | `china_mobile` | 移动线路资源库 |
 | `-cache-control` | `public, max-age=86400` | 国内资源默认缓存 1 天 |
 
+### create-ipfs-bucket
+
+创建面向 IPFS/Pinata 的 durable asset 桶。它和 `create-bucket` 调用同一个 API，但 CLI 默认值更适合不可变 CID 资源：`-profile ipfs_archive`，`-cache-control "public, max-age=31536000, immutable"`。
+
+```powershell
+.\bin\supercdnctl.exe create-ipfs-bucket -slug durable-assets -types image,archive
+.\bin\supercdnctl.exe create-ipfs-bucket -slug ipfs-downloads -types archive -cache-control "public, max-age=86400"
+```
+
+参数同 `create-bucket`，但默认值不同：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-profile` | `ipfs_archive` | IPFS/Pinata route profile |
+| `-cache-control` | `public, max-age=31536000, immutable` | 适合 CID/内容 hash 的长期缓存 |
+
 ### init-bucket
 
 初始化桶目录结构。
@@ -846,6 +898,7 @@ POST /api/v1/asset-buckets/{slug}/init
 ```powershell
 .\bin\supercdnctl.exe upload-bucket -bucket dynamic-wallpapers -file .\wallpaper.mp4 -path dynamic/20260426T195744Z-01.mp4 -asset-type video -cache-control "public, max-age=86400"
 .\bin\supercdnctl.exe upload-bucket -bucket overseas-assets -file .\poster.jpg -path images/v1/poster.jpg -asset-type image -warmup
+.\bin\supercdnctl.exe upload-bucket -bucket durable-assets -file .\poster.jpg -path images/v1/poster.jpg -asset-type image -warmup
 ```
 
 HTTP:
@@ -1058,6 +1111,106 @@ HTTP:
 
 ```http
 GET /api/v1/objects/{id}/replicas
+```
+
+## IPFS
+
+### ipfs-status
+
+检查已配置的 Pinata/IPFS 存储 target，不上传测试文件。该命令通过 Pinata v3 files API 验证 JWT，并检查 gateway URL 是否可达；返回值不会包含 JWT。上传接口由 `storage[].pinata.upload_base_url` 配置，默认 `https://uploads.pinata.cloud`；列表、删除和分组接口由 `storage[].pinata.api_base_url` 配置，默认 `https://api.pinata.cloud`。
+
+```powershell
+.\bin\supercdnctl.exe ipfs-status
+.\bin\supercdnctl.exe ipfs-status -target ipfs_pinata
+```
+
+HTTP:
+
+```http
+GET /api/v1/ipfs/status
+Authorization: Bearer <token>
+```
+
+参数：
+
+| 参数 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `-target` | 否 | 全部 IPFS target | 只检查指定 Pinata/IPFS 存储 target |
+
+当 route profile 写入 Pinata/IPFS target 时，上传响应、`replicas` 和 `list-bucket` 会在 `ipfs` 字段里返回 CID、provider、pin 状态和 gateway URL。
+
+IPFS bucket 上传到 Pinata 时会自动绑定 Pinata v3 public file group，默认 group 名为 `supercdn-bucket-<bucket-slug>`；可通过 `storage[].pinata.group_prefix` 修改前缀。Group 仅用于 Pinata 控制台管理，不改变 CID、gateway URL 或远端删除语义。
+
+### ipfs-smoke
+
+执行一次真实 IPFS/Pinata 文件上传和 gateway 探测。默认会创建一个 `ipfs-smoke-<timestamp>` bucket，上传文件，刷新 pin 状态，并对返回的 gateway URL 执行 `HEAD`、`Range GET` 和完整 `GET`。默认保留上传结果，便于复制链接检查；传 `-cleanup` 会在探测后删除 bucket 并删除远端 Pinata v3 file。
+
+```powershell
+.\bin\supercdnctl.exe ipfs-smoke -file .\poster.jpg
+.\bin\supercdnctl.exe ipfs-smoke -file .\poster.jpg -proxy-url http://127.0.0.1:10808 -download-runs 3
+.\bin\supercdnctl.exe ipfs-smoke -file .\poster.jpg -cleanup
+```
+
+主要参数：
+
+| 参数 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `-file` | 是 | - | 要上传到 IPFS bucket 的文件 |
+| `-bucket` | 否 | `ipfs-smoke-<timestamp>` | bucket slug |
+| `-path` | 否 | `smoke/<timestamp>-<file>` | bucket 内逻辑路径 |
+| `-profile` | 否 | `ipfs_archive` | IPFS route profile |
+| `-target` | 否 | `ipfs_pinata` | 状态检查和 pin refresh 使用的 target |
+| `-proxy-url` | 否 | 空 | gateway 探测使用的 HTTP 代理 |
+| `-download-runs` | 否 | `1` | 完整 GET 下载测速次数 |
+| `-cleanup` | 否 | `false` | 探测结束后删除 bucket 和远端 pin |
+
+### ipfs-web-smoke
+
+执行一次 IPFS Web/站点侧烟测：创建 preview site deployment，导出 edge manifest，确认 asset route 是 `ipfs`，检查 Super CDN 站点首跳，再探测 gateway URL。
+
+```powershell
+.\bin\supercdnctl.exe ipfs-web-smoke -file .\poster.jpg
+.\bin\supercdnctl.exe ipfs-web-smoke -file .\poster.jpg -proxy-url http://127.0.0.1:10808 -download-runs 3
+.\bin\supercdnctl.exe ipfs-web-smoke -cleanup
+```
+
+主要参数：
+
+| 参数 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `-file` | 否 | 自动生成小文本文件 | 放入测试站点的 asset 文件 |
+| `-site` | 否 | `ipfs-web-smoke-<timestamp>` | 测试站点 ID |
+| `-asset-path` | 否 | `assets/ipfs-smoke-<timestamp>.<ext>` | 站点内 asset 路径 |
+| `-profile` | 否 | `ipfs_archive` | IPFS route profile |
+| `-target` | 否 | `ipfs_pinata` | provider status 使用的 target |
+| `-proxy-url` | 否 | 空 | gateway 探测使用的 HTTP 代理 |
+| `-download-runs` | 否 | `1` | 完整 GET 下载测速次数 |
+| `-cleanup` | 否 | `false` | 探测后删除 preview deployment、跟踪对象和远端 Pinata v3 file |
+
+### refresh-ipfs-pins
+
+刷新已知对象的 Pinata/IPFS pin 状态。对象必须已经有 `ipfs` 元数据，例如从 `upload`、`upload-bucket` 或 `replicas` 输出里取得 `object.id`。
+
+```powershell
+.\bin\supercdnctl.exe refresh-ipfs-pins -object-id 123
+.\bin\supercdnctl.exe refresh-ipfs-pins -object-id 123 -target ipfs_pinata
+```
+
+HTTP:
+
+```http
+POST /api/v1/ipfs/pins/refresh
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+请求体：
+
+```json
+{
+  "object_id": 123,
+  "target": "ipfs_pinata"
+}
 ```
 
 ## Cloudflare

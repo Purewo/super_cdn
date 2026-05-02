@@ -39,6 +39,7 @@ type Object struct {
 	ContentType   string    `json:"content_type"`
 	CacheControl  string    `json:"cache_control"`
 	PrimaryTarget string    `json:"primary_target"`
+	IPFS          []IPFSPin `json:"ipfs,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
@@ -50,7 +51,21 @@ type Replica struct {
 	Status    string    `json:"status"`
 	Locator   string    `json:"locator"`
 	LastError string    `json:"last_error"`
+	IPFS      *IPFSPin  `json:"ipfs,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type IPFSPin struct {
+	ObjectID      int64     `json:"object_id"`
+	Target        string    `json:"target"`
+	Provider      string    `json:"provider"`
+	CID           string    `json:"cid"`
+	GatewayURL    string    `json:"gateway_url,omitempty"`
+	Locator       string    `json:"locator,omitempty"`
+	PinStatus     string    `json:"pin_status,omitempty"`
+	ProviderPinID string    `json:"provider_pin_id,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Job struct {
@@ -72,6 +87,7 @@ type Site struct {
 	Mode             string    `json:"mode"`
 	RouteProfile     string    `json:"route_profile"`
 	DeploymentTarget string    `json:"deployment_target"`
+	RoutingPolicy    string    `json:"routing_policy,omitempty"`
 	Domains          []string  `json:"domains,omitempty"`
 	URL              string    `json:"url,omitempty"`
 	URLs             []string  `json:"urls,omitempty"`

@@ -17,13 +17,13 @@ func (d *DB) CreateSiteDeployment(ctx context.Context, dep model.SiteDeployment)
 	}
 	_, err := d.sql.ExecContext(ctx, `
 		INSERT INTO site_deployments(
-			id, site_id, environment, status, route_profile, deployment_target, version, active, pinned,
+			id, site_id, environment, status, route_profile, deployment_target, routing_policy, resource_failover, version, active, pinned,
 			artifact_object_id, artifact_key, artifact_sha256, artifact_size,
 			manifest_object_id, manifest_key, file_count, total_size,
 			manifest_json, rules_json, last_error,
 			created_at, updated_at, ready_at, activated_at, expires_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		dep.ID, dep.SiteID, dep.Environment, dep.Status, dep.RouteProfile, dep.DeploymentTarget, dep.Version, boolInt(dep.Active), boolInt(dep.Pinned),
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		dep.ID, dep.SiteID, dep.Environment, dep.Status, dep.RouteProfile, dep.DeploymentTarget, dep.RoutingPolicy, boolInt(dep.ResourceFailover), dep.Version, boolInt(dep.Active), boolInt(dep.Pinned),
 		dep.ArtifactObjectID, dep.ArtifactKey, dep.ArtifactSHA256, dep.ArtifactSize,
 		dep.ManifestObjectID, dep.ManifestKey, dep.FileCount, dep.TotalSize,
 		dep.ManifestJSON, dep.RulesJSON, dep.LastError,
@@ -37,7 +37,7 @@ func (d *DB) CreateSiteDeployment(ctx context.Context, dep model.SiteDeployment)
 
 func (d *DB) GetSiteDeployment(ctx context.Context, id string) (*model.SiteDeployment, error) {
 	row := d.sql.QueryRowContext(ctx, `
-		SELECT id, site_id, environment, status, route_profile, deployment_target, version, active, pinned,
+		SELECT id, site_id, environment, status, route_profile, deployment_target, routing_policy, resource_failover, version, active, pinned,
 			artifact_object_id, artifact_key, artifact_sha256, artifact_size,
 			manifest_object_id, manifest_key, file_count, total_size,
 			manifest_json, rules_json, last_error,
@@ -51,7 +51,7 @@ func (d *DB) ListSiteDeployments(ctx context.Context, siteID string, limit int) 
 		limit = 100
 	}
 	rows, err := d.sql.QueryContext(ctx, `
-		SELECT id, site_id, environment, status, route_profile, deployment_target, version, active, pinned,
+		SELECT id, site_id, environment, status, route_profile, deployment_target, routing_policy, resource_failover, version, active, pinned,
 			artifact_object_id, artifact_key, artifact_sha256, artifact_size,
 			manifest_object_id, manifest_key, file_count, total_size,
 			manifest_json, rules_json, last_error,
@@ -74,7 +74,7 @@ func (d *DB) ListSiteDeployments(ctx context.Context, siteID string, limit int) 
 
 func (d *DB) ActiveSiteDeployment(ctx context.Context, siteID string) (*model.SiteDeployment, error) {
 	row := d.sql.QueryRowContext(ctx, `
-		SELECT id, site_id, environment, status, route_profile, deployment_target, version, active, pinned,
+		SELECT id, site_id, environment, status, route_profile, deployment_target, routing_policy, resource_failover, version, active, pinned,
 			artifact_object_id, artifact_key, artifact_sha256, artifact_size,
 			manifest_object_id, manifest_key, file_count, total_size,
 			manifest_json, rules_json, last_error,
@@ -205,10 +205,10 @@ func (d *DB) DeleteSiteDeployment(ctx context.Context, siteID, deploymentID stri
 
 func scanSiteDeployment(row scanner) (*model.SiteDeployment, error) {
 	var dep model.SiteDeployment
-	var active, pinned int
+	var active, pinned, resourceFailover int
 	var created, updated, ready, activated, expires string
 	err := row.Scan(
-		&dep.ID, &dep.SiteID, &dep.Environment, &dep.Status, &dep.RouteProfile, &dep.DeploymentTarget, &dep.Version, &active, &pinned,
+		&dep.ID, &dep.SiteID, &dep.Environment, &dep.Status, &dep.RouteProfile, &dep.DeploymentTarget, &dep.RoutingPolicy, &resourceFailover, &dep.Version, &active, &pinned,
 		&dep.ArtifactObjectID, &dep.ArtifactKey, &dep.ArtifactSHA256, &dep.ArtifactSize,
 		&dep.ManifestObjectID, &dep.ManifestKey, &dep.FileCount, &dep.TotalSize,
 		&dep.ManifestJSON, &dep.RulesJSON, &dep.LastError,
@@ -219,6 +219,7 @@ func scanSiteDeployment(row scanner) (*model.SiteDeployment, error) {
 	}
 	dep.Active = active == 1
 	dep.Pinned = pinned == 1
+	dep.ResourceFailover = resourceFailover == 1
 	if dep.DeploymentTarget == "" {
 		dep.DeploymentTarget = model.SiteDeploymentTargetOriginAssisted
 	}

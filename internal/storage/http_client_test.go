@@ -46,6 +46,20 @@ func TestHTTPClientExplicitProxy(t *testing.T) {
 	}
 }
 
+func TestHTTPClientNetworkOption(t *testing.T) {
+	client, err := newHTTPClientWithNetwork("", "tcp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := client.Transport.(*http.Transport)
+	if transport.DialContext == nil {
+		t.Fatal("expected custom dialer for tcp4")
+	}
+	if _, err := newHTTPClientWithNetwork("", "udp"); err == nil {
+		t.Fatal("expected invalid network error")
+	}
+}
+
 func TestHTTPClientRedirectDoesNotSendReferer(t *testing.T) {
 	var redirectedReferer string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

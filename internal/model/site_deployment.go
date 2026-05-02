@@ -31,6 +31,8 @@ type SiteDeployment struct {
 	Status           string                      `json:"status"`
 	RouteProfile     string                      `json:"route_profile"`
 	DeploymentTarget string                      `json:"deployment_target"`
+	RoutingPolicy    string                      `json:"routing_policy,omitempty"`
+	ResourceFailover bool                        `json:"resource_failover"`
 	Version          string                      `json:"version"`
 	Active           bool                        `json:"active"`
 	Pinned           bool                        `json:"pinned"`

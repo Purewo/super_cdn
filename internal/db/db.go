@@ -121,6 +121,20 @@ func (d *DB) migrate(ctx context.Context) error {
 			updated_at TEXT NOT NULL,
 			UNIQUE(object_id, target)
 		);`,
+		`CREATE TABLE IF NOT EXISTS object_ipfs_pins (
+			object_id INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+			target TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			cid TEXT NOT NULL,
+			gateway_url TEXT NOT NULL DEFAULT '',
+			locator TEXT NOT NULL DEFAULT '',
+			pin_status TEXT NOT NULL DEFAULT '',
+			provider_pin_id TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(object_id, target)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_object_ipfs_pins_cid ON object_ipfs_pins(cid);`,
 		`CREATE TABLE IF NOT EXISTS jobs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			type TEXT NOT NULL,
@@ -158,6 +172,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			name TEXT NOT NULL,
 			description TEXT NOT NULL,
 			route_profile TEXT NOT NULL,
+			routing_policy TEXT NOT NULL DEFAULT '',
 			allowed_types TEXT NOT NULL,
 			max_capacity_bytes INTEGER NOT NULL DEFAULT 0,
 			max_file_size_bytes INTEGER NOT NULL DEFAULT 0,
@@ -186,6 +201,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			mode TEXT NOT NULL,
 			route_profile TEXT NOT NULL,
 			deployment_target TEXT NOT NULL DEFAULT '',
+			routing_policy TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS site_deployments (
@@ -195,6 +211,8 @@ func (d *DB) migrate(ctx context.Context) error {
 			status TEXT NOT NULL,
 			route_profile TEXT NOT NULL,
 			deployment_target TEXT NOT NULL DEFAULT '',
+			routing_policy TEXT NOT NULL DEFAULT '',
+			resource_failover INTEGER NOT NULL DEFAULT 0,
 			version TEXT NOT NULL,
 			active INTEGER NOT NULL DEFAULT 0,
 			pinned INTEGER NOT NULL DEFAULT 0,
@@ -257,7 +275,19 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.ensureColumn(ctx, "sites", "deployment_target", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := d.ensureColumn(ctx, "sites", "routing_policy", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := d.ensureColumn(ctx, "site_deployments", "deployment_target", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn(ctx, "site_deployments", "routing_policy", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn(ctx, "site_deployments", "resource_failover", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn(ctx, "asset_buckets", "routing_policy", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	return nil
@@ -433,6 +463,107 @@ func (d *DB) Replicas(ctx context.Context, objectID int64) ([]model.Replica, err
 		replicas = append(replicas, r)
 	}
 	return replicas, rows.Err()
+}
+
+func (d *DB) UpsertIPFSPin(ctx context.Context, pin model.IPFSPin) (*model.IPFSPin, error) {
+	if pin.ObjectID == 0 {
+		return nil, errors.New("ipfs pin object_id is required")
+	}
+	if strings.TrimSpace(pin.Target) == "" {
+		return nil, errors.New("ipfs pin target is required")
+	}
+	if strings.TrimSpace(pin.CID) == "" {
+		return nil, errors.New("ipfs pin cid is required")
+	}
+	now := nowString()
+	var created string
+	_ = d.sql.QueryRowContext(ctx, `
+		SELECT created_at FROM object_ipfs_pins WHERE object_id = ? AND target = ?`,
+		pin.ObjectID, pin.Target).Scan(&created)
+	if created == "" {
+		created = now
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO object_ipfs_pins(object_id, target, provider, cid, gateway_url, locator, pin_status, provider_pin_id, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(object_id, target) DO UPDATE SET
+			provider = excluded.provider,
+			cid = excluded.cid,
+			gateway_url = excluded.gateway_url,
+			locator = excluded.locator,
+			pin_status = excluded.pin_status,
+			provider_pin_id = excluded.provider_pin_id,
+			updated_at = excluded.updated_at`,
+		pin.ObjectID, pin.Target, pin.Provider, pin.CID, pin.GatewayURL, pin.Locator, pin.PinStatus, pin.ProviderPinID, created, now)
+	if err != nil {
+		return nil, err
+	}
+	return d.GetIPFSPin(ctx, pin.ObjectID, pin.Target)
+}
+
+func (d *DB) GetIPFSPin(ctx context.Context, objectID int64, target string) (*model.IPFSPin, error) {
+	row := d.sql.QueryRowContext(ctx, `
+		SELECT object_id, target, provider, cid, gateway_url, locator, pin_status, provider_pin_id, created_at, updated_at
+		FROM object_ipfs_pins WHERE object_id = ? AND target = ?`, objectID, target)
+	return scanIPFSPin(row)
+}
+
+func (d *DB) IPFSPins(ctx context.Context, objectID int64) ([]model.IPFSPin, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT object_id, target, provider, cid, gateway_url, locator, pin_status, provider_pin_id, created_at, updated_at
+		FROM object_ipfs_pins WHERE object_id = ? ORDER BY target`, objectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pins []model.IPFSPin
+	for rows.Next() {
+		pin, err := scanIPFSPin(rows)
+		if err != nil {
+			return nil, err
+		}
+		pins = append(pins, *pin)
+	}
+	return pins, rows.Err()
+}
+
+func (d *DB) IPFSPinsByObjectIDs(ctx context.Context, objectIDs []int64) (map[int64][]model.IPFSPin, error) {
+	result := make(map[int64][]model.IPFSPin)
+	for _, objectID := range objectIDs {
+		if objectID == 0 {
+			continue
+		}
+		if _, ok := result[objectID]; ok {
+			continue
+		}
+		pins, err := d.IPFSPins(ctx, objectID)
+		if err != nil {
+			return nil, err
+		}
+		result[objectID] = pins
+	}
+	return result, nil
+}
+
+func (d *DB) DeleteIPFSPin(ctx context.Context, objectID int64, target string) error {
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM object_ipfs_pins WHERE object_id = ? AND target = ?`, objectID, target)
+	return err
+}
+
+func (d *DB) IPFSPinReferenceCount(ctx context.Context, target, cid string, excludeObjectID int64) (int64, error) {
+	var count int64
+	err := d.sql.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_ipfs_pins
+		WHERE target = ? AND cid = ? AND object_id <> ?`, target, cid, excludeObjectID).Scan(&count)
+	return count, err
+}
+
+func (d *DB) IPFSPinProviderPinIDReferenceCount(ctx context.Context, target, providerPinID string, excludeObjectID int64) (int64, error) {
+	var count int64
+	err := d.sql.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM object_ipfs_pins
+		WHERE target = ? AND provider_pin_id = ? AND object_id <> ?`, target, providerPinID, excludeObjectID).Scan(&count)
+	return count, err
 }
 
 func (d *DB) CreateJob(ctx context.Context, typ, payload string) (*model.Job, error) {
@@ -619,9 +750,9 @@ func (d *DB) CreateAssetBucket(ctx context.Context, bucket model.AssetBucket) (*
 		bucket.WorkspaceID = model.DefaultWorkspaceID
 	}
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO asset_buckets(slug, workspace_id, name, description, route_profile, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		bucket.Slug, bucket.WorkspaceID, bucket.Name, bucket.Description, bucket.RouteProfile, joinCSV(bucket.AllowedTypes), bucket.MaxCapacityBytes, bucket.MaxFileSizeBytes, bucket.DefaultCacheControl, bucket.Status, now, now)
+		INSERT INTO asset_buckets(slug, workspace_id, name, description, route_profile, routing_policy, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		bucket.Slug, bucket.WorkspaceID, bucket.Name, bucket.Description, bucket.RouteProfile, bucket.RoutingPolicy, joinCSV(bucket.AllowedTypes), bucket.MaxCapacityBytes, bucket.MaxFileSizeBytes, bucket.DefaultCacheControl, bucket.Status, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -630,7 +761,7 @@ func (d *DB) CreateAssetBucket(ctx context.Context, bucket model.AssetBucket) (*
 
 func (d *DB) GetAssetBucket(ctx context.Context, slug string) (*model.AssetBucket, error) {
 	row := d.sql.QueryRowContext(ctx, `
-		SELECT slug, workspace_id, name, description, route_profile, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at
+		SELECT slug, workspace_id, name, description, route_profile, routing_policy, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at
 		FROM asset_buckets WHERE slug = ?`, slug)
 	bucket, err := scanAssetBucket(row)
 	if err != nil {
@@ -648,7 +779,7 @@ func (d *DB) ListAssetBuckets(ctx context.Context) ([]model.AssetBucket, error) 
 
 func (d *DB) ListAssetBucketsInWorkspace(ctx context.Context, workspaceID string) ([]model.AssetBucket, error) {
 	query := `
-		SELECT slug, workspace_id, name, description, route_profile, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at
+		SELECT slug, workspace_id, name, description, route_profile, routing_policy, allowed_types, max_capacity_bytes, max_file_size_bytes, default_cache_control, status, created_at, updated_at
 		FROM asset_buckets`
 	var (
 		rows *sql.Rows
@@ -804,10 +935,10 @@ func (d *DB) DeleteAssetBucket(ctx context.Context, slug string) error {
 }
 
 func (d *DB) CreateSite(ctx context.Context, id, name, mode, routeProfile, deploymentTarget string, domains []string) (*model.Site, error) {
-	return d.CreateSiteInWorkspace(ctx, model.DefaultWorkspaceID, id, name, mode, routeProfile, deploymentTarget, domains)
+	return d.CreateSiteInWorkspace(ctx, model.DefaultWorkspaceID, id, name, mode, routeProfile, deploymentTarget, "", domains)
 }
 
-func (d *DB) CreateSiteInWorkspace(ctx context.Context, workspaceID, id, name, mode, routeProfile, deploymentTarget string, domains []string) (*model.Site, error) {
+func (d *DB) CreateSiteInWorkspace(ctx context.Context, workspaceID, id, name, mode, routeProfile, deploymentTarget, routingPolicy string, domains []string) (*model.Site, error) {
 	if workspaceID == "" {
 		workspaceID = model.DefaultWorkspaceID
 	}
@@ -823,9 +954,9 @@ func (d *DB) CreateSiteInWorkspace(ctx context.Context, workspaceID, id, name, m
 	}
 	now := nowString()
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO sites(id, workspace_id, name, mode, route_profile, deployment_target, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET name = excluded.name, mode = excluded.mode, route_profile = excluded.route_profile, deployment_target = excluded.deployment_target`, id, workspaceID, name, mode, routeProfile, deploymentTarget, now)
+		INSERT INTO sites(id, workspace_id, name, mode, route_profile, deployment_target, routing_policy, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET name = excluded.name, mode = excluded.mode, route_profile = excluded.route_profile, deployment_target = excluded.deployment_target, routing_policy = excluded.routing_policy`, id, workspaceID, name, mode, routeProfile, deploymentTarget, routingPolicy, now)
 	if err != nil {
 		return nil, err
 	}
@@ -838,8 +969,8 @@ func (d *DB) CreateSiteInWorkspace(ctx context.Context, workspaceID, id, name, m
 func (d *DB) GetSite(ctx context.Context, id string) (*model.Site, error) {
 	var s model.Site
 	var created string
-	err := d.sql.QueryRowContext(ctx, `SELECT id, workspace_id, name, mode, route_profile, deployment_target, created_at FROM sites WHERE id = ?`, id).
-		Scan(&s.ID, &s.WorkspaceID, &s.Name, &s.Mode, &s.RouteProfile, &s.DeploymentTarget, &created)
+	err := d.sql.QueryRowContext(ctx, `SELECT id, workspace_id, name, mode, route_profile, deployment_target, routing_policy, created_at FROM sites WHERE id = ?`, id).
+		Scan(&s.ID, &s.WorkspaceID, &s.Name, &s.Mode, &s.RouteProfile, &s.DeploymentTarget, &s.RoutingPolicy, &created)
 	if err != nil {
 		return nil, err
 	}
@@ -977,7 +1108,7 @@ func scanAssetBucket(row scanner) (*model.AssetBucket, error) {
 	var bucket model.AssetBucket
 	var allowed, created, updated string
 	err := row.Scan(
-		&bucket.Slug, &bucket.WorkspaceID, &bucket.Name, &bucket.Description, &bucket.RouteProfile, &allowed,
+		&bucket.Slug, &bucket.WorkspaceID, &bucket.Name, &bucket.Description, &bucket.RouteProfile, &bucket.RoutingPolicy, &allowed,
 		&bucket.MaxCapacityBytes, &bucket.MaxFileSizeBytes, &bucket.DefaultCacheControl, &bucket.Status, &created, &updated,
 	)
 	if err != nil {
@@ -1003,6 +1134,21 @@ func scanAssetBucketObject(row scanner) (*model.AssetBucketObject, error) {
 	item.UpdatedAt = parseTime(updated)
 	item.URL = "/a/" + item.BucketSlug + "/" + item.LogicalPath
 	return &item, nil
+}
+
+func scanIPFSPin(row scanner) (*model.IPFSPin, error) {
+	var pin model.IPFSPin
+	var created, updated string
+	err := row.Scan(
+		&pin.ObjectID, &pin.Target, &pin.Provider, &pin.CID, &pin.GatewayURL,
+		&pin.Locator, &pin.PinStatus, &pin.ProviderPinID, &created, &updated,
+	)
+	if err != nil {
+		return nil, err
+	}
+	pin.CreatedAt = parseTime(created)
+	pin.UpdatedAt = parseTime(updated)
+	return &pin, nil
 }
 
 func (d *DB) fillAssetBucketUsage(ctx context.Context, bucket *model.AssetBucket) error {

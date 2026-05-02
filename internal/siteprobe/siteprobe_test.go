@@ -184,6 +184,44 @@ func TestRunCanRequireHybridEdgeHeaders(t *testing.T) {
 	}
 }
 
+func TestRunAcceptsProxiedIPFSGatewayManifestAsset(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/movie/123":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script type="module" src="/assets/app.js"></script>`))
+		case "/assets/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			w.Header().Set("X-SuperCDN-Edge-Source", "ipfs_gateway")
+			w.Header().Set("X-SuperCDN-Edge-Manifest", "route")
+			w.Header().Set("X-SuperCDN-Edge-Action", "route")
+			_, _ = w.Write([]byte("console.log('ok')"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer origin.Close()
+
+	report, err := Run(context.Background(), Options{
+		URL:                       origin.URL + "/",
+		SPAPath:                   "/movie/123",
+		Timeout:                   5 * time.Second,
+		RequireEdgeStaticHTML:     true,
+		RequireEdgeManifestAssets: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.OK {
+		t.Fatalf("expected ok report: %+v", report)
+	}
+	if len(report.Assets) != 1 || report.Assets[0].EdgeSource != "ipfs_gateway" || report.Assets[0].EdgeManifest != "route" {
+		t.Fatalf("unexpected asset report: %+v", report.Assets)
+	}
+}
+
 func TestRunFailsHybridEdgeWhenHeadersMissing(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -234,6 +234,402 @@ describe("edge proxy", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("proxies http manifest redirects for https pages", async () => {
+    const seen: Request[] = [];
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      seen.push(req);
+      if (req.url !== "http://storage.example.com/assets/app.js?sign=fresh") {
+        throw new Error(`unexpected fetch ${req.url}`);
+      }
+      return new Response("console.log('proxied')", {
+        status: 200,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Set-Cookie": "storage=1",
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js", {
+        headers: {
+          Accept: "*/*",
+          Cookie: "session=1",
+          Range: "bytes=0-10",
+        },
+      }),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(
+            manifest({
+              routes: {
+                "/assets/app.js": {
+                  type: "redirect",
+                  delivery: "redirect",
+                  file: "assets/app.js",
+                  status: 302,
+                  location: "http://storage.example.com/assets/app.js?sign=fresh",
+                  content_type: "text/javascript; charset=utf-8",
+                  cache_control: "no-store",
+                  headers: { "X-Test-Asset": "yes" },
+                },
+              },
+            }),
+          ),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("console.log('proxied')");
+    expect(res.headers.get("Location")).toBeNull();
+    expect(res.headers.get("Set-Cookie")).toBeNull();
+    expect(res.headers.get("Content-Type")).toBe("text/javascript; charset=utf-8");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("X-Test-Asset")).toBe("yes");
+    expect(res.headers.get("X-SuperCDN-Edge-Manifest")).toBe("route");
+    expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("storage");
+    expect(res.headers.get("X-SuperCDN-Edge-Proxy")).toBe("mixed_content");
+    expect(res.headers.get("X-SuperCDN-Edge-File")).toBe("assets/app.js");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(seen[0].headers.get("Cookie")).toBeNull();
+    expect(seen[0].headers.get("Range")).toBe("bytes=0-10");
+  });
+
+  it("routes smart manifest candidates by request region", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called for smart manifest routes");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const smart = manifest({
+      routing_policy: "global_smart",
+      routes: {
+        "/assets/app.js": {
+          type: "smart",
+          delivery: "redirect",
+          file: "assets/app.js",
+          status: 302,
+          location: "https://china.example/app.js?sig=cn",
+          cache_control: "no-store",
+          routing_policy: {
+            name: "global_smart",
+            mode: "global_load_balance",
+            default_region_group: "overseas",
+          },
+          candidates: [
+            {
+              target: "china",
+              target_type: "r2",
+              type: "redirect",
+              region_group: "china",
+              weight: 1,
+              url: "https://china.example/app.js?sig=cn",
+              status: "ready",
+            },
+            {
+              target: "overseas",
+              target_type: "r2",
+              type: "redirect",
+              region_group: "overseas",
+              weight: 1,
+              url: "https://overseas.example/app.js?sig=global",
+              status: "ready",
+            },
+          ],
+        },
+      },
+    });
+
+    const cn = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js", { headers: { "CF-IPCountry": "CN" } }),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(smart),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+    expect(cn.status).toBe(302);
+    expect(cn.headers.get("Location")).toBe("https://china.example/app.js?sig=cn");
+    expect(cn.headers.get("X-SuperCDN-Route-Policy")).toBe("global_smart");
+    expect(cn.headers.get("X-SuperCDN-Route-Target")).toBe("china");
+    expect(cn.headers.get("X-SuperCDN-Route-Reason")).toBe("region_balance:china");
+
+    const us = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js", { headers: { "CF-IPCountry": "US" } }),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(smart),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+    expect(us.status).toBe(302);
+    expect(us.headers.get("Location")).toBe("https://overseas.example/app.js?sig=global");
+    expect(us.headers.get("X-SuperCDN-Route-Target")).toBe("overseas");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("proxies http smart manifest candidates for https pages", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      if (req.url !== "http://china.example/app.js") {
+        throw new Error(`unexpected fetch ${req.url}`);
+      }
+      return new Response("console.log('china')", {
+        status: 200,
+        headers: { "Content-Type": "application/octet-stream" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js", { headers: { "CF-IPCountry": "CN" } }),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(
+            manifest({
+              routing_policy: "global_smart",
+              routes: {
+                "/assets/app.js": {
+                  type: "smart",
+                  delivery: "redirect",
+                  file: "assets/app.js",
+                  status: 302,
+                  content_type: "text/javascript; charset=utf-8",
+                  routing_policy: {
+                    name: "global_smart",
+                    mode: "global_accel",
+                    default_region_group: "overseas",
+                  },
+                  candidates: [
+                    { target: "china", type: "redirect", region_group: "china", url: "http://china.example/app.js", status: "ready" },
+                    { target: "overseas", type: "redirect", region_group: "overseas", url: "https://overseas.example/app.js", status: "ready" },
+                  ],
+                },
+              },
+            }),
+          ),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("console.log('china')");
+    expect(res.headers.get("Content-Type")).toBe("text/javascript; charset=utf-8");
+    expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("storage");
+    expect(res.headers.get("X-SuperCDN-Route-Policy")).toBe("global_smart");
+    expect(res.headers.get("X-SuperCDN-Route-Target")).toBe("china");
+    expect(res.headers.get("X-SuperCDN-Route-Reason")).toBe("region:china");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("includes smart routing decisions in manifest dry-run", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("origin", { status: 200 })));
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js?__supercdn_edge_manifest=dry-run", {
+        headers: { "CF-IPCountry": "CN" },
+      }),
+      env({
+        EDGE_MANIFEST_DRY_RUN: "true",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(
+            manifest({
+              routing_policy: "global_smart",
+              routes: {
+                "/assets/app.js": {
+                  type: "smart",
+                  delivery: "redirect",
+                  file: "assets/app.js",
+                  status: 302,
+                  routing_policy: {
+                    name: "global_smart",
+                    mode: "global_accel",
+                    default_region_group: "overseas",
+                  },
+                  candidates: [
+                    { target: "china", type: "redirect", region_group: "china", url: "https://china.example/app.js", status: "ready" },
+                    { target: "overseas", type: "redirect", region_group: "overseas", url: "https://overseas.example/app.js", status: "ready" },
+                  ],
+                },
+              },
+            }),
+          ),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      decision: {
+        route_type: string;
+        routing_policy: { name: string };
+        selected_candidate: { target: string; url: string };
+        routing_reason: string;
+      };
+    };
+    expect(body.decision.route_type).toBe("smart");
+    expect(body.decision.routing_policy.name).toBe("global_smart");
+    expect(body.decision.selected_candidate.target).toBe("china");
+    expect(body.decision.routing_reason).toBe("region:china");
+  });
+
+  it("proxies manifest IPFS routes through gateway fallbacks", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === "https://gateway-one.example/ipfs/bafywall") {
+        return new Response("bad gateway", { status: 502 });
+      }
+      if (url === "https://gateway-two.example/ipfs/bafywall") {
+        return new Response("image-bytes", {
+          status: 200,
+          headers: {
+            "Content-Type": "application/octet-stream",
+          },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/wall.png"),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(
+            manifest({
+              routes: {
+                "/assets/wall.png": {
+                  type: "ipfs",
+                  delivery: "redirect",
+                  file: "assets/wall.png",
+                  status: 200,
+                  location: "https://gateway-one.example/ipfs/bafywall",
+                  content_type: "image/png",
+                  object_cache_control: "public, max-age=31536000, immutable",
+                  gateway_fallbacks: [
+                    "https://gateway-one.example/ipfs/bafywall",
+                    "https://gateway-two.example/ipfs/bafywall",
+                  ],
+                  ipfs: [{ cid: "bafywall", provider: "pinata", target: "ipfs_pinata" }],
+                },
+              },
+            }),
+          ),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("image-bytes");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(res.headers.get("Content-Type")).toBe("image/png");
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
+    expect(res.headers.get("X-SuperCDN-Edge-Manifest")).toBe("route");
+    expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("ipfs_gateway");
+    expect(res.headers.get("X-SuperCDN-Edge-File")).toBe("assets/wall.png");
+  });
+
+  it("proxies explicit resource failover routes without contacting origin", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === "https://primary.example/assets/app.js") {
+        return new Response("primary down", { status: 502 });
+      }
+      if (url === "https://backup.example/assets/app.js") {
+        return new Response("console.log('backup')", {
+          status: 200,
+          headers: { "Content-Type": "application/octet-stream" },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js"),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(
+            manifest({
+              resource_failover: true,
+              routes: {
+                "/assets/app.js": {
+                  type: "failover",
+                  delivery: "failover",
+                  file: "assets/app.js",
+                  status: 200,
+                  content_type: "text/javascript; charset=utf-8",
+                  object_cache_control: "public, max-age=300",
+                  candidates: [
+                    { target: "primary", type: "redirect", priority: 0, url: "https://primary.example/assets/app.js", status: "ready" },
+                    { target: "backup", type: "redirect", priority: 1, url: "https://backup.example/assets/app.js", status: "ready" },
+                  ],
+                },
+              },
+            }),
+          ),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("console.log('backup')");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(res.headers.get("Content-Type")).toBe("text/javascript; charset=utf-8");
+    expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("resource_failover");
+    expect(res.headers.get("X-SuperCDN-Route-Target")).toBe("backup");
+    expect(res.headers.get("X-SuperCDN-Route-Reason")).toBe("resource_failover");
+  });
+
+  it("returns an edge error for failover routes with no ready candidates", async () => {
+    const fetchSpy = vi.fn(async () => new Response("origin should not be used", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js"),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_ORIGIN_FALLBACK: "true",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(
+            manifest({
+              resource_failover: true,
+              routes: {
+                "/assets/app.js": {
+                  type: "failover",
+                  delivery: "failover",
+                  file: "assets/app.js",
+                  status: 502,
+                  candidates: [],
+                },
+              },
+            }),
+          ),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(502);
+    expect(res.headers.get("X-SuperCDN-Edge-Error")).toBe("resource_failover_failed");
+    expect(await res.text()).toContain("no ready failover candidate");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("routes manifest redirects before range bypasses", async () => {
     const fetchSpy = vi.fn(async () => {
       throw new Error("origin should not be called for manifest range redirects");
@@ -282,9 +678,32 @@ describe("edge proxy", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("falls back to origin for manifest origin routes in route mode", async () => {
+  it("falls back to origin for manifest origin routes in route mode only when explicitly enabled", async () => {
     vi.stubGlobal("caches", { default: new MemoryCache() });
     const fetchSpy = vi.fn(async () => new Response("<html></html>", { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/"),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_ORIGIN_FALLBACK: "true",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(manifest()),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("<html></html>");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks origin fallback for manifest origin routes in route mode by default", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called unless fallback is explicit");
+    });
     vi.stubGlobal("fetch", fetchSpy);
 
     const res = await worker.fetch(
@@ -298,9 +717,10 @@ describe("edge proxy", () => {
       ctx(),
     );
 
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("<html></html>");
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(502);
+    expect(res.headers.get("X-SuperCDN-Edge-Manifest")).toBe("route");
+    expect(res.headers.get("X-SuperCDN-Edge-Error")).toBe("manifest_direct_route_unavailable");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("blocks origin fallback for unresolved manifest routes in enforce mode", async () => {
@@ -380,6 +800,60 @@ describe("edge proxy", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("cloudflare_static");
     expect(await res.text()).toBe("<html>spa</html>");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("temporarily falls back entry HTML to origin only when explicitly enabled", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      if (req.url !== "https://origin.example.com/movie/123") {
+        throw new Error(`unexpected origin fetch ${req.url}`);
+      }
+      return new Response("<html>origin fallback</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/movie/123", { headers: { Accept: "text/html" } }),
+      env({
+        EDGE_STATIC_ASSETS: "true",
+        EDGE_ENTRY_ORIGIN_FALLBACK: "true",
+        ASSETS: new MemoryAssets(async () => new Response("static down", { status: 503 })) as unknown as Fetcher,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("<html>origin fallback</html>");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("X-SuperCDN-Edge-Fallback")).toBe("origin_entry");
+    expect(res.headers.get("X-SuperCDN-Edge-Fallback-Reason")).toBe("cloudflare_static_503");
+    expect(res.headers.get("X-SuperCDN-Edge-Warning")).toContain("temporary_origin_entry_fallback");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fall back static assets to origin when entry fallback is enabled", async () => {
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("origin should not be called for static assets");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js", { headers: { Accept: "*/*" } }),
+      env({
+        EDGE_STATIC_ASSETS: "true",
+        EDGE_ENTRY_ORIGIN_FALLBACK: "true",
+        ASSETS: new MemoryAssets(async () => new Response("asset down", { status: 503 })) as unknown as Fetcher,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("cloudflare_static");
+    expect(res.headers.get("X-SuperCDN-Edge-Fallback")).toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

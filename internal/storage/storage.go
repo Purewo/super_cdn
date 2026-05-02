@@ -14,6 +14,7 @@ type PutOptions struct {
 	FilePath       string
 	ContentType    string
 	CacheControl   string
+	Group          string
 	SHA256         string
 	Size           int64
 	FileName       string
@@ -97,6 +98,47 @@ type Store interface {
 	Stat(ctx context.Context, key string) (*Stat, error)
 	Delete(ctx context.Context, key string) error
 	PublicURL(key string) string
+}
+
+type LocatorDeleteStore interface {
+	DeleteLocator(ctx context.Context, key, locator string) error
+}
+
+type ProviderCheckStatus struct {
+	Configured bool   `json:"configured"`
+	OK         bool   `json:"ok"`
+	Message    string `json:"message,omitempty"`
+}
+
+type ProviderStatus struct {
+	Target         string              `json:"target"`
+	TargetType     string              `json:"target_type"`
+	Provider       string              `json:"provider"`
+	OK             bool                `json:"ok"`
+	APIBaseURL     string              `json:"api_base_url,omitempty"`
+	UploadBaseURL  string              `json:"upload_base_url,omitempty"`
+	GatewayBaseURL string              `json:"gateway_base_url,omitempty"`
+	Token          ProviderCheckStatus `json:"token"`
+	Gateway        ProviderCheckStatus `json:"gateway"`
+	Warnings       []string            `json:"warnings,omitempty"`
+	CheckedAt      time.Time           `json:"checked_at"`
+}
+
+type ProviderStatusStore interface {
+	ProviderStatus(ctx context.Context) ProviderStatus
+}
+
+type IPFSPinStatus struct {
+	Provider      string `json:"provider"`
+	CID           string `json:"cid"`
+	PinStatus     string `json:"pin_status"`
+	ProviderPinID string `json:"provider_pin_id,omitempty"`
+	GatewayURL    string `json:"gateway_url,omitempty"`
+	Locator       string `json:"locator,omitempty"`
+}
+
+type IPFSPinStatusStore interface {
+	RefreshIPFSPin(ctx context.Context, cid string) (IPFSPinStatus, error)
 }
 
 type PreflightStore interface {

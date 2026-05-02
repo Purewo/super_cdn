@@ -38,12 +38,13 @@ type AListOptions struct {
 	UseProxyURL   bool
 	PublicBaseURL string
 	ProxyURL      string
+	Network       string
 }
 
 func NewAListStore(opts AListOptions) (*AListStore, error) {
 	base := strings.TrimRight(opts.BaseURL, "/")
 	public := strings.TrimRight(firstNonEmpty(opts.PublicBaseURL, base), "/")
-	client, err := newHTTPClient(opts.ProxyURL)
+	client, err := newHTTPClientWithNetwork(opts.ProxyURL, opts.Network)
 	if err != nil {
 		return nil, err
 	}

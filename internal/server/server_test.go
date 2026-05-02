@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -229,7 +231,7 @@ func TestTeamInviteLoginAndRolePermissions(t *testing.T) {
 	if _, err := app.db.SQL().ExecContext(context.Background(), `INSERT INTO workspaces(id, name, created_at) VALUES('other', 'Other', '2026-04-30T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.db.CreateSiteInWorkspace(context.Background(), "other", "private-site", "", "standard", "overseas", "", nil); err != nil {
+	if _, err := app.db.CreateSiteInWorkspace(context.Background(), "other", "private-site", "", "standard", "overseas", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	hidden := apiJSON(t, app, http.MethodGet, "/api/v1/sites/private-site/deployment-target", apiToken, nil)
@@ -309,6 +311,552 @@ func TestRecordCloudflareStaticDeployment(t *testing.T) {
 	}
 	if !contains(site.Domains, "demo-static.example.com") {
 		t.Fatalf("site domains = %+v", site.Domains)
+	}
+}
+
+func TestIPFSStatusChecksPinataProvider(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/files/public" {
+			t.Fatalf("unexpected API path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-pinata-jwt" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"data":{"files":[]}}`))
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/ipfs/status?target=ipfs_pinata", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Configured bool `json:"configured"`
+		OK         bool `json:"ok"`
+		Providers  []struct {
+			Target         string `json:"target"`
+			Provider       string `json:"provider"`
+			OK             bool   `json:"ok"`
+			APIBaseURL     string `json:"api_base_url"`
+			UploadBaseURL  string `json:"upload_base_url"`
+			GatewayBaseURL string `json:"gateway_base_url"`
+			Token          struct {
+				OK bool `json:"ok"`
+			} `json:"token"`
+			Gateway struct {
+				OK bool `json:"ok"`
+			} `json:"gateway"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Configured || !out.OK || len(out.Providers) != 1 {
+		t.Fatalf("response = %+v", out)
+	}
+	provider := out.Providers[0]
+	if provider.Target != "ipfs_pinata" || provider.Provider != "pinata" || !provider.OK || !provider.Token.OK || !provider.Gateway.OK {
+		t.Fatalf("provider = %+v", provider)
+	}
+	if provider.APIBaseURL != api.URL || provider.UploadBaseURL != api.URL || provider.GatewayBaseURL != gateway.URL {
+		t.Fatalf("provider urls = %+v", provider)
+	}
+	if strings.Contains(rec.Body.String(), "test-pinata-jwt") {
+		t.Fatalf("status leaked jwt: %s", rec.Body.String())
+	}
+}
+
+func TestIPFSUploadPersistsCIDMetadata(t *testing.T) {
+	const cid = "bafybeigdyrztipfsupload"
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/files" {
+			t.Fatalf("unexpected API path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-pinata-jwt" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		if r.FormValue("network") != "public" {
+			t.Fatalf("network = %q", r.FormValue("network"))
+		}
+		_, _ = w.Write([]byte(`{"data":{"id":"file-upload","cid":"` + cid + `"}}`))
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	body, ctype := multipartBody(t, map[string]string{
+		"project_id":    "assets",
+		"path":          "/docs/readme.txt",
+		"route_profile": "ipfs_archive",
+	}, "file", "readme.txt", []byte("hello ipfs"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/assets", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var upload struct {
+		Object model.Object `json:"object"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil {
+		t.Fatal(err)
+	}
+	if len(upload.Object.IPFS) != 1 || upload.Object.IPFS[0].CID != cid {
+		t.Fatalf("object ipfs metadata = %+v", upload.Object.IPFS)
+	}
+	if want := gateway.URL + "/ipfs/" + cid; upload.Object.IPFS[0].GatewayURL != want {
+		t.Fatalf("gateway url = %q want %q", upload.Object.IPFS[0].GatewayURL, want)
+	}
+	pins, err := app.db.IPFSPins(context.Background(), upload.Object.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pins) != 1 || pins[0].CID != cid || pins[0].Provider != "pinata" {
+		t.Fatalf("stored pins = %+v", pins)
+	}
+	if pins[0].ProviderPinID != "file-upload" {
+		t.Fatalf("provider pin id = %q", pins[0].ProviderPinID)
+	}
+
+	replicasReq := httptest.NewRequest(http.MethodGet, "/api/v1/objects/"+strconv.FormatInt(upload.Object.ID, 10)+"/replicas", nil)
+	replicasReq.Header.Set("Authorization", "Bearer test-token")
+	replicasRec := httptest.NewRecorder()
+	app.ServeHTTP(replicasRec, replicasReq)
+	if replicasRec.Code != http.StatusOK {
+		t.Fatalf("replicas status = %d body=%s", replicasRec.Code, replicasRec.Body.String())
+	}
+	var replicas []model.Replica
+	if err := json.Unmarshal(replicasRec.Body.Bytes(), &replicas); err != nil {
+		t.Fatal(err)
+	}
+	if len(replicas) != 1 || replicas[0].IPFS == nil || replicas[0].IPFS.CID != cid {
+		t.Fatalf("replicas = %+v", replicas)
+	}
+}
+
+func TestIPFSSiteDeploymentRedirectsAssetToGateway(t *testing.T) {
+	var uploadCount int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/files" {
+			t.Fatalf("unexpected API path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-pinata-jwt" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		uploadCount++
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"data":{"id":"file-web-%d","cid":"bafyweb%d"}}`, uploadCount, uploadCount)))
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	deploymentID := createDeployment(t, app, "ipfs-site", map[string]string{
+		"index.html":       `<a href="assets/wall.txt">wall</a>`,
+		"assets/wall.txt":  "hello ipfs web",
+		"assets/other.txt": "other",
+	}, map[string]string{"environment": "preview", "route_profile": "ipfs_archive"})
+	if uploadCount == 0 {
+		t.Fatal("expected Pinata uploads")
+	}
+	assetObj, err := app.db.SiteDeploymentFileObject(context.Background(), deploymentID, "assets/wall.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins, err := app.db.IPFSPins(context.Background(), assetObj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pins) != 1 || pins[0].CID == "" {
+		t.Fatalf("asset pins = %+v", pins)
+	}
+
+	root := httptest.NewRequest(http.MethodGet, "/p/ipfs-site/"+deploymentID+"/", nil)
+	rootRec := httptest.NewRecorder()
+	app.ServeHTTP(rootRec, root)
+	if rootRec.Code >= http.StatusBadRequest || rootRec.Header().Get("Location") != "" {
+		t.Fatalf("root status=%d location=%q body=%q", rootRec.Code, rootRec.Header().Get("Location"), rootRec.Body.String())
+	}
+
+	asset := httptest.NewRequest(http.MethodGet, "/p/ipfs-site/"+deploymentID+"/assets/wall.txt", nil)
+	assetRec := httptest.NewRecorder()
+	app.ServeHTTP(assetRec, asset)
+	if assetRec.Code != http.StatusFound {
+		t.Fatalf("asset status=%d body=%s", assetRec.Code, assetRec.Body.String())
+	}
+	if got, want := assetRec.Header().Get("Location"), gateway.URL+"/ipfs/"+pins[0].CID; got != want {
+		t.Fatalf("asset redirect = %q want %q", got, want)
+	}
+	if assetRec.Header().Get("X-SuperCDN-Redirect") != "storage" {
+		t.Fatalf("redirect marker = %q", assetRec.Header().Get("X-SuperCDN-Redirect"))
+	}
+}
+
+func TestIPFSSiteDeploymentDeleteCleansRemoteObjects(t *testing.T) {
+	var uploadCount int
+	var deleteCount int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v3/files":
+			if got := r.Header.Get("Authorization"); got != "Bearer test-pinata-jwt" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatal(err)
+			}
+			uploadCount++
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"data":{"id":"file-web-%d","cid":"bafywebcleanup%d"}}`, uploadCount, uploadCount)))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v3/files/public/file-web-"):
+			if got := r.Header.Get("Authorization"); got != "Bearer test-pinata-jwt" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			deleteCount++
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	deploymentID := createDeployment(t, app, "ipfs-cleanup-site", map[string]string{
+		"index.html":      `<a href="assets/wall.txt">wall</a>`,
+		"assets/wall.txt": "hello ipfs web cleanup",
+	}, map[string]string{"environment": "preview", "route_profile": "ipfs_archive"})
+	if uploadCount == 0 {
+		t.Fatal("expected Pinata uploads")
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sites/ipfs-cleanup-site/deployments/"+deploymentID+"?delete_objects=true&delete_remote=true", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var result deleteSiteDeploymentResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.DeletedDeployment || !result.DeleteObjects || !result.DeleteRemote || len(result.Errors) > 0 {
+		t.Fatalf("delete result = %+v", result)
+	}
+	if result.ObjectCount != uploadCount || deleteCount != uploadCount {
+		t.Fatalf("object/delete count result=%d upload=%d delete=%d", result.ObjectCount, uploadCount, deleteCount)
+	}
+	for _, obj := range result.Objects {
+		if !obj.DeletedLocal || len(obj.Remote) != 1 || obj.Remote[0].Status != "deleted" {
+			t.Fatalf("object delete result = %+v", obj)
+		}
+	}
+	if _, err := app.db.GetSiteDeployment(context.Background(), deploymentID); err == nil {
+		t.Fatal("deployment still exists")
+	}
+}
+
+func TestIPFSBucketUploadReturnsGatewayAndListMetadata(t *testing.T) {
+	const cid = "bafybeigdyrztbucket"
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v3/groups/public":
+			if got := r.URL.Query().Get("name"); got != "supercdn-bucket-ipfs-bucket" {
+				t.Fatalf("group name = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"data":{"groups":[{"id":"group-bucket","name":"supercdn-bucket-ipfs-bucket"}]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v3/files":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.FormValue("group_id"); got != "group-bucket" {
+				t.Fatalf("group_id = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"data":{"id":"file-bucket","cid":"` + cid + `"}}`))
+		default:
+			t.Fatalf("unexpected API path %s", r.URL.Path)
+		}
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets", "test-token", map[string]any{
+		"slug":          "ipfs-bucket",
+		"route_profile": "ipfs_archive",
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create bucket status = %d body=%s", create.Code, create.Body.String())
+	}
+	body, ctype := multipartBody(t, map[string]string{"path": "docs/readme.txt"}, "file", "readme.txt", []byte("hello bucket"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/asset-buckets/ipfs-bucket/objects", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload bucket status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var upload struct {
+		CDNURL       string                  `json:"cdn_url"`
+		IPFS         []model.IPFSPin         `json:"ipfs"`
+		BucketObject model.AssetBucketObject `json:"bucket_object"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil {
+		t.Fatal(err)
+	}
+	if want := gateway.URL + "/ipfs/" + cid; upload.CDNURL != want {
+		t.Fatalf("cdn_url = %q want %q", upload.CDNURL, want)
+	}
+	if len(upload.IPFS) != 1 || upload.IPFS[0].CID != cid || len(upload.BucketObject.IPFS) != 1 {
+		t.Fatalf("upload ipfs metadata = top=%+v bucket=%+v", upload.IPFS, upload.BucketObject.IPFS)
+	}
+	if !strings.Contains(upload.IPFS[0].Locator, "pinata_group_id=group-bucket") {
+		t.Fatalf("locator = %q", upload.IPFS[0].Locator)
+	}
+
+	list := apiJSON(t, app, http.MethodGet, "/api/v1/asset-buckets/ipfs-bucket/objects", "test-token", nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list bucket status = %d body=%s", list.Code, list.Body.String())
+	}
+	var listed struct {
+		Objects []model.AssetBucketObject `json:"objects"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Objects) != 1 || len(listed.Objects[0].IPFS) != 1 || listed.Objects[0].IPFS[0].CID != cid {
+		t.Fatalf("listed objects = %+v", listed.Objects)
+	}
+}
+
+func TestIPFSBucketDeleteUnpinsLastCIDReference(t *testing.T) {
+	const cid = "bafybeigdyrztshared"
+	var deleteCount int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v3/groups/public":
+			_, _ = w.Write([]byte(`{"data":{"groups":[{"id":"group-shared","name":"supercdn-bucket-ipfs-bucket"}]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v3/files":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.FormValue("group_id"); got != "group-shared" {
+				t.Fatalf("group_id = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"data":{"id":"file-shared","cid":"` + cid + `"}}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v3/files/public/file-shared":
+			if got := r.Header.Get("Authorization"); got != "Bearer test-pinata-jwt" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			deleteCount++
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets", "test-token", map[string]any{
+		"slug":          "ipfs-bucket",
+		"route_profile": "ipfs_archive",
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create bucket status = %d body=%s", create.Code, create.Body.String())
+	}
+	for _, logicalPath := range []string{"images/a.png", "images/b.png"} {
+		body, ctype := multipartBody(t, map[string]string{"path": logicalPath}, "file", "wall.png", []byte("same image"))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/asset-buckets/ipfs-bucket/objects", body)
+		req.Header.Set("Content-Type", ctype)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("upload %s status = %d body=%s", logicalPath, rec.Code, rec.Body.String())
+		}
+	}
+
+	firstDelete := apiJSON(t, app, http.MethodDelete, "/api/v1/asset-buckets/ipfs-bucket/objects?path=images/a.png&delete_remote=true", "test-token", nil)
+	if firstDelete.Code != http.StatusOK {
+		t.Fatalf("first delete status = %d body=%s", firstDelete.Code, firstDelete.Body.String())
+	}
+	var first deleteBucketObjectResult
+	if err := json.Unmarshal(firstDelete.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Remote) != 1 || first.Remote[0].Status != "kept_shared" || deleteCount != 0 {
+		t.Fatalf("first delete result = %+v deleteCount=%d", first, deleteCount)
+	}
+
+	secondDelete := apiJSON(t, app, http.MethodDelete, "/api/v1/asset-buckets/ipfs-bucket/objects?path=images/b.png&delete_remote=true", "test-token", nil)
+	if secondDelete.Code != http.StatusOK {
+		t.Fatalf("second delete status = %d body=%s", secondDelete.Code, secondDelete.Body.String())
+	}
+	var second deleteBucketObjectResult
+	if err := json.Unmarshal(secondDelete.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Remote) != 1 || second.Remote[0].Status != "deleted" || deleteCount != 1 {
+		t.Fatalf("second delete result = %+v deleteCount=%d", second, deleteCount)
+	}
+}
+
+func TestIPFSBucketDeleteDistinctPinataFileIDsForSameCID(t *testing.T) {
+	const cid = "bafybeigdyrztdistinct"
+	var uploadCount int
+	var deleted []string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v3/groups/public":
+			_, _ = w.Write([]byte(`{"data":{"groups":[{"id":"group-distinct","name":"supercdn-bucket-ipfs-bucket"}]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v3/files":
+			uploadCount++
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"data":{"id":"file-distinct-%d","cid":"`+cid+`"}}`, uploadCount)))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v3/files/public/file-distinct-"):
+			deleted = append(deleted, path.Base(r.URL.Path))
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets", "test-token", map[string]any{
+		"slug":          "ipfs-bucket",
+		"route_profile": "ipfs_archive",
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create bucket status = %d body=%s", create.Code, create.Body.String())
+	}
+	for _, logicalPath := range []string{"images/a.png", "images/b.png"} {
+		body, ctype := multipartBody(t, map[string]string{"path": logicalPath}, "file", "wall.png", []byte("same image"))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/asset-buckets/ipfs-bucket/objects", body)
+		req.Header.Set("Content-Type", ctype)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		app.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("upload %s status = %d body=%s", logicalPath, rec.Code, rec.Body.String())
+		}
+	}
+
+	firstDelete := apiJSON(t, app, http.MethodDelete, "/api/v1/asset-buckets/ipfs-bucket/objects?path=images/a.png&delete_remote=true", "test-token", nil)
+	if firstDelete.Code != http.StatusOK {
+		t.Fatalf("first delete status = %d body=%s", firstDelete.Code, firstDelete.Body.String())
+	}
+	var first deleteBucketObjectResult
+	if err := json.Unmarshal(firstDelete.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Remote) != 1 || first.Remote[0].Status != "deleted" || len(deleted) != 1 || deleted[0] != "file-distinct-1" {
+		t.Fatalf("first delete result = %+v deleted=%+v", first, deleted)
+	}
+	secondDelete := apiJSON(t, app, http.MethodDelete, "/api/v1/asset-buckets/ipfs-bucket/objects?path=images/b.png&delete_remote=true", "test-token", nil)
+	if secondDelete.Code != http.StatusOK {
+		t.Fatalf("second delete status = %d body=%s", secondDelete.Code, secondDelete.Body.String())
+	}
+	if len(deleted) != 2 || deleted[1] != "file-distinct-2" {
+		t.Fatalf("deleted = %+v", deleted)
+	}
+}
+
+func TestRefreshIPFSPinsUpdatesPinStatus(t *testing.T) {
+	const cid = "bafybeigdyrztrefresh"
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v3/files":
+			_, _ = w.Write([]byte(`{"data":{"id":"file-refresh","cid":"` + cid + `"}}`))
+		case "/v3/files/public":
+			if got := r.URL.Query().Get("cid"); got != cid {
+				t.Fatalf("cid = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"data":{"files":[{"id":"file-refresh","cid":"` + cid + `"}]}}`))
+		default:
+			t.Fatalf("unexpected API path %s", r.URL.Path)
+		}
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	body, ctype := multipartBody(t, map[string]string{
+		"project_id":    "assets",
+		"path":          "/docs/readme.txt",
+		"route_profile": "ipfs_archive",
+	}, "file", "readme.txt", []byte("hello ipfs"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/assets", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var upload struct {
+		Object model.Object `json:"object"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil {
+		t.Fatal(err)
+	}
+
+	refresh := apiJSON(t, app, http.MethodPost, "/api/v1/ipfs/pins/refresh", "test-token", map[string]any{
+		"object_id": upload.Object.ID,
+	})
+	if refresh.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body=%s", refresh.Code, refresh.Body.String())
+	}
+	var out refreshIPFSPinsResponse
+	if err := json.Unmarshal(refresh.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" || len(out.Pins) != 1 || out.Pins[0].PinStatus != "pinned" || out.Pins[0].ProviderPinID != "file-refresh" {
+		t.Fatalf("refresh response = %+v", out)
+	}
+	pin, err := app.db.GetIPFSPin(context.Background(), upload.Object.ID, "ipfs_pinata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin.PinStatus != "pinned" || pin.ProviderPinID != "file-refresh" {
+		t.Fatalf("stored pin = %+v", pin)
 	}
 }
 
@@ -996,6 +1544,428 @@ func TestExportEdgeManifestBuildsRoutesAndStorageRedirects(t *testing.T) {
 	}
 	if len(manifest.Warnings) != 0 {
 		t.Fatalf("unexpected manifest warnings: %+v", manifest.Warnings)
+	}
+}
+
+func TestExportEdgeManifestDoesNotUseBackupReplicaWithoutRoutingPolicy(t *testing.T) {
+	app := newTestServer(t)
+	create := map[string]any{
+		"id":            "demo",
+		"route_profile": "overseas",
+		"mode":          "standard",
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true"})
+	ctx := context.Background()
+	obj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "backup", model.ReplicaReady, "http://backup.example/assets/app.js?sign=fresh", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edge manifest status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var manifest edgeManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	asset := manifest.Routes["/assets/app.js"]
+	if asset.Type != "origin" || asset.Location != "" {
+		t.Fatalf("asset should not use backup replica without explicit routing policy: %+v", asset)
+	}
+	warnings := strings.Join(manifest.Warnings, "\n")
+	if len(manifest.Warnings) == 0 || !strings.Contains(warnings, "primary redirect URL unavailable") {
+		t.Fatalf("expected primary redirect warning, got %+v", manifest.Warnings)
+	}
+	if strings.Contains(warnings, "backup.example") {
+		t.Fatalf("backup URL leaked into manifest warnings: %+v", manifest.Warnings)
+	}
+}
+
+func TestExportEdgeManifestBuildsIPFSGatewayRoute(t *testing.T) {
+	const cid = "bafybeigdyrztmanifest"
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/files" {
+			t.Fatalf("unexpected API path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":{"id":"file-manifest","cid":"` + cid + `"}}`))
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	create := map[string]any{
+		"id":            "demo",
+		"route_profile": "ipfs_archive",
+		"mode":          "standard",
+		"domains":       []string{"demo.local"},
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":      "home",
+		"assets/wall.png": "png",
+	}, map[string]string{"environment": "production", "promote": "true", "route_profile": "ipfs_archive"})
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edge manifest status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var manifest edgeManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	asset := manifest.Routes["/assets/wall.png"]
+	if asset.Type != "ipfs" || asset.Status != http.StatusOK || asset.Location != gateway.URL+"/ipfs/"+cid {
+		t.Fatalf("unexpected ipfs asset route: %+v", asset)
+	}
+	if len(asset.IPFS) != 1 || asset.IPFS[0].CID != cid || len(asset.GatewayFallbacks) != 1 || asset.GatewayFallbacks[0] != gateway.URL+"/ipfs/"+cid {
+		t.Fatalf("unexpected ipfs route metadata: %+v", asset)
+	}
+}
+
+func TestExportEdgeManifestBuildsSmartRoutingCandidates(t *testing.T) {
+	app := newSmartRoutingTestServer(t)
+	create := map[string]any{
+		"id":             "demo",
+		"route_profile":  "smart",
+		"routing_policy": "global_smart",
+		"mode":           "standard",
+		"domains":        []string{"demo.local"},
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true", "route_profile": "smart"})
+	ctx := context.Background()
+	obj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "china", model.ReplicaReady, "https://china.example/assets/app.js?sig=cn", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "overseas", model.ReplicaReady, "https://overseas.example/assets/app.js?sig=global", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edge manifest status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var manifest edgeManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	route := manifest.Routes["/assets/app.js"]
+	if manifest.RoutingPolicy != "global_smart" || route.Type != "smart" || route.RoutingPolicy == nil || route.RoutingPolicy.Name != "global_smart" {
+		t.Fatalf("unexpected smart route metadata: manifest=%+v route=%+v", manifest, route)
+	}
+	if route.Status != http.StatusFound || route.Location == "" || route.CacheControl != "no-store" {
+		t.Fatalf("unexpected smart route response fields: %+v", route)
+	}
+	if len(route.Candidates) != 2 {
+		t.Fatalf("candidate count = %d route=%+v", len(route.Candidates), route)
+	}
+	if route.Candidates[0].Target != "china" || route.Candidates[0].RegionGroup != "china" || route.Candidates[0].URL == "" {
+		t.Fatalf("unexpected first candidate: %+v", route.Candidates[0])
+	}
+	if route.Candidates[1].Target != "overseas" || route.Candidates[1].RegionGroup != "overseas" || route.Candidates[1].URL == "" {
+		t.Fatalf("unexpected second candidate: %+v", route.Candidates[1])
+	}
+}
+
+func TestExportEdgeManifestSkipsUnhealthySmartRoutingCandidate(t *testing.T) {
+	app := newSmartRoutingTestServer(t)
+	configureSmartRoutingHealthLibraries(app)
+	create := map[string]any{
+		"id":             "demo",
+		"route_profile":  "smart",
+		"routing_policy": "global_smart",
+		"mode":           "standard",
+		"domains":        []string{"demo.local"},
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true", "route_profile": "smart"})
+	ctx := context.Background()
+	obj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "china", model.ReplicaReady, "https://china.example/assets/app.js?sig=cn", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "overseas", model.ReplicaReady, "https://overseas.example/assets/app.js?sig=global", ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := app.db.UpsertResourceLibraryHealth(ctx, model.ResourceLibraryHealth{
+		Library:       "china",
+		Binding:       "china_primary",
+		BindingPath:   "/china",
+		Target:        "china:china_primary",
+		TargetType:    "resource_library",
+		Status:        storage.HealthStatusFailed,
+		CheckMode:     storage.HealthModePassive,
+		LastError:     "dial tcp4 timeout",
+		LastCheckedAt: now,
+		LastFailureAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edge manifest status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var manifest edgeManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	route := manifest.Routes["/assets/app.js"]
+	if route.Type != "redirect" || route.Location != "https://overseas.example/object?sig=global" {
+		t.Fatalf("expected degraded overseas route, got %+v", route)
+	}
+	if len(route.Candidates) != 1 || route.Candidates[0].Target != "overseas" {
+		t.Fatalf("unexpected candidates: %+v", route.Candidates)
+	}
+	if !strings.Contains(strings.Join(manifest.Warnings, "\n"), "skipped by health") {
+		t.Fatalf("expected health warning: %+v", manifest.Warnings)
+	}
+}
+
+func TestExportEdgeManifestBuildsExplicitResourceFailoverRoute(t *testing.T) {
+	app := newSmartRoutingTestServer(t)
+	create := map[string]any{
+		"id":            "demo",
+		"route_profile": "smart",
+		"mode":          "standard",
+		"domains":       []string{"demo.local"},
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true", "route_profile": "smart", "resource_failover": "true"})
+	ctx := context.Background()
+	obj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "china", model.ReplicaReady, "https://china.example/assets/app.js?sig=cn", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "overseas", model.ReplicaReady, "https://overseas.example/assets/app.js?sig=global", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edge manifest status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var manifest edgeManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	route := manifest.Routes["/assets/app.js"]
+	if !manifest.ResourceFailover || route.Type != "failover" || route.Delivery != "failover" || route.Status != http.StatusOK {
+		t.Fatalf("unexpected failover route metadata: manifest=%+v route=%+v", manifest, route)
+	}
+	if len(route.Candidates) != 2 {
+		t.Fatalf("candidate count = %d route=%+v", len(route.Candidates), route)
+	}
+	if route.Candidates[0].Target != "china" || route.Candidates[1].Target != "overseas" {
+		t.Fatalf("unexpected failover candidates: %+v", route.Candidates)
+	}
+}
+
+func TestExportEdgeManifestResourceFailoverWithoutCandidatesDoesNotUseOrigin(t *testing.T) {
+	app := newSmartRoutingTestServer(t)
+	create := map[string]any{
+		"id":            "demo",
+		"route_profile": "smart",
+		"mode":          "standard",
+		"domains":       []string{"demo.local"},
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true", "route_profile": "smart", "resource_failover": "true"})
+	ctx := context.Background()
+	obj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "china", model.ReplicaPending, "", "not ready"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "overseas", model.ReplicaFailed, "", "not ready"); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/deployments/"+deploymentID+"/edge-manifest", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("edge manifest status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var manifest edgeManifest
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	route := manifest.Routes["/assets/app.js"]
+	if route.Type != "failover" || route.Delivery != "failover" || route.Status != http.StatusBadGateway {
+		t.Fatalf("unexpected failover error route: %+v", route)
+	}
+	if route.Location != "" || len(route.Candidates) != 0 {
+		t.Fatalf("failover error route should not include origin or candidates: %+v", route)
+	}
+}
+
+func TestReplicateObjectRetriesTransientSourceGet(t *testing.T) {
+	app := newTestServer(t)
+	oldAttempts := replicateSourceGetAttempts
+	oldDelay := replicateSourceGetDelay
+	replicateSourceGetAttempts = 3
+	replicateSourceGetDelay = time.Millisecond
+	t.Cleanup(func() {
+		replicateSourceGetAttempts = oldAttempts
+		replicateSourceGetDelay = oldDelay
+	})
+
+	source := &flakyGetStore{name: "source", failures: 2, content: []byte("hello replica")}
+	target := &capturingPutStore{name: "target"}
+	app.stores = storage.NewManager([]storage.Store{source, target})
+
+	ctx := context.Background()
+	if _, err := app.db.CreateProject(ctx, "replicate-test"); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := app.db.SaveObject(ctx, model.Object{
+		ProjectID:     "replicate-test",
+		Path:          "files/demo.txt",
+		Key:           "objects/demo.txt",
+		RouteProfile:  "test",
+		Size:          int64(len(source.content)),
+		ContentType:   "text/plain",
+		CacheControl:  "public, max-age=60",
+		PrimaryTarget: "source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "source", model.ReplicaReady, "source-locator", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "target", model.ReplicaPending, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.replicateObject(ctx, replicatePayload{ObjectID: obj.ID, Target: "target"}); err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 3 {
+		t.Fatalf("source get calls = %d", source.calls)
+	}
+	if string(target.content) != string(source.content) {
+		t.Fatalf("target content = %q", string(target.content))
+	}
+	replicas, err := app.db.Replicas(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targetReplica *model.Replica
+	for i := range replicas {
+		if replicas[i].Target == "target" {
+			targetReplica = &replicas[i]
+		}
+	}
+	if targetReplica == nil || targetReplica.Status != model.ReplicaReady || targetReplica.Locator != "target://objects/demo.txt" {
+		t.Fatalf("target replica = %+v", targetReplica)
 	}
 }
 
@@ -1698,6 +2668,101 @@ func TestAssetBucketUploadReturnsCDNURL(t *testing.T) {
 	}
 }
 
+func TestAssetBucketSmartRoutingRedirectsByRegion(t *testing.T) {
+	app := newSmartRoutingTestServer(t)
+	raw, _ := json.Marshal(map[string]any{
+		"slug":           "posters",
+		"name":           "Posters",
+		"route_profile":  "smart",
+		"routing_policy": "global_smart",
+		"allowed_types":  []string{"image"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/asset-buckets", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create bucket status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body, ctype := multipartBody(t, map[string]string{"path": "images/poster.jpg"}, "file", "poster.jpg", []byte("jpg"))
+	upload := httptest.NewRequest(http.MethodPost, "/api/v1/asset-buckets/posters/objects", body)
+	upload.Header.Set("Content-Type", ctype)
+	upload.Header.Set("Authorization", "Bearer test-token")
+	uploadRec := httptest.NewRecorder()
+	app.ServeHTTP(uploadRec, upload)
+	if uploadRec.Code != http.StatusCreated {
+		t.Fatalf("upload bucket object status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+	}
+	item, err := app.db.GetAssetBucketObject(context.Background(), "posters", "images/poster.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(context.Background(), item.ObjectID, "china", model.ReplicaReady, "https://china.example/images/poster.jpg?sig=cn", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(context.Background(), item.ObjectID, "overseas", model.ReplicaReady, "https://overseas.example/images/poster.jpg?sig=global", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	getCN := httptest.NewRequest(http.MethodGet, "/a/posters/images/poster.jpg", nil)
+	getCN.Header.Set("CF-IPCountry", "CN")
+	outCN := httptest.NewRecorder()
+	app.ServeHTTP(outCN, getCN)
+	if outCN.Code != http.StatusFound {
+		t.Fatalf("cn bucket read status = %d body=%s", outCN.Code, outCN.Body.String())
+	}
+	if got := outCN.Header().Get("Location"); !strings.Contains(got, "china.example") {
+		t.Fatalf("cn redirect location = %q", got)
+	}
+	if outCN.Header().Get("X-SuperCDN-Route-Policy") != "global_smart" || outCN.Header().Get("X-SuperCDN-Route-Target") != "china" {
+		t.Fatalf("cn route headers: policy=%q target=%q reason=%q", outCN.Header().Get("X-SuperCDN-Route-Policy"), outCN.Header().Get("X-SuperCDN-Route-Target"), outCN.Header().Get("X-SuperCDN-Route-Reason"))
+	}
+
+	getUS := httptest.NewRequest(http.MethodGet, "/a/posters/images/poster.jpg", nil)
+	getUS.Header.Set("CF-IPCountry", "US")
+	outUS := httptest.NewRecorder()
+	app.ServeHTTP(outUS, getUS)
+	if outUS.Code != http.StatusFound {
+		t.Fatalf("us bucket read status = %d body=%s", outUS.Code, outUS.Body.String())
+	}
+	if got := outUS.Header().Get("Location"); !strings.Contains(got, "overseas.example") {
+		t.Fatalf("us redirect location = %q", got)
+	}
+	if outUS.Header().Get("X-SuperCDN-Route-Target") != "overseas" {
+		t.Fatalf("us route target = %q", outUS.Header().Get("X-SuperCDN-Route-Target"))
+	}
+}
+
+func TestAssetBucketRejectsRoutingPolicyOutsideRouteProfile(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.RoutingPolicies = []config.RoutingPolicy{{
+		Name:               "bad_smart",
+		Mode:               "global_load_balance",
+		DefaultRegionGroup: "overseas",
+		Sources: []config.RoutingPolicySource{
+			{Target: "local", RegionGroup: "china", Weight: 1},
+			{Target: "backup", RegionGroup: "overseas", Weight: 1},
+		},
+	}}
+	raw, _ := json.Marshal(map[string]any{
+		"slug":           "posters",
+		"route_profile":  "overseas",
+		"routing_policy": "bad_smart",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/asset-buckets", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create bucket status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not included in route_profile") {
+		t.Fatalf("unexpected error body: %s", rec.Body.String())
+	}
+}
+
 func TestListAssetBucketsReturnsUsage(t *testing.T) {
 	app := newTestServer(t)
 	createAssetBucketForTest(t, app, "docs")
@@ -1970,6 +3035,96 @@ func newTestServer(t *testing.T) *Server {
 			Name:                "overseas",
 			Primary:             "local",
 			DefaultCacheControl: "public, max-age=60",
+		}},
+	}
+	if err := cfg.ApplyDefaults(dir); err != nil {
+		t.Fatal(err)
+	}
+	app, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = app.Close() })
+	return app
+}
+
+func newSmartRoutingTestServer(t *testing.T) *Server {
+	t.Helper()
+	app := newTestServer(t)
+	app.cfg.RouteProfiles = []config.RouteProfile{{
+		Name:                "smart",
+		Primary:             "china",
+		Backups:             []string{"overseas"},
+		DefaultCacheControl: "public, max-age=60",
+		AllowRedirect:       true,
+	}}
+	app.cfg.RoutingPolicies = []config.RoutingPolicy{{
+		Name:               "global_smart",
+		Mode:               "global_load_balance",
+		DefaultRegionGroup: "overseas",
+		Sources: []config.RoutingPolicySource{
+			{Target: "china", RegionGroup: "china", Weight: 1},
+			{Target: "overseas", RegionGroup: "overseas", Weight: 1},
+		},
+	}}
+	app.stores = storage.NewManager([]storage.Store{
+		&signedLocatorStore{
+			name:          "china",
+			statLocator:   "https://china.example/object?sig=cn",
+			publicLocator: "https://china.example/object",
+		},
+		&signedLocatorStore{
+			name:          "overseas",
+			statLocator:   "https://overseas.example/object?sig=global",
+			publicLocator: "https://overseas.example/object",
+		},
+	})
+	return app
+}
+
+func configureSmartRoutingHealthLibraries(app *Server) {
+	app.cfg.ResourceLibraries = []config.ResourceLibraryConfig{
+		{
+			Name: "china",
+			Bindings: []config.ResourceLibraryBinding{{
+				Name:       "china_primary",
+				MountPoint: "alist",
+				Path:       "/china",
+			}},
+		},
+		{
+			Name: "overseas",
+			Bindings: []config.ResourceLibraryBinding{{
+				Name:       "overseas_primary",
+				MountPoint: "alist",
+				Path:       "/overseas",
+			}},
+		},
+	}
+}
+
+func newPinataStatusTestServer(t *testing.T, apiBaseURL, gatewayBaseURL string) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:       "127.0.0.1:0",
+			DataDir:    dir,
+			AdminToken: "test-token",
+		},
+		Database: config.DatabaseConfig{Path: filepath.Join(dir, "test.db")},
+		Storage: []config.StorageConfig{{
+			Name: "ipfs_pinata",
+			Type: "pinata",
+			Pinata: config.PinataConfig{
+				APIBaseURL:     apiBaseURL,
+				JWT:            "test-pinata-jwt",
+				GatewayBaseURL: gatewayBaseURL,
+			},
+		}},
+		RouteProfiles: []config.RouteProfile{{
+			Name:    "ipfs_archive",
+			Primary: "ipfs_pinata",
 		}},
 	}
 	if err := cfg.ApplyDefaults(dir); err != nil {
@@ -2291,3 +3446,70 @@ func (s *signedLocatorStore) Delete(context.Context, string) error {
 func (s *signedLocatorStore) PublicURL(string) string {
 	return s.publicLocator
 }
+
+type flakyGetStore struct {
+	name     string
+	failures int
+	calls    int
+	content  []byte
+}
+
+func (s *flakyGetStore) Name() string { return s.name }
+func (s *flakyGetStore) Type() string { return "flaky-test" }
+
+func (s *flakyGetStore) Put(context.Context, storage.PutOptions) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (s *flakyGetStore) Get(context.Context, string, storage.GetOptions) (*storage.ObjectStream, error) {
+	s.calls++
+	if s.calls <= s.failures {
+		return nil, fmt.Errorf("source not visible yet: %w", storage.ErrNotFound)
+	}
+	return &storage.ObjectStream{
+		Body:        io.NopCloser(bytes.NewReader(s.content)),
+		Size:        int64(len(s.content)),
+		ContentType: "text/plain",
+	}, nil
+}
+
+func (s *flakyGetStore) Stat(context.Context, string) (*storage.Stat, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *flakyGetStore) Delete(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
+func (s *flakyGetStore) PublicURL(string) string { return "" }
+
+type capturingPutStore struct {
+	name    string
+	content []byte
+}
+
+func (s *capturingPutStore) Name() string { return s.name }
+func (s *capturingPutStore) Type() string { return "capture-test" }
+
+func (s *capturingPutStore) Put(_ context.Context, opts storage.PutOptions) (string, error) {
+	content, err := os.ReadFile(opts.FilePath)
+	if err != nil {
+		return "", err
+	}
+	s.content = content
+	return "target://" + opts.Key, nil
+}
+
+func (s *capturingPutStore) Get(context.Context, string, storage.GetOptions) (*storage.ObjectStream, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *capturingPutStore) Stat(context.Context, string) (*storage.Stat, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *capturingPutStore) Delete(context.Context, string) error {
+	return errors.New("not implemented")
+}
+
+func (s *capturingPutStore) PublicURL(string) string { return "" }

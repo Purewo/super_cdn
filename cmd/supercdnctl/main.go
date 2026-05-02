@@ -98,6 +98,14 @@ func main() {
 		err = domainStatus(c, args[1:])
 	case "cloudflare-status":
 		err = cloudflareStatus(c, args[1:])
+	case "ipfs-status":
+		err = ipfsStatus(c, args[1:])
+	case "ipfs-smoke":
+		err = ipfsSmoke(c, args[1:])
+	case "ipfs-web-smoke":
+		err = ipfsWebSmoke(c, args[1:])
+	case "refresh-ipfs-pins":
+		err = refreshIPFSPins(c, args[1:])
 	case "sync-site-dns":
 		err = syncSiteDNS(c, args[1:])
 	case "sync-worker-routes":
@@ -140,6 +148,8 @@ func main() {
 		err = getInitJob(c, args[1:])
 	case "resource-status":
 		err = resourceStatus(c, args[1:])
+	case "routing-policy-status":
+		err = routingPolicyStatus(c, args[1:])
 	case "health-check":
 		err = healthCheck(c, args[1:])
 	case "e2e-probe":
@@ -152,6 +162,8 @@ func main() {
 		err = createDomesticCDNBucket(c, args[1:])
 	case "create-mobile-cdn-bucket":
 		err = createMobileCDNBucket(c, args[1:])
+	case "create-ipfs-bucket":
+		err = createIPFSBucket(c, args[1:])
 	case "init-bucket":
 		err = initBucket(c, args[1:])
 	case "upload-bucket":
@@ -400,6 +412,7 @@ func createSite(c client, args []string) error {
 	name := fs.String("name", "", "site display name")
 	profile := fs.String("profile", "overseas", "route profile")
 	target := fs.String("target", "", "deployment target: origin_assisted, cloudflare_static, or hybrid_edge")
+	routingPolicy := fs.String("routing-policy", "", "routing policy name; requires matching multi-source route profile")
 	mode := fs.String("mode", "standard", "standard or spa")
 	domains := fs.String("domains", "", "comma-separated domains")
 	defaultDomainID := fs.String("domain-id", "", "default allocated subdomain id")
@@ -414,6 +427,7 @@ func createSite(c client, args []string) error {
 		"name":                  *name,
 		"route_profile":         *profile,
 		"deployment_target":     *target,
+		"routing_policy":        *routingPolicy,
 		"mode":                  *mode,
 		"domains":               splitCSV(*domains),
 		"default_domain_id":     *defaultDomainID,
@@ -475,6 +489,638 @@ func cloudflareStatus(c client, args []string) error {
 		pathValue += "?" + q.Encode()
 	}
 	return c.do(http.MethodGet, pathValue, nil, "")
+}
+
+func ipfsStatus(c client, args []string) error {
+	fs := flag.NewFlagSet("ipfs-status", flag.ExitOnError)
+	target := fs.String("target", "", "IPFS storage target name; empty checks all Pinata/IPFS targets")
+	_ = fs.Parse(args)
+	q := url.Values{}
+	if strings.TrimSpace(*target) != "" {
+		q.Set("target", strings.TrimSpace(*target))
+	}
+	pathValue := "/api/v1/ipfs/status"
+	if len(q) > 0 {
+		pathValue += "?" + q.Encode()
+	}
+	return c.do(http.MethodGet, pathValue, nil, "")
+}
+
+func refreshIPFSPins(c client, args []string) error {
+	fs := flag.NewFlagSet("refresh-ipfs-pins", flag.ExitOnError)
+	objectID := fs.Int64("object-id", 0, "object id whose known IPFS pins should be refreshed")
+	target := fs.String("target", "", "optional IPFS storage target name")
+	_ = fs.Parse(args)
+	if *objectID <= 0 {
+		return errors.New("-object-id is required")
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/ipfs/pins/refresh", map[string]any{
+		"object_id": *objectID,
+		"target":    strings.TrimSpace(*target),
+	})
+}
+
+type ipfsSmokePin struct {
+	ObjectID      int64  `json:"object_id,omitempty"`
+	Target        string `json:"target,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	CID           string `json:"cid,omitempty"`
+	GatewayURL    string `json:"gateway_url,omitempty"`
+	Locator       string `json:"locator,omitempty"`
+	PinStatus     string `json:"pin_status,omitempty"`
+	ProviderPinID string `json:"provider_pin_id,omitempty"`
+}
+
+type ipfsSmokeUploadObject struct {
+	ID   int64          `json:"id"`
+	IPFS []ipfsSmokePin `json:"ipfs,omitempty"`
+}
+
+type ipfsSmokeUploadResponse struct {
+	Object    ipfsSmokeUploadObject `json:"object"`
+	PublicURL string                `json:"public_url,omitempty"`
+	CDNURL    string                `json:"cdn_url,omitempty"`
+	IPFS      []ipfsSmokePin        `json:"ipfs,omitempty"`
+}
+
+type ipfsSmokeRefreshResponse struct {
+	Status   string         `json:"status"`
+	ObjectID int64          `json:"object_id"`
+	Target   string         `json:"target,omitempty"`
+	Pins     []ipfsSmokePin `json:"pins,omitempty"`
+	Errors   []string       `json:"errors,omitempty"`
+}
+
+type ipfsSmokeProbeResult struct {
+	Name         string `json:"name"`
+	Method       string `json:"method"`
+	URL          string `json:"url"`
+	Range        string `json:"range,omitempty"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
+	Location     string `json:"location,omitempty"`
+	Bytes        int64  `json:"bytes,omitempty"`
+	LatencyMS    int64  `json:"latency_ms,omitempty"`
+	SpeedBytesPS int64  `json:"speed_bytes_per_second,omitempty"`
+	CacheControl string `json:"cache_control,omitempty"`
+	ContentType  string `json:"content_type,omitempty"`
+	AcceptRanges string `json:"accept_ranges,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
+type ipfsSmokeResult struct {
+	Status         string                    `json:"status"`
+	Bucket         string                    `json:"bucket"`
+	CreatedBucket  bool                      `json:"created_bucket,omitempty"`
+	Cleanup        bool                      `json:"cleanup"`
+	DeletedBucket  json.RawMessage           `json:"deleted_bucket,omitempty"`
+	File           string                    `json:"file"`
+	SizeBytes      int64                     `json:"size_bytes"`
+	LogicalPath    string                    `json:"logical_path"`
+	RouteProfile   string                    `json:"route_profile"`
+	Target         string                    `json:"target,omitempty"`
+	PublicURL      string                    `json:"public_url,omitempty"`
+	GatewayURL     string                    `json:"gateway_url,omitempty"`
+	CID            string                    `json:"cid,omitempty"`
+	Provider       string                    `json:"provider,omitempty"`
+	ObjectID       int64                     `json:"object_id,omitempty"`
+	Upload         ipfsSmokeUploadResponse   `json:"upload"`
+	ProviderStatus json.RawMessage           `json:"provider_status,omitempty"`
+	Refresh        *ipfsSmokeRefreshResponse `json:"refresh,omitempty"`
+	Probes         []ipfsSmokeProbeResult    `json:"probes,omitempty"`
+	Warnings       []string                  `json:"warnings,omitempty"`
+}
+
+type ipfsWebSmokeRoute struct {
+	Type             string         `json:"type"`
+	Location         string         `json:"location,omitempty"`
+	IPFS             []ipfsSmokePin `json:"ipfs,omitempty"`
+	GatewayFallbacks []string       `json:"gateway_fallbacks,omitempty"`
+}
+
+type ipfsWebSmokeManifest struct {
+	SiteID       string                       `json:"site_id"`
+	DeploymentID string                       `json:"deployment_id"`
+	RouteProfile string                       `json:"route_profile"`
+	Routes       map[string]ipfsWebSmokeRoute `json:"routes"`
+	Warnings     []string                     `json:"warnings,omitempty"`
+}
+
+type ipfsWebSmokeResult struct {
+	Status         string                 `json:"status"`
+	Site           string                 `json:"site"`
+	DeploymentID   string                 `json:"deployment_id,omitempty"`
+	Cleanup        bool                   `json:"cleanup"`
+	Deleted        json.RawMessage        `json:"deleted_deployment,omitempty"`
+	File           string                 `json:"file,omitempty"`
+	SizeBytes      int64                  `json:"size_bytes"`
+	AssetPath      string                 `json:"asset_path"`
+	RouteProfile   string                 `json:"route_profile"`
+	Target         string                 `json:"target,omitempty"`
+	PreviewURL     string                 `json:"preview_url,omitempty"`
+	AssetURL       string                 `json:"asset_url,omitempty"`
+	GatewayURL     string                 `json:"gateway_url,omitempty"`
+	CID            string                 `json:"cid,omitempty"`
+	Provider       string                 `json:"provider,omitempty"`
+	Deployment     siteDeploymentResult   `json:"deployment"`
+	ManifestRoute  ipfsWebSmokeRoute      `json:"manifest_route"`
+	ProviderStatus json.RawMessage        `json:"provider_status,omitempty"`
+	Probes         []ipfsSmokeProbeResult `json:"probes,omitempty"`
+	Warnings       []string               `json:"warnings,omitempty"`
+}
+
+func ipfsSmoke(c client, args []string) error {
+	fs := flag.NewFlagSet("ipfs-smoke", flag.ExitOnError)
+	file := fs.String("file", "", "file to upload through the IPFS bucket workflow")
+	bucket := fs.String("bucket", "", "bucket slug; defaults to ipfs-smoke-<timestamp>")
+	dst := fs.String("path", "", "logical path inside the bucket; defaults to smoke/<timestamp>-<file>")
+	profile := fs.String("profile", "ipfs_archive", "IPFS route profile")
+	target := fs.String("target", "ipfs_pinata", "IPFS storage target for status and pin refresh")
+	assetType := fs.String("asset-type", "", "optional asset type override")
+	types := fs.String("types", "image,video,document,archive,other", "bucket allowed asset types")
+	cacheControl := fs.String("cache-control", "public, max-age=31536000, immutable", "bucket default Cache-Control")
+	createBucket := fs.Bool("create-bucket", true, "create the bucket before uploading")
+	cleanup := fs.Bool("cleanup", false, "delete the smoke bucket after probes")
+	skipStatus := fs.Bool("skip-status", false, "skip IPFS provider status check")
+	skipRefresh := fs.Bool("skip-refresh", false, "skip pin status refresh after upload")
+	skipRange := fs.Bool("skip-range", false, "skip Range GET probe")
+	downloadRuns := fs.Int("download-runs", 1, "number of full GET probes against the gateway URL")
+	proxyURL := fs.String("proxy-url", "", "optional HTTP proxy URL for gateway probes")
+	timeout := fs.Duration("timeout", 120*time.Second, "gateway probe timeout")
+	_ = fs.Parse(args)
+	if *file == "" {
+		return errors.New("-file is required")
+	}
+	info, err := os.Stat(*file)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory", *file)
+	}
+	now := time.Now().UTC()
+	if strings.TrimSpace(*bucket) == "" {
+		*bucket = "ipfs-smoke-" + now.Format("20060102150405")
+	}
+	if strings.TrimSpace(*dst) == "" {
+		*dst = defaultIPFSSmokePath(*file, now)
+	}
+	result := ipfsSmokeResult{
+		Status:       "running",
+		Bucket:       strings.TrimSpace(*bucket),
+		Cleanup:      *cleanup,
+		File:         *file,
+		SizeBytes:    info.Size(),
+		LogicalPath:  strings.TrimSpace(*dst),
+		RouteProfile: strings.TrimSpace(*profile),
+		Target:       strings.TrimSpace(*target),
+	}
+	if !*skipStatus {
+		statusPath := "/api/v1/ipfs/status"
+		if result.Target != "" {
+			statusPath += "?target=" + url.QueryEscape(result.Target)
+		}
+		raw, err := c.doRaw(http.MethodGet, statusPath, nil, "")
+		if err != nil {
+			return err
+		}
+		result.ProviderStatus = json.RawMessage(raw)
+	}
+	if *createBucket {
+		req := map[string]any{
+			"slug":                  result.Bucket,
+			"name":                  result.Bucket,
+			"route_profile":         result.RouteProfile,
+			"allowed_types":         splitCSV(*types),
+			"default_cache_control": strings.TrimSpace(*cacheControl),
+		}
+		if _, err := c.doJSONRaw(http.MethodPost, "/api/v1/asset-buckets", req); err != nil {
+			return err
+		}
+		result.CreatedBucket = true
+	}
+	fields := map[string]string{
+		"path":          result.LogicalPath,
+		"asset_type":    strings.TrimSpace(*assetType),
+		"cache_control": strings.TrimSpace(*cacheControl),
+	}
+	uploadRaw, err := c.uploadFileRaw("/api/v1/asset-buckets/"+url.PathEscape(result.Bucket)+"/objects", "file", *file, fields)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(uploadRaw, &result.Upload); err != nil {
+		return err
+	}
+	result.PublicURL = result.Upload.PublicURL
+	result.GatewayURL = result.Upload.CDNURL
+	result.ObjectID = result.Upload.Object.ID
+	pin := firstIPFSSmokePin(result.Upload.IPFS, result.Upload.Object.IPFS)
+	result.CID = pin.CID
+	result.Provider = pin.Provider
+	if pin.Target != "" {
+		result.Target = pin.Target
+	}
+	if pin.GatewayURL != "" {
+		result.GatewayURL = pin.GatewayURL
+	}
+	if result.CID == "" {
+		result.Warnings = append(result.Warnings, "upload response did not include IPFS CID metadata")
+	}
+	if result.GatewayURL == "" {
+		result.Warnings = append(result.Warnings, "upload response did not include a gateway URL")
+	}
+	if !*skipRefresh && result.ObjectID > 0 {
+		refreshReq := map[string]any{"object_id": result.ObjectID, "target": result.Target}
+		refreshRaw, err := c.doJSONRaw(http.MethodPost, "/api/v1/ipfs/pins/refresh", refreshReq)
+		if err != nil {
+			result.Warnings = append(result.Warnings, "pin refresh failed: "+err.Error())
+		} else {
+			var refresh ipfsSmokeRefreshResponse
+			if err := json.Unmarshal(refreshRaw, &refresh); err != nil {
+				return err
+			}
+			result.Refresh = &refresh
+		}
+	}
+	if result.GatewayURL != "" {
+		probeClient, err := gatewayProbeClient(*proxyURL)
+		if err != nil {
+			return err
+		}
+		result.Probes = append(result.Probes, probeURL(probeClient, "head", http.MethodHead, result.GatewayURL, "", *timeout))
+		if !*skipRange {
+			result.Probes = append(result.Probes, probeURL(probeClient, "range", http.MethodGet, result.GatewayURL, "bytes=0-1048575", *timeout))
+		}
+		for i := 1; i <= *downloadRuns; i++ {
+			name := "get"
+			if *downloadRuns > 1 {
+				name = fmt.Sprintf("get_%d", i)
+			}
+			result.Probes = append(result.Probes, probeURL(probeClient, name, http.MethodGet, result.GatewayURL, "", *timeout))
+		}
+	}
+	result.Status = "ok"
+	for _, probe := range result.Probes {
+		if probe.Error != "" || probe.HTTPStatus >= 400 {
+			result.Status = "partial"
+			break
+		}
+	}
+	if *cleanup {
+		deletePath := "/api/v1/asset-buckets/" + url.PathEscape(result.Bucket) + "?force=true&delete_objects=true&delete_remote=true"
+		deleteRaw, err := c.doRaw(http.MethodDelete, deletePath, nil, "")
+		if err != nil {
+			result.Status = "partial"
+			result.Warnings = append(result.Warnings, "cleanup failed: "+err.Error())
+		} else {
+			result.DeletedBucket = json.RawMessage(deleteRaw)
+		}
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	return printJSON(raw)
+}
+
+func ipfsWebSmoke(c client, args []string) error {
+	fs := flag.NewFlagSet("ipfs-web-smoke", flag.ExitOnError)
+	file := fs.String("file", "", "optional asset file to include in the test site")
+	site := fs.String("site", "", "site id; defaults to ipfs-web-smoke-<timestamp>")
+	assetPath := fs.String("asset-path", "", "asset path inside the site; defaults to assets/ipfs-smoke-<timestamp>.<ext>")
+	profile := fs.String("profile", "ipfs_archive", "IPFS route profile")
+	target := fs.String("target", "ipfs_pinata", "IPFS storage target for status display")
+	cleanup := fs.Bool("cleanup", false, "delete the preview deployment after probes")
+	skipStatus := fs.Bool("skip-status", false, "skip IPFS provider status check")
+	skipRange := fs.Bool("skip-range", false, "skip Range GET probe")
+	downloadRuns := fs.Int("download-runs", 1, "number of full GET probes against the gateway URL")
+	proxyURL := fs.String("proxy-url", "", "optional HTTP proxy URL for gateway probes")
+	timeout := fs.Duration("timeout", 30*time.Minute, "maximum time to wait for deployment and gateway probes")
+	_ = fs.Parse(args)
+
+	now := time.Now().UTC()
+	if strings.TrimSpace(*site) == "" {
+		*site = "ipfs-web-smoke-" + now.Format("20060102150405")
+	}
+	dir, cleanupDir, resolvedAssetPath, size, err := prepareIPFSWebSmokeDir(*file, *assetPath, now)
+	if err != nil {
+		return err
+	}
+	defer cleanupDir()
+
+	result := ipfsWebSmokeResult{
+		Status:       "running",
+		Site:         cleanWorkerName(*site),
+		Cleanup:      *cleanup,
+		File:         strings.TrimSpace(*file),
+		SizeBytes:    size,
+		AssetPath:    resolvedAssetPath,
+		RouteProfile: strings.TrimSpace(*profile),
+		Target:       strings.TrimSpace(*target),
+	}
+	if result.Site == "" {
+		return errors.New("-site must contain at least one alphanumeric character")
+	}
+	if !*skipStatus {
+		statusPath := "/api/v1/ipfs/status"
+		if result.Target != "" {
+			statusPath += "?target=" + url.QueryEscape(result.Target)
+		}
+		raw, err := c.doRaw(http.MethodGet, statusPath, nil, "")
+		if err != nil {
+			return err
+		}
+		result.ProviderStatus = json.RawMessage(raw)
+	}
+	if _, err := c.doJSONRaw(http.MethodPost, "/api/v1/sites", map[string]any{
+		"id":                  result.Site,
+		"route_profile":       result.RouteProfile,
+		"deployment_target":   "origin_assisted",
+		"mode":                "standard",
+		"skip_default_domain": true,
+	}); err != nil {
+		return err
+	}
+	dep, err := createAndWaitSiteDeployment(c, result.Site, siteDeploymentUploadOptions{
+		Dir:              dir,
+		Environment:      "preview",
+		RouteProfile:     result.RouteProfile,
+		DeploymentTarget: "origin_assisted",
+		Promote:          false,
+		Pinned:           !*cleanup,
+		Timeout:          *timeout,
+	})
+	if err != nil {
+		return err
+	}
+	result.Deployment = dep
+	result.DeploymentID = dep.ID
+	result.PreviewURL = absoluteCLIURL(c.baseURL, dep.PreviewURL)
+	result.AssetURL = absoluteCLIURL(c.baseURL, "/p/"+result.Site+"/"+dep.ID+"/"+result.AssetPath)
+
+	manifestRaw, err := c.doRaw(http.MethodGet, "/api/v1/sites/"+url.PathEscape(result.Site)+"/deployments/"+url.PathEscape(dep.ID)+"/edge-manifest", nil, "")
+	if err != nil {
+		return err
+	}
+	var manifest ipfsWebSmokeManifest
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		return err
+	}
+	route := manifest.Routes["/"+result.AssetPath]
+	result.ManifestRoute = route
+	if route.Type != "ipfs" {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("edge manifest asset route type is %q, expected ipfs", route.Type))
+	}
+	pin := firstIPFSSmokePin(route.IPFS)
+	result.CID = pin.CID
+	result.Provider = pin.Provider
+	if pin.Target != "" {
+		result.Target = pin.Target
+	}
+	result.GatewayURL = firstNonEmpty(route.Location, firstString(route.GatewayFallbacks), pin.GatewayURL)
+	if result.CID == "" {
+		result.Warnings = append(result.Warnings, "edge manifest route did not include IPFS CID metadata")
+	}
+	if result.GatewayURL == "" {
+		result.Warnings = append(result.Warnings, "edge manifest route did not include a gateway URL")
+	}
+
+	probeClient, err := gatewayProbeClient(*proxyURL)
+	if err != nil {
+		return err
+	}
+	noRedirect := noRedirectClient(probeClient)
+	if result.PreviewURL != "" {
+		result.Probes = append(result.Probes, probeURL(noRedirect, "site_root", http.MethodGet, result.PreviewURL, "", *timeout))
+	}
+	if result.AssetURL != "" {
+		result.Probes = append(result.Probes, probeURL(noRedirect, "site_asset_first_hop", http.MethodHead, result.AssetURL, "", *timeout))
+	}
+	if result.GatewayURL != "" {
+		result.Probes = append(result.Probes, probeURL(probeClient, "gateway_head", http.MethodHead, result.GatewayURL, "", *timeout))
+		if !*skipRange {
+			result.Probes = append(result.Probes, probeURL(probeClient, "gateway_range", http.MethodGet, result.GatewayURL, "bytes=0-1048575", *timeout))
+		}
+		for i := 1; i <= *downloadRuns; i++ {
+			name := "gateway_get"
+			if *downloadRuns > 1 {
+				name = fmt.Sprintf("gateway_get_%d", i)
+			}
+			result.Probes = append(result.Probes, probeURL(probeClient, name, http.MethodGet, result.GatewayURL, "", *timeout))
+		}
+	}
+
+	result.Status = ipfsSmokeStatus(result.Probes, result.Warnings)
+	if *cleanup && dep.ID != "" {
+		deleteRaw, err := c.doRaw(http.MethodDelete, "/api/v1/sites/"+url.PathEscape(result.Site)+"/deployments/"+url.PathEscape(dep.ID)+"?delete_objects=true&delete_remote=true", nil, "")
+		if err != nil {
+			result.Status = "partial"
+			result.Warnings = append(result.Warnings, "cleanup failed: "+err.Error())
+		} else {
+			result.Deleted = json.RawMessage(deleteRaw)
+		}
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	return printJSON(raw)
+}
+
+func firstIPFSSmokePin(groups ...[]ipfsSmokePin) ipfsSmokePin {
+	for _, pins := range groups {
+		for _, pin := range pins {
+			if pin.CID != "" || pin.GatewayURL != "" {
+				return pin
+			}
+		}
+	}
+	return ipfsSmokePin{}
+}
+
+func defaultIPFSSmokePath(file string, now time.Time) string {
+	ext := strings.ToLower(filepath.Ext(file))
+	base := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
+	base = strings.Trim(regexp.MustCompile(`[^A-Za-z0-9._-]+`).ReplaceAllString(base, "-"), "-._")
+	if base == "" {
+		base = "file"
+	}
+	return "smoke/" + now.Format("20060102T150405Z") + "-" + base + ext
+}
+
+func prepareIPFSWebSmokeDir(file, assetPath string, now time.Time) (string, func(), string, int64, error) {
+	dir, err := os.MkdirTemp("", "supercdn-ipfs-web-smoke-*")
+	if err != nil {
+		return "", nil, "", 0, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	assetPath = strings.Trim(strings.ReplaceAll(strings.TrimSpace(assetPath), "\\", "/"), "/")
+	if assetPath == "" {
+		assetPath = defaultIPFSWebSmokeAssetPath(file, now)
+	}
+	if strings.Contains(assetPath, "..") {
+		cleanup()
+		return "", nil, "", 0, fmt.Errorf("asset path must not contain ..")
+	}
+	targetPath := filepath.Join(dir, filepath.FromSlash(assetPath))
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		cleanup()
+		return "", nil, "", 0, err
+	}
+	var size int64
+	if strings.TrimSpace(file) != "" {
+		info, err := os.Stat(file)
+		if err != nil {
+			cleanup()
+			return "", nil, "", 0, err
+		}
+		if info.IsDir() {
+			cleanup()
+			return "", nil, "", 0, fmt.Errorf("%s is a directory", file)
+		}
+		src, err := os.Open(file)
+		if err != nil {
+			cleanup()
+			return "", nil, "", 0, err
+		}
+		defer src.Close()
+		dst, err := os.Create(targetPath)
+		if err != nil {
+			cleanup()
+			return "", nil, "", 0, err
+		}
+		n, copyErr := io.Copy(dst, src)
+		closeErr := dst.Close()
+		if copyErr != nil {
+			cleanup()
+			return "", nil, "", 0, copyErr
+		}
+		if closeErr != nil {
+			cleanup()
+			return "", nil, "", 0, closeErr
+		}
+		size = n
+	} else {
+		payload := []byte("supercdn ipfs web smoke " + now.Format(time.RFC3339Nano) + "\n")
+		if err := os.WriteFile(targetPath, payload, 0o644); err != nil {
+			cleanup()
+			return "", nil, "", 0, err
+		}
+		size = int64(len(payload))
+	}
+	index := "<!doctype html><html><head><meta charset=\"utf-8\"><title>IPFS Web Smoke</title></head><body><a href=\"" + assetPath + "\">asset</a></body></html>"
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(index), 0o644); err != nil {
+		cleanup()
+		return "", nil, "", 0, err
+	}
+	return dir, cleanup, assetPath, size, nil
+}
+
+func defaultIPFSWebSmokeAssetPath(file string, now time.Time) string {
+	ext := strings.ToLower(filepath.Ext(file))
+	if ext == "" {
+		ext = ".txt"
+	}
+	return "assets/ipfs-smoke-" + now.Format("20060102T150405Z") + ext
+}
+
+func gatewayProbeClient(proxyRaw string) (*http.Client, error) {
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	proxyRaw = strings.TrimSpace(proxyRaw)
+	if proxyRaw != "" {
+		u, err := url.Parse(proxyRaw)
+		if err != nil {
+			return nil, err
+		}
+		transport.Proxy = http.ProxyURL(u)
+	}
+	return &http.Client{Transport: transport}, nil
+}
+
+func noRedirectClient(base *http.Client) *http.Client {
+	if base == nil {
+		base = http.DefaultClient
+	}
+	copyClient := *base
+	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &copyClient
+}
+
+func probeURL(client *http.Client, name, method, targetURL, rangeHeader string, timeout time.Duration) ipfsSmokeProbeResult {
+	result := ipfsSmokeProbeResult{Name: name, Method: method, URL: targetURL, Range: rangeHeader}
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	if rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	latency := time.Since(start)
+	result.LatencyMS = latency.Milliseconds()
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	defer resp.Body.Close()
+	result.HTTPStatus = resp.StatusCode
+	result.Location = resp.Header.Get("Location")
+	result.CacheControl = resp.Header.Get("Cache-Control")
+	result.ContentType = resp.Header.Get("Content-Type")
+	result.AcceptRanges = resp.Header.Get("Accept-Ranges")
+	if method == http.MethodHead {
+		result.Bytes = resp.ContentLength
+		return result
+	}
+	n, err := io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		result.Error = err.Error()
+	}
+	result.Bytes = n
+	if latency > 0 {
+		result.SpeedBytesPS = int64(float64(n) / latency.Seconds())
+	}
+	return result
+}
+
+func ipfsSmokeStatus(probes []ipfsSmokeProbeResult, warnings []string) string {
+	if len(warnings) > 0 {
+		return "partial"
+	}
+	for _, probe := range probes {
+		if probe.Error != "" || probe.HTTPStatus >= 400 {
+			return "partial"
+		}
+	}
+	return "ok"
+}
+
+func absoluteCLIURL(baseURL, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || isHTTPURL(value) {
+		return value
+	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return value
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	return baseURL + value
+}
+
+func isHTTPURL(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
 }
 
 func syncSiteDNS(c client, args []string) error {
@@ -749,6 +1395,9 @@ func deploySite(c client, args []string) error {
 	timeout := fs.Duration("timeout", 30*time.Minute, "maximum time to wait")
 	profile := fs.String("profile", "", "route profile override")
 	target := fs.String("target", "", "deployment target override: origin_assisted, cloudflare_static, or hybrid_edge")
+	routingPolicy := fs.String("routing-policy", "", "routing policy override; requires matching multi-source route profile")
+	resourceFailover := fs.Bool("resource-failover", false, "enable explicit Web resource failover between route-profile storage targets")
+	entryOriginFallback := fs.Bool("entry-origin-fallback", false, "temporarily fall back entry HTML/SPAs to Go origin when Cloudflare entry fails")
 	domains := fs.String("domains", "", "comma-separated custom domains when -target cloudflare_static or hybrid_edge")
 	staticName := fs.String("static-name", "", "Worker name when -target cloudflare_static; defaults to supercdn-{site}-static")
 	edgeName := fs.String("edge-name", "", "Worker name when -target hybrid_edge; defaults to supercdn-{site}-edge")
@@ -766,6 +1415,8 @@ func deploySite(c client, args []string) error {
 	edgeKVNamespace := fs.String("edge-kv-namespace", "supercdn-edge-manifest", "Cloudflare Workers KV namespace title for hybrid_edge edge manifests")
 	edgeManifestMode := fs.String("edge-manifest-mode", "route", "hybrid_edge Worker manifest mode: route or enforce")
 	edgeDefaultCacheControl := fs.String("edge-default-cache-control", "public, max-age=300", "default Cache-Control for hybrid_edge Worker fallback responses")
+	edgeCandidateWait := fs.Bool("edge-candidate-wait", true, "wait for routing-policy/resource-failover candidates before publishing hybrid_edge edge manifest")
+	edgeCandidateTimeout := fs.Duration("edge-candidate-timeout", 10*time.Minute, "maximum time to wait for hybrid_edge routing/failover candidates")
 	_ = fs.Parse(args)
 	if *site == "" {
 		return errors.New("-site is required")
@@ -805,7 +1456,13 @@ func deploySite(c client, args []string) error {
 			}
 		}
 	}
+	if *entryOriginFallback && resolvedTarget != "hybrid_edge" {
+		return errors.New("entry origin fallback is only supported for hybrid_edge deployments")
+	}
 	if resolvedTarget == "cloudflare_static" {
+		if *resourceFailover {
+			return errors.New("resource failover is not supported for cloudflare_static deployments")
+		}
 		if *dir == "" {
 			return errors.New("cloudflare_static deploy-site requires -dir")
 		}
@@ -818,6 +1475,8 @@ func deploySite(c client, args []string) error {
 			Environment:       *env,
 			RouteProfile:      resolvedProfile,
 			DeploymentTarget:  resolvedTarget,
+			RoutingPolicy:     strings.TrimSpace(*routingPolicy),
+			ResourceFailover:  false,
 			Domains:           resolvedDomains,
 			WorkerName:        *staticName,
 			CompatibilityDate: *compatDate,
@@ -846,6 +1505,9 @@ func deploySite(c client, args []string) error {
 			Environment:         *env,
 			RouteProfile:        resolvedProfile,
 			DeploymentTarget:    resolvedTarget,
+			RoutingPolicy:       strings.TrimSpace(*routingPolicy),
+			ResourceFailover:    *resourceFailover,
+			EntryOriginFallback: *entryOriginFallback,
 			Domains:             resolvedDomains,
 			WorkerName:          *edgeName,
 			CompatibilityDate:   *compatDate,
@@ -864,6 +1526,8 @@ func deploySite(c client, args []string) error {
 			KVNamespace:         *edgeKVNamespace,
 			ManifestMode:        *edgeManifestMode,
 			DefaultCacheControl: *edgeDefaultCacheControl,
+			CandidateWait:       *edgeCandidateWait,
+			CandidateTimeout:    *edgeCandidateTimeout,
 		})
 	}
 	artifact := *bundle
@@ -882,6 +1546,8 @@ func deploySite(c client, args []string) error {
 	fields := map[string]string{
 		"route_profile":     resolvedProfile,
 		"deployment_target": resolvedTarget,
+		"routing_policy":    strings.TrimSpace(*routingPolicy),
+		"resource_failover": fmt.Sprint(*resourceFailover),
 		"environment":       *env,
 		"promote":           fmt.Sprint(*promote),
 		"pinned":            fmt.Sprint(*pinned),
@@ -944,6 +1610,8 @@ type cloudflareStaticDeploySiteOptions struct {
 	Environment       string
 	RouteProfile      string
 	DeploymentTarget  string
+	RoutingPolicy     string
+	ResourceFailover  bool
 	Domains           []string
 	WorkerName        string
 	CompatibilityDate string
@@ -1010,6 +1678,8 @@ func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions
 		"environment":         opts.Environment,
 		"route_profile":       opts.RouteProfile,
 		"deployment_target":   "cloudflare_static",
+		"routing_policy":      opts.RoutingPolicy,
+		"resource_failover":   opts.ResourceFailover,
 		"worker_name":         workerName,
 		"version_id":          extractCloudflareVersionID(publish.Output),
 		"domains":             opts.Domains,
@@ -1035,6 +1705,9 @@ type hybridEdgeDeploySiteOptions struct {
 	Environment         string
 	RouteProfile        string
 	DeploymentTarget    string
+	RoutingPolicy       string
+	ResourceFailover    bool
+	EntryOriginFallback bool
 	Domains             []string
 	WorkerName          string
 	CompatibilityDate   string
@@ -1053,6 +1726,8 @@ type hybridEdgeDeploySiteOptions struct {
 	KVNamespace         string
 	ManifestMode        string
 	DefaultCacheControl string
+	CandidateWait       bool
+	CandidateTimeout    time.Duration
 }
 
 type siteDeploymentResult struct {
@@ -1061,6 +1736,8 @@ type siteDeploymentResult struct {
 	Status           string   `json:"status"`
 	RouteProfile     string   `json:"route_profile"`
 	DeploymentTarget string   `json:"deployment_target"`
+	RoutingPolicy    string   `json:"routing_policy,omitempty"`
+	ResourceFailover bool     `json:"resource_failover"`
 	Active           bool     `json:"active"`
 	ProductionURL    string   `json:"production_url,omitempty"`
 	ProductionURLs   []string `json:"production_urls,omitempty"`
@@ -1119,12 +1796,34 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 		Environment:      opts.Environment,
 		RouteProfile:     opts.RouteProfile,
 		DeploymentTarget: opts.DeploymentTarget,
+		RoutingPolicy:    opts.RoutingPolicy,
+		ResourceFailover: opts.ResourceFailover,
 		Promote:          opts.Promote,
 		Pinned:           opts.Pinned,
 		Timeout:          opts.Timeout,
 	})
 	if err != nil {
 		return err
+	}
+	routingPolicy := firstNonEmpty(dep.RoutingPolicy, opts.RoutingPolicy)
+	resourceFailover := dep.ResourceFailover || opts.ResourceFailover
+	if opts.CandidateWait && (strings.TrimSpace(routingPolicy) != "" || resourceFailover) {
+		mode := "resource_failover"
+		if strings.TrimSpace(routingPolicy) != "" {
+			mode = "routing_policy"
+		}
+		report, err := c.waitEdgeManifestCandidates(edgeManifestCandidateWaitOptions{
+			Site:          opts.Site,
+			Deployment:    dep.ID,
+			Mode:          mode,
+			MinCandidates: 2,
+			Timeout:       opts.CandidateTimeout,
+		})
+		if err != nil {
+			raw, _ := json.Marshal(report)
+			_ = printJSON(raw)
+			return err
+		}
 	}
 	edgeManifest, err := c.publishEdgeManifestForDeployment(edgeManifestPublishOptions{
 		Site:          opts.Site,
@@ -1158,6 +1857,7 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 		KVNamespaceID:       edgeManifest.KVNamespaceID,
 		ManifestMode:        firstNonEmpty(opts.ManifestMode, "route"),
 		DefaultCacheControl: firstNonEmpty(opts.DefaultCacheControl, "public, max-age=300"),
+		EntryOriginFallback: opts.EntryOriginFallback,
 		OriginBaseURL:       c.baseURL,
 		EnvFile:             "configs/private/cloudflare.env",
 		Wrangler:            "npx",
@@ -1210,6 +1910,8 @@ type siteDeploymentUploadOptions struct {
 	Environment      string
 	RouteProfile     string
 	DeploymentTarget string
+	RoutingPolicy    string
+	ResourceFailover bool
 	Promote          bool
 	Pinned           bool
 	Timeout          time.Duration
@@ -1224,6 +1926,8 @@ func createAndWaitSiteDeployment(c client, site string, opts siteDeploymentUploa
 	fields := map[string]string{
 		"route_profile":     opts.RouteProfile,
 		"deployment_target": opts.DeploymentTarget,
+		"routing_policy":    opts.RoutingPolicy,
+		"resource_failover": fmt.Sprint(opts.ResourceFailover),
 		"environment":       opts.Environment,
 		"promote":           fmt.Sprint(opts.Promote),
 		"pinned":            fmt.Sprint(opts.Pinned),
@@ -1287,6 +1991,194 @@ func (c client) publishEdgeManifestForDeployment(opts edgeManifestPublishOptions
 	return resp, nil
 }
 
+type edgeManifestCandidateWaitOptions struct {
+	Site          string
+	Deployment    string
+	Mode          string
+	MinCandidates int
+	Timeout       time.Duration
+}
+
+type edgeManifestCandidateWaitReport struct {
+	Status           string                             `json:"status"`
+	SiteID           string                             `json:"site_id,omitempty"`
+	DeploymentID     string                             `json:"deployment_id,omitempty"`
+	Mode             string                             `json:"mode"`
+	MinCandidates    int                                `json:"min_candidates"`
+	Attempts         int                                `json:"attempts"`
+	RequiredRoutes   int                                `json:"required_routes"`
+	ReadyRoutes      int                                `json:"ready_routes"`
+	LastCheckedAtUTC string                             `json:"last_checked_at_utc,omitempty"`
+	Routes           []edgeManifestCandidateRouteStatus `json:"routes,omitempty"`
+	ManifestWarnings []string                           `json:"manifest_warnings,omitempty"`
+	Warnings         []string                           `json:"warnings,omitempty"`
+}
+
+type edgeManifestCandidateRouteStatus struct {
+	Path               string `json:"path"`
+	Type               string `json:"type,omitempty"`
+	Delivery           string `json:"delivery,omitempty"`
+	File               string `json:"file,omitempty"`
+	Status             int    `json:"status,omitempty"`
+	Candidates         int    `json:"candidates"`
+	ReadyCandidates    int    `json:"ready_candidates"`
+	RequiredCandidates int    `json:"required_candidates"`
+	OK                 bool   `json:"ok"`
+	Message            string `json:"message,omitempty"`
+}
+
+type edgeManifestCandidateManifest struct {
+	SiteID       string                                `json:"site_id"`
+	DeploymentID string                                `json:"deployment_id"`
+	Routes       map[string]edgeManifestCandidateRoute `json:"routes"`
+	Warnings     []string                              `json:"warnings,omitempty"`
+}
+
+type edgeManifestCandidateRoute struct {
+	Type       string                       `json:"type"`
+	Delivery   string                       `json:"delivery"`
+	File       string                       `json:"file"`
+	Status     int                          `json:"status"`
+	Candidates []edgeManifestCandidateEntry `json:"candidates,omitempty"`
+}
+
+type edgeManifestCandidateEntry struct {
+	Target string `json:"target"`
+	Type   string `json:"type,omitempty"`
+	Status string `json:"status,omitempty"`
+	URL    string `json:"url,omitempty"`
+}
+
+func (c client) waitEdgeManifestCandidates(opts edgeManifestCandidateWaitOptions) (edgeManifestCandidateWaitReport, error) {
+	if opts.Timeout <= 0 {
+		opts.Timeout = 10 * time.Minute
+	}
+	if opts.MinCandidates <= 0 {
+		opts.MinCandidates = 2
+	}
+	deadline := time.Now().Add(opts.Timeout)
+	var report edgeManifestCandidateWaitReport
+	attempts := 0
+	for {
+		attempts++
+		raw, err := c.doRaw(http.MethodGet, "/api/v1/sites/"+url.PathEscape(opts.Site)+"/deployments/"+url.PathEscape(opts.Deployment)+"/edge-manifest", nil, "")
+		if err != nil {
+			return report, err
+		}
+		report, err = edgeManifestCandidateReadiness(raw, opts.Mode, opts.MinCandidates)
+		if err != nil {
+			return report, err
+		}
+		report.Attempts = attempts
+		if report.Status == "ok" {
+			return report, nil
+		}
+		if time.Now().After(deadline) {
+			if report.Status == "" {
+				report.Status = "timeout"
+			}
+			return report, fmt.Errorf("edge manifest %s candidates did not become ready before timeout", opts.Mode)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func edgeManifestCandidateReadiness(raw []byte, mode string, minCandidates int) (edgeManifestCandidateWaitReport, error) {
+	if minCandidates <= 0 {
+		minCandidates = 2
+	}
+	mode = strings.TrimSpace(mode)
+	var manifest edgeManifestCandidateManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return edgeManifestCandidateWaitReport{}, err
+	}
+	report := edgeManifestCandidateWaitReport{
+		Status:           "ok",
+		SiteID:           manifest.SiteID,
+		DeploymentID:     manifest.DeploymentID,
+		Mode:             mode,
+		MinCandidates:    minCandidates,
+		LastCheckedAtUTC: time.Now().UTC().Format(time.RFC3339Nano),
+		ManifestWarnings: manifest.Warnings,
+	}
+	paths := make([]string, 0, len(manifest.Routes))
+	for pathValue := range manifest.Routes {
+		paths = append(paths, pathValue)
+	}
+	sort.Strings(paths)
+	for _, pathValue := range paths {
+		route := manifest.Routes[pathValue]
+		if !edgeManifestRouteNeedsCandidates(route) {
+			continue
+		}
+		status := edgeManifestCandidateRouteStatus{
+			Path:               pathValue,
+			Type:               route.Type,
+			Delivery:           route.Delivery,
+			File:               route.File,
+			Status:             route.Status,
+			Candidates:         len(route.Candidates),
+			ReadyCandidates:    edgeManifestReadyCandidateCount(route.Candidates),
+			RequiredCandidates: minCandidates,
+		}
+		switch mode {
+		case "routing_policy":
+			status.OK = route.Type == "smart" && status.ReadyCandidates >= minCandidates
+			if !status.OK {
+				status.Message = fmt.Sprintf("expected smart route with at least %d ready candidates", minCandidates)
+			}
+		case "resource_failover":
+			status.OK = route.Type == "failover" && status.ReadyCandidates >= minCandidates
+			if !status.OK {
+				status.Message = fmt.Sprintf("expected failover route with at least %d ready candidates", minCandidates)
+			}
+		default:
+			status.OK = status.ReadyCandidates >= minCandidates
+			if !status.OK {
+				status.Message = fmt.Sprintf("expected at least %d ready candidates", minCandidates)
+			}
+		}
+		report.RequiredRoutes++
+		if status.OK {
+			report.ReadyRoutes++
+		} else {
+			report.Status = "pending"
+		}
+		report.Routes = append(report.Routes, status)
+	}
+	if report.RequiredRoutes == 0 {
+		report.Warnings = append(report.Warnings, "edge manifest has no non-entry resource routes that require candidates")
+	}
+	return report, nil
+}
+
+func edgeManifestRouteNeedsCandidates(route edgeManifestCandidateRoute) bool {
+	if route.Type == "smart" || route.Type == "failover" {
+		return true
+	}
+	if strings.EqualFold(route.Delivery, "origin") {
+		return false
+	}
+	if route.Delivery == "" {
+		return false
+	}
+	return !strings.EqualFold(route.File, "index.html")
+}
+
+func edgeManifestReadyCandidateCount(candidates []edgeManifestCandidateEntry) int {
+	count := 0
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.URL) == "" {
+			continue
+		}
+		if status := strings.TrimSpace(candidate.Status); status != "" && !strings.EqualFold(status, "ready") {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
 type hybridEdgePublishOptions struct {
 	Site                string
 	WorkerName          string
@@ -1299,6 +2191,7 @@ type hybridEdgePublishOptions struct {
 	KVNamespaceID       string
 	ManifestMode        string
 	DefaultCacheControl string
+	EntryOriginFallback bool
 	OriginBaseURL       string
 	EnvFile             string
 	Wrangler            string
@@ -1351,6 +2244,7 @@ func runHybridEdgePublish(opts hybridEdgePublishOptions) (cloudflareStaticPublis
 		KVNamespaceID:       opts.KVNamespaceID,
 		ManifestMode:        opts.ManifestMode,
 		DefaultCacheControl: opts.DefaultCacheControl,
+		EntryOriginFallback: opts.EntryOriginFallback,
 		OriginBaseURL:       opts.OriginBaseURL,
 	})
 	if err != nil {
@@ -1399,6 +2293,7 @@ type hybridEdgeWranglerConfigOptions struct {
 	KVNamespaceID       string
 	ManifestMode        string
 	DefaultCacheControl string
+	EntryOriginFallback bool
 	OriginBaseURL       string
 }
 
@@ -1419,9 +2314,11 @@ func writeHybridEdgeWranglerConfig(opts hybridEdgeWranglerConfigOptions) (string
 	b.WriteString("[vars]\n")
 	b.WriteString("ORIGIN_BASE_URL = " + tomlString(firstNonEmpty(opts.OriginBaseURL, "https://origin.example.com")) + "\n")
 	b.WriteString("EDGE_DEFAULT_CACHE_CONTROL = " + tomlString(firstNonEmpty(opts.DefaultCacheControl, "public, max-age=300")) + "\n")
+	b.WriteString("EDGE_ENTRY_ORIGIN_FALLBACK = " + tomlString(strconv.FormatBool(opts.EntryOriginFallback)) + "\n")
 	b.WriteString("EDGE_MANIFEST_DRY_RUN = \"true\"\n")
 	b.WriteString("EDGE_MANIFEST_KEY_PREFIX = \"sites/\"\n")
 	b.WriteString("EDGE_MANIFEST_MODE = " + tomlString(firstNonEmpty(opts.ManifestMode, "route")) + "\n")
+	b.WriteString("EDGE_ORIGIN_FALLBACK = \"false\"\n")
 	b.WriteString("EDGE_STATIC_ASSETS = \"true\"\n\n")
 	b.WriteString("[assets]\n")
 	b.WriteString("directory = " + tomlPathString(opts.AssetsDir) + "\n")
@@ -2653,11 +3550,16 @@ func deleteDeployment(c client, args []string) error {
 	fs := flag.NewFlagSet("delete-deployment", flag.ExitOnError)
 	site := fs.String("site", "", "site id")
 	deployment := fs.String("deployment", "", "deployment id")
+	deleteObjects := fs.Bool("delete-objects", false, "delete tracked deployment objects before deleting deployment metadata")
+	deleteRemote := fs.Bool("delete-remote", true, "delete remote object replicas when -delete-objects is set")
 	_ = fs.Parse(args)
 	if *site == "" || *deployment == "" {
 		return errors.New("-site and -deployment are required")
 	}
-	return c.do(http.MethodDelete, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment), nil, "")
+	q := url.Values{}
+	q.Set("delete_objects", fmt.Sprint(*deleteObjects))
+	q.Set("delete_remote", fmt.Sprint(*deleteRemote))
+	return c.do(http.MethodDelete, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment)+"?"+q.Encode(), nil, "")
 }
 
 func gcSite(c client, args []string) error {
@@ -2705,6 +3607,17 @@ func resourceStatus(c client, args []string) error {
 	return c.do(http.MethodGet, path, nil, "")
 }
 
+func routingPolicyStatus(c client, args []string) error {
+	fs := flag.NewFlagSet("routing-policy-status", flag.ExitOnError)
+	policy := fs.String("policy", "", "routing policy name; empty shows all policies")
+	_ = fs.Parse(args)
+	path := "/api/v1/routing-policies/status"
+	if strings.TrimSpace(*policy) != "" {
+		path += "?policy=" + url.QueryEscape(strings.TrimSpace(*policy))
+	}
+	return c.do(http.MethodGet, path, nil, "")
+}
+
 func healthCheck(c client, args []string) error {
 	fs := flag.NewFlagSet("health-check", flag.ExitOnError)
 	libraries := fs.String("libraries", "", "comma-separated resource library names; empty means all")
@@ -2745,6 +3658,10 @@ func createMobileCDNBucket(c client, args []string) error {
 	return createBucketWithDefaults(c, args, "create-mobile-cdn-bucket", "china_mobile", "public, max-age=86400")
 }
 
+func createIPFSBucket(c client, args []string) error {
+	return createBucketWithDefaults(c, args, "create-ipfs-bucket", "ipfs_archive", "public, max-age=31536000, immutable")
+}
+
 func createDomesticCDNBucket(c client, args []string) error {
 	fs := flag.NewFlagSet("create-domestic-cdn-bucket", flag.ExitOnError)
 	slug := fs.String("slug", "", "bucket slug")
@@ -2752,6 +3669,7 @@ func createDomesticCDNBucket(c client, args []string) error {
 	description := fs.String("description", "", "bucket description")
 	line := fs.String("line", "mobile", "domestic line: mobile, telecom, unicom, or all")
 	profile := fs.String("profile", "", "explicit route profile; overrides -line")
+	routingPolicy := fs.String("routing-policy", "", "routing policy name; requires matching multi-source route profile")
 	types := fs.String("types", "", "comma-separated asset types: image,video,document,archive,other")
 	maxCapacity := fs.Int64("max-capacity", 0, "bucket capacity limit in bytes; 0 means unlimited")
 	maxFileSize := fs.Int64("max-file-size", 0, "single file limit in bytes; 0 means unlimited")
@@ -2773,6 +3691,7 @@ func createDomesticCDNBucket(c client, args []string) error {
 		"name":                  *name,
 		"description":           *description,
 		"route_profile":         routeProfile,
+		"routing_policy":        strings.TrimSpace(*routingPolicy),
 		"allowed_types":         splitCSV(*types),
 		"max_capacity_bytes":    *maxCapacity,
 		"max_file_size_bytes":   *maxFileSize,
@@ -2802,6 +3721,7 @@ func createBucketWithDefaults(c client, args []string, commandName, defaultProfi
 	name := fs.String("name", "", "bucket display name")
 	description := fs.String("description", "", "bucket description")
 	profile := fs.String("profile", defaultProfile, "default route profile")
+	routingPolicy := fs.String("routing-policy", "", "routing policy name; requires matching multi-source route profile")
 	types := fs.String("types", "", "comma-separated asset types: image,video,document,archive,other")
 	maxCapacity := fs.Int64("max-capacity", 0, "bucket capacity limit in bytes; 0 means unlimited")
 	maxFileSize := fs.Int64("max-file-size", 0, "single file limit in bytes; 0 means unlimited")
@@ -2815,6 +3735,7 @@ func createBucketWithDefaults(c client, args []string, commandName, defaultProfi
 		"name":                  *name,
 		"description":           *description,
 		"route_profile":         *profile,
+		"routing_policy":        strings.TrimSpace(*routingPolicy),
 		"allowed_types":         splitCSV(*types),
 		"max_capacity_bytes":    *maxCapacity,
 		"max_file_size_bytes":   *maxFileSize,
@@ -3489,6 +4410,10 @@ func usage() {
   supercdnctl [global flags] bind-domain -site blog -domain-id blog
   supercdnctl [global flags] domain-status -domain blog.sites.qwk.ccwu.cc
   supercdnctl [global flags] cloudflare-status
+  supercdnctl [global flags] ipfs-status
+  supercdnctl [global flags] ipfs-smoke -file ./poster.jpg
+  supercdnctl [global flags] ipfs-web-smoke -file ./poster.jpg
+  supercdnctl [global flags] refresh-ipfs-pins -object-id 1
   supercdnctl [global flags] sync-site-dns -site blog -dry-run
   supercdnctl [global flags] sync-worker-routes -site blog -dry-run
   supercdnctl [global flags] sync-cloudflare-r2 -cloudflare-account cf_business_main -dry-run
@@ -3513,11 +4438,13 @@ func usage() {
   supercdnctl [global flags] init-libraries -dry-run
   supercdnctl [global flags] init-job -id 1
   supercdnctl [global flags] resource-status -library repo_china_all
+  supercdnctl [global flags] routing-policy-status -policy global_smart
   supercdnctl [global flags] health-check -libraries repo_china_all
   supercdnctl [global flags] e2e-probe -profile china_all
   supercdnctl [global flags] create-bucket -slug movie-posters -name 影视海报桶 -profile china_all -types image
   supercdnctl [global flags] create-cdn-bucket -slug movie-posters -name movie-posters -types image
   supercdnctl [global flags] create-domestic-cdn-bucket -slug mobile-posters -line mobile -types image
+  supercdnctl [global flags] create-ipfs-bucket -slug durable-assets -types image,archive
   supercdnctl [global flags] init-bucket -bucket movie-posters
   supercdnctl [global flags] upload-bucket -bucket movie-posters -file poster.jpg -path posters/poster.jpg -warmup
   supercdnctl [global flags] list-bucket -bucket movie-posters

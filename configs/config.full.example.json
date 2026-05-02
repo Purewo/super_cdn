@@ -27,8 +27,11 @@
       "name": "ipfs_pinata",
       "type": "pinata",
       "pinata": {
+        "api_base_url": "https://api.pinata.cloud",
+        "upload_base_url": "https://uploads.pinata.cloud",
         "jwt": "${PINATA_JWT}",
         "gateway_base_url": "https://gateway.pinata.cloud",
+        "group_prefix": "supercdn-",
         "proxy_url": "http://127.0.0.1:10808"
       }
     }
@@ -45,7 +48,8 @@
         "root": "/",
         "use_proxy_url": true,
         "public_base_url": "https://alist.example.com",
-        "proxy_url": ""
+        "proxy_url": "",
+        "network": ""
       }
     },
     {
@@ -59,7 +63,8 @@
         "root": "/",
         "use_proxy_url": true,
         "public_base_url": "http://gameuniverse.top:82",
-        "proxy_url": ""
+        "proxy_url": "",
+        "network": ""
       }
     }
   ],
@@ -158,16 +163,32 @@
   "route_profiles": [
     {
       "name": "overseas",
-      "primary": "overseas_accel",
-      "backups": ["ipfs_pinata", "repo_overseas"],
+      "primary": "repo_overseas",
+      "backups": ["ipfs_pinata"],
       "default_cache_control": "public, max-age=3600, s-maxage=86400",
       "allow_redirect": false,
       "deployment_target": "cloudflare_static"
     },
     {
+      "name": "overseas_r2",
+      "primary": "overseas_accel",
+      "backups": [],
+      "default_cache_control": "public, max-age=31536000, immutable",
+      "allow_redirect": true,
+      "deployment_target": "origin_assisted"
+    },
+    {
+      "name": "ipfs_archive",
+      "primary": "ipfs_pinata",
+      "backups": [],
+      "default_cache_control": "public, max-age=31536000, immutable",
+      "allow_redirect": true,
+      "deployment_target": "origin_assisted"
+    },
+    {
       "name": "china_all",
       "primary": "repo_china_all",
-      "backups": ["overseas_accel", "ipfs_pinata"],
+      "backups": ["repo_overseas", "ipfs_pinata"],
       "default_cache_control": "public, max-age=600, s-maxage=3600",
       "allow_redirect": false,
       "deployment_target": "hybrid_edge"
@@ -175,7 +196,7 @@
     {
       "name": "china_telecom",
       "primary": "repo_china_telecom",
-      "backups": ["overseas_accel", "ipfs_pinata"],
+      "backups": ["repo_overseas", "ipfs_pinata"],
       "default_cache_control": "public, max-age=600, s-maxage=3600",
       "allow_redirect": false,
       "deployment_target": "hybrid_edge"
@@ -183,7 +204,7 @@
     {
       "name": "china_mobile",
       "primary": "repo_china_mobile",
-      "backups": ["overseas_accel", "ipfs_pinata"],
+      "backups": ["repo_overseas", "ipfs_pinata"],
       "default_cache_control": "public, max-age=600, s-maxage=3600",
       "allow_redirect": false,
       "deployment_target": "hybrid_edge"
@@ -191,10 +212,38 @@
     {
       "name": "china_unicom",
       "primary": "repo_china_unicom",
-      "backups": ["overseas_accel", "ipfs_pinata"],
+      "backups": ["repo_overseas", "ipfs_pinata"],
       "default_cache_control": "public, max-age=600, s-maxage=3600",
       "allow_redirect": false,
       "deployment_target": "hybrid_edge"
+    }
+  ],
+  "routing_policies": [
+    {
+      "name": "global_smart",
+      "mode": "global_load_balance",
+      "default_region_group": "overseas",
+      "sources": [
+        {
+          "target": "repo_china_mobile",
+          "region_group": "china",
+          "weight": 1,
+          "priority": 0
+        },
+        {
+          "target": "repo_overseas",
+          "region_group": "overseas",
+          "weight": 1,
+          "priority": 0
+        },
+        {
+          "target": "ipfs_pinata",
+          "region_group": "archive",
+          "weight": 1,
+          "priority": 10,
+          "fallback_only": true
+        }
+      ]
     }
   ],
   "cloudflare": {

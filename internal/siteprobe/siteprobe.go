@@ -557,9 +557,15 @@ func firstStepLooksEdgeManifestRoute(steps []ResponseStep) bool {
 		return false
 	}
 	first := steps[0]
-	return strings.EqualFold(first.SuperCDNEdgeSource, "manifest") &&
-		strings.EqualFold(first.SuperCDNEdgeManifest, "route") &&
-		strings.EqualFold(first.SuperCDNEdgeAction, "route")
+	if !strings.EqualFold(first.SuperCDNEdgeManifest, "route") || !strings.EqualFold(first.SuperCDNEdgeAction, "route") {
+		return false
+	}
+	switch strings.ToLower(first.SuperCDNEdgeSource) {
+	case "manifest", "ipfs_gateway", "resource_failover", "storage":
+		return true
+	default:
+		return false
+	}
 }
 
 func storageSignatureFailureLikely(steps []ResponseStep) bool {

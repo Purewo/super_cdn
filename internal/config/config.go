@@ -17,6 +17,7 @@ type Config struct {
 	MountPoints         []MountPointConfig        `json:"mount_points"`
 	ResourceLibraries   []ResourceLibraryConfig   `json:"resource_libraries"`
 	RouteProfiles       []RouteProfile            `json:"route_profiles"`
+	RoutingPolicies     []RoutingPolicy           `json:"routing_policies"`
 	Cloudflare          CloudflareConfig          `json:"cloudflare"`
 	CloudflareAccounts  []CloudflareAccountConfig `json:"cloudflare_accounts"`
 	CloudflareLibraries []CloudflareLibraryConfig `json:"cloudflare_libraries"`
@@ -88,6 +89,21 @@ type RouteProfile struct {
 	DefaultCacheControl string   `json:"default_cache_control"`
 	AllowRedirect       bool     `json:"allow_redirect"`
 	DeploymentTarget    string   `json:"deployment_target"`
+}
+
+type RoutingPolicy struct {
+	Name               string                `json:"name"`
+	Mode               string                `json:"mode"`
+	DefaultRegionGroup string                `json:"default_region_group"`
+	Sources            []RoutingPolicySource `json:"sources"`
+}
+
+type RoutingPolicySource struct {
+	Target       string `json:"target"`
+	RegionGroup  string `json:"region_group"`
+	Weight       int    `json:"weight,omitempty"`
+	Priority     int    `json:"priority,omitempty"`
+	FallbackOnly bool   `json:"fallback_only,omitempty"`
 }
 
 type StorageConfig struct {
@@ -162,11 +178,15 @@ type AListConfig struct {
 	UseProxyURL   bool   `json:"use_proxy_url"`
 	PublicBaseURL string `json:"public_base_url"`
 	ProxyURL      string `json:"proxy_url"`
+	Network       string `json:"network"`
 }
 
 type PinataConfig struct {
+	APIBaseURL     string `json:"api_base_url"`
+	UploadBaseURL  string `json:"upload_base_url"`
 	JWT            string `json:"jwt"`
 	GatewayBaseURL string `json:"gateway_base_url"`
+	GroupPrefix    string `json:"group_prefix"`
 	ProxyURL       string `json:"proxy_url"`
 }
 
@@ -331,7 +351,83 @@ func (c *Config) ApplyDefaults(baseDir string) error {
 		}
 		p.DeploymentTarget = target
 	}
+	seenRoutingPolicies := map[string]bool{}
+	for i := range c.RoutingPolicies {
+		p := &c.RoutingPolicies[i]
+		p.Name = strings.TrimSpace(p.Name)
+		if p.Name == "" {
+			return fmt.Errorf("routing_policies[%d].name is required", i)
+		}
+		if seenRoutingPolicies[p.Name] {
+			return fmt.Errorf("routing policy %q is duplicated", p.Name)
+		}
+		seenRoutingPolicies[p.Name] = true
+		p.Mode = normalizeRoutingPolicyMode(p.Mode)
+		if p.Mode == "" {
+			return fmt.Errorf("routing policy %q mode must be load_balance, global_accel or global_load_balance", p.Name)
+		}
+		p.DefaultRegionGroup = normalizeRoutingRegionGroup(p.DefaultRegionGroup)
+		if p.DefaultRegionGroup == "" {
+			p.DefaultRegionGroup = "overseas"
+		}
+		if len(p.Sources) < 2 {
+			return fmt.Errorf("routing policy %q requires at least two sources", p.Name)
+		}
+		seen := map[string]bool{}
+		for j := range p.Sources {
+			source := &p.Sources[j]
+			source.Target = strings.TrimSpace(source.Target)
+			if source.Target == "" {
+				return fmt.Errorf("routing policy %q source[%d].target is required", p.Name, j)
+			}
+			if !stores[source.Target] {
+				return fmt.Errorf("routing policy %q references missing source target %q", p.Name, source.Target)
+			}
+			if seen[source.Target] {
+				return fmt.Errorf("routing policy %q duplicates source target %q", p.Name, source.Target)
+			}
+			seen[source.Target] = true
+			source.RegionGroup = normalizeRoutingRegionGroup(source.RegionGroup)
+			if source.RegionGroup == "" {
+				source.RegionGroup = p.DefaultRegionGroup
+			}
+			if source.Weight <= 0 {
+				source.Weight = 1
+			}
+			if source.Priority < 0 {
+				return fmt.Errorf("routing policy %q source %q priority must be non-negative", p.Name, source.Target)
+			}
+		}
+	}
 	return os.MkdirAll(c.Server.DataDir, 0o755)
+}
+
+func normalizeRoutingPolicyMode(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "load_balance", "balance", "lb":
+		return "load_balance"
+	case "global_accel", "global", "geo":
+		return "global_accel"
+	case "global_load_balance", "global_lb", "geo_lb":
+		return "global_load_balance"
+	default:
+		return ""
+	}
+}
+
+func normalizeRoutingRegionGroup(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "china", "cn", "domestic", "mainland":
+		return "china"
+	case "overseas", "global", "intl", "international":
+		return "overseas"
+	case "archive", "ipfs":
+		return "archive"
+	default:
+		return strings.TrimSpace(value)
+	}
 }
 
 func normalizeDeploymentTarget(value string) (string, error) {
@@ -358,6 +454,16 @@ func (c *Config) Profile(name string) (RouteProfile, bool) {
 		}
 	}
 	return RouteProfile{}, false
+}
+
+func (c *Config) RoutingPolicy(name string) (RoutingPolicy, bool) {
+	name = strings.TrimSpace(name)
+	for _, p := range c.RoutingPolicies {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return RoutingPolicy{}, false
 }
 
 func (c *Config) StorageByName(name string) (StorageConfig, bool) {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestResourceLibraryWritesOnlyFirstBinding(t *testing.T) {
@@ -48,6 +49,37 @@ func TestResourceLibraryWritesOnlyFirstBinding(t *testing.T) {
 	}
 	if _, err := second.Stat(ctx, "objects/a.txt"); err == nil {
 		t.Fatal("second binding should not receive batch write")
+	}
+}
+
+func TestResourceLibraryPutWaitsForVerifiedLocator(t *testing.T) {
+	oldAttempts := resourceLibraryPutStatAttempts
+	oldDelay := resourceLibraryPutStatDelay
+	resourceLibraryPutStatAttempts = 3
+	resourceLibraryPutStatDelay = time.Millisecond
+	t.Cleanup(func() {
+		resourceLibraryPutStatAttempts = oldAttempts
+		resourceLibraryPutStatDelay = oldDelay
+	})
+
+	store := &verifyAfterPutStore{name: "binding", statFailures: 1}
+	library, err := NewResourceLibraryStore("repo", []ResourceLibraryBindingStore{{
+		Name:  "binding_path",
+		Store: store,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	locator, err := library.Put(context.Background(), PutOptions{Key: "objects/a.txt", Size: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingName, innerLocator, ok := decodeResourceLocator(locator)
+	if !ok || bindingName != "binding_path" || innerLocator != "https://signed.example/objects/a.txt" {
+		t.Fatalf("locator = %q binding=%q inner=%q ok=%v", locator, bindingName, innerLocator, ok)
+	}
+	if store.statCalls != 2 {
+		t.Fatalf("stat calls = %d", store.statCalls)
 	}
 }
 
@@ -250,3 +282,32 @@ func TestResourceLibraryInitDirsWritesBindingStructure(t *testing.T) {
 		t.Fatalf("marker = %s", raw)
 	}
 }
+
+type verifyAfterPutStore struct {
+	name         string
+	statFailures int
+	statCalls    int
+}
+
+func (s *verifyAfterPutStore) Name() string { return s.name }
+func (s *verifyAfterPutStore) Type() string { return "verify-test" }
+
+func (s *verifyAfterPutStore) Put(context.Context, PutOptions) (string, error) {
+	return "https://unsigned.example/object", nil
+}
+
+func (s *verifyAfterPutStore) Get(context.Context, string, GetOptions) (*ObjectStream, error) {
+	return nil, ErrNotFound
+}
+
+func (s *verifyAfterPutStore) Stat(_ context.Context, key string) (*Stat, error) {
+	s.statCalls++
+	if s.statCalls <= s.statFailures {
+		return nil, ErrNotFound
+	}
+	return &Stat{Locator: "https://signed.example/" + key}, nil
+}
+
+func (s *verifyAfterPutStore) Delete(context.Context, string) error { return nil }
+
+func (s *verifyAfterPutStore) PublicURL(string) string { return "" }
