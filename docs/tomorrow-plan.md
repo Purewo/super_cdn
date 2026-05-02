@@ -6,9 +6,9 @@ Last updated: 2026-05-02 Asia/Shanghai.
 
 The service is still in development mode. There is no need to preserve compatibility with the old static-site deployment flow.
 
-v0.1 is closed as a stable internal milestone. The `v0.1.x` line is feature-frozen and should only receive bug fixes, documentation, operational hardening and regression coverage. New product work starts from the `v0.2` roadmap, with IPFS as the next major feature surface.
+v0.1 and v0.2.0 are closed as stable internal milestones. The `v0.1.x` line remains feature-frozen, and `v0.2.x` should only receive bug fixes, documentation, operational hardening and regression coverage around IPFS/Web hosting. New product work starts from `docs/v0.3-roadmap.md`, with multi-resource-library scheduling, replica repair, smart routing and explicit static-resource failover as the next major feature surface.
 
-Priority note: smart routing/live routing-policy validation is gated on closing IPFS first. IPFS must pass the formal Web-side path (`ipfs-web-smoke`: preview site deployment, edge manifest IPFS route, first Super CDN site hop, gateway probes and cleanup of tracked remote files) and be behaviorally aligned with the existing R2/AList smoke flows before IPFS is used as a smart-routing candidate.
+Next-session priority note: start with the resource capability model, then replica state/repair, then route explanation and explicit failover hardening. Do not start with UI work; the scheduling and replica core should settle first.
 
 Web hosting boundary note: the current product rule is recorded in `docs/web-hosting-boundaries.md`. Go entry delivery is for tests/integration/compatibility; preferred Web hosting is Cloudflare entry plus non-entry resources on AList/OpenList, Cloudflare-native static assets or IPFS/Pinata. R2 remains a CDN/object acceleration line; R2-backed Web hosting is legacy compatibility and not the mainstream path. Static-resource failover must never fall back to Go.
 
