@@ -1108,14 +1108,28 @@ func TestRepairReplicasPostsRepairRequest(t *testing.T) {
 
 func TestRefreshReplicasPostsRefreshRequest(t *testing.T) {
 	var got map[string]any
+	var bucketGot map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/objects/42/replicas/refresh" {
+		switch r.URL.Path {
+		case "/api/v1/objects/42/replicas/refresh":
+			if r.Method != http.MethodPost {
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+			}
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/api/v1/asset-buckets/docs/replicas/refresh":
+			if r.Method != http.MethodPost {
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+			}
+			if err := json.NewDecoder(r.Body).Decode(&bucketGot); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatal(err)
-		}
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	defer srv.Close()
 
@@ -1126,8 +1140,24 @@ func TestRefreshReplicasPostsRefreshRequest(t *testing.T) {
 	if got["target"] != "repo_backup" {
 		t.Fatalf("refresh request = %#v", got)
 	}
-	if err := refreshReplicas(c, []string{"-target", "repo_backup"}); err == nil || !strings.Contains(err.Error(), "-object-id") {
-		t.Fatalf("missing object id error = %v", err)
+	if err := refreshReplicas(c, []string{"-bucket", "docs", "-prefix", "tmp/", "-target", "repo_backup", "-limit", "25"}); err != nil {
+		t.Fatal(err)
+	}
+	if bucketGot["target"] != "repo_backup" || bucketGot["prefix"] != "tmp/" || bucketGot["limit"] != float64(25) || bucketGot["all"] != nil {
+		t.Fatalf("bucket refresh request = %#v", bucketGot)
+	}
+	bucketGot = nil
+	if err := refreshReplicas(c, []string{"-bucket", "docs"}); err != nil {
+		t.Fatal(err)
+	}
+	if bucketGot["all"] != true {
+		t.Fatalf("bucket default refresh request = %#v", bucketGot)
+	}
+	if err := refreshReplicas(c, []string{"-target", "repo_backup"}); err == nil || !strings.Contains(err.Error(), "one of -object-id or -bucket") {
+		t.Fatalf("missing selector error = %v", err)
+	}
+	if err := refreshReplicas(c, []string{"-object-id", "1", "-bucket", "docs"}); err == nil || !strings.Contains(err.Error(), "choose only one") {
+		t.Fatalf("conflicting selector error = %v", err)
 	}
 }
 

@@ -276,7 +276,7 @@ Use `configs/config.full.example.json` as a template and fill environment variab
 - `SUPERCDN_ADMIN_TOKEN`
 
 Route profiles decide the primary storage and backup replicas. Backups are asynchronous jobs.
-Use `refresh-replicas` to recheck remote visibility and refresh signed locator/IPFS metadata; if a replica fails or goes missing, `repair-replicas` can requeue it from the object's route profile without changing the published URL surface.
+Use `refresh-replicas` to recheck remote visibility and refresh signed locator/IPFS metadata for an object or asset bucket; if a replica fails or goes missing, `repair-replicas` can requeue it from the object's route profile without changing the published URL surface.
 
 IPFS/Pinata readiness can be checked without uploading data:
 

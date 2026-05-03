@@ -798,6 +798,127 @@ func TestRefreshObjectReplicasRefreshesIPFSMetadata(t *testing.T) {
 	}
 }
 
+func TestRefreshAssetBucketReplicasDefaultsToAllObjects(t *testing.T) {
+	app := newTestServer(t)
+	fresh := &signedLocatorStore{
+		name:        "fresh",
+		statLocator: "https://fresh.example/assets/a.txt?sig=new",
+	}
+	missing := &signedLocatorStore{
+		name:    "missing",
+		statErr: storage.ErrNotFound,
+	}
+	app.stores = storage.NewManager([]storage.Store{fresh, missing})
+
+	ctx := context.Background()
+	if _, err := app.db.CreateProject(ctx, "bucket-refresh-test"); err != nil {
+		t.Fatal(err)
+	}
+	bucket, err := app.db.CreateAssetBucket(ctx, model.AssetBucket{
+		Slug:         "docs",
+		Name:         "Docs",
+		RouteProfile: "overseas",
+		Status:       model.AssetBucketActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj1, err := app.db.SaveObject(ctx, model.Object{
+		ProjectID:     "bucket-refresh-test",
+		Path:          "docs/a.txt",
+		Key:           "assets/a.txt",
+		RouteProfile:  "overseas",
+		Size:          12,
+		SHA256:        "abc123",
+		ContentType:   "text/plain",
+		CacheControl:  "public, max-age=60",
+		PrimaryTarget: "fresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj2, err := app.db.SaveObject(ctx, model.Object{
+		ProjectID:     "bucket-refresh-test",
+		Path:          "docs/b.txt",
+		Key:           "assets/b.txt",
+		RouteProfile:  "overseas",
+		Size:          12,
+		SHA256:        "def456",
+		ContentType:   "text/plain",
+		CacheControl:  "public, max-age=60",
+		PrimaryTarget: "missing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj1.ID, "fresh", model.ReplicaReady, "https://fresh.example/assets/a.txt?sig=old", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj2.ID, "missing", model.ReplicaReady, "https://missing.example/assets/b.txt?sig=old", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SaveAssetBucketObject(ctx, model.AssetBucketObject{
+		BucketSlug:  bucket.Slug,
+		LogicalPath: "a.txt",
+		ObjectID:    obj1.ID,
+		AssetType:   model.AssetTypeOther,
+		PhysicalKey: obj1.Key,
+		Size:        obj1.Size,
+		SHA256:      obj1.SHA256,
+		ContentType: obj1.ContentType,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SaveAssetBucketObject(ctx, model.AssetBucketObject{
+		BucketSlug:  bucket.Slug,
+		LogicalPath: "b.txt",
+		ObjectID:    obj2.ID,
+		AssetType:   model.AssetTypeOther,
+		PhysicalKey: obj2.Key,
+		Size:        obj2.Size,
+		SHA256:      obj2.SHA256,
+		ContentType: obj2.ContentType,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets/docs/replicas/refresh", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp refreshAssetBucketReplicasResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "partial" || resp.Bucket != "docs" || resp.ObjectCount != 2 || len(resp.Objects) != 2 || len(resp.Errors) != 1 {
+		t.Fatalf("unexpected refresh response: %+v", resp)
+	}
+	byPath := map[string]refreshAssetBucketReplicaObjectResult{}
+	for _, result := range resp.Objects {
+		byPath[result.LogicalPath] = result
+	}
+	if byPath["a.txt"].Status != "ok" || len(byPath["a.txt"].Results) != 1 || !byPath["a.txt"].Results[0].Refreshed || byPath["a.txt"].Results[0].Locator != fresh.statLocator {
+		t.Fatalf("fresh object result = %+v", byPath["a.txt"])
+	}
+	if byPath["b.txt"].Status != "failed" || len(byPath["b.txt"].Results) != 1 || byPath["b.txt"].Results[0].Status != model.ReplicaStale || byPath["b.txt"].Results[0].Error != "remote object not found" {
+		t.Fatalf("missing object result = %+v", byPath["b.txt"])
+	}
+	replicas, err := app.db.Replicas(ctx, obj1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replicas) != 1 || replicas[0].Status != model.ReplicaReady || replicas[0].Locator != fresh.statLocator {
+		t.Fatalf("fresh replicas = %+v", replicas)
+	}
+	replicas, err = app.db.Replicas(ctx, obj2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replicas) != 1 || replicas[0].Status != model.ReplicaStale {
+		t.Fatalf("missing replicas = %+v", replicas)
+	}
+}
+
 func TestIPFSSiteDeploymentRedirectsAssetToGateway(t *testing.T) {
 	var uploadCount int
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

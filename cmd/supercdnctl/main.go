@@ -4061,14 +4061,61 @@ func replicas(c client, args []string) error {
 func refreshReplicas(c client, args []string) error {
 	fs := flag.NewFlagSet("refresh-replicas", flag.ExitOnError)
 	id := fs.String("object-id", "", "object id")
+	bucket := fs.String("bucket", "", "asset bucket slug")
 	target := fs.String("target", "", "optional replica target to refresh")
+	dst := fs.String("path", "", "logical path inside the bucket")
+	paths := fs.String("paths", "", "comma-separated logical paths inside the bucket")
+	prefix := fs.String("prefix", "", "refresh objects whose logical path is under this prefix")
+	all := fs.Bool("all", false, "refresh all tracked objects in the bucket")
+	limit := fs.Int("limit", 0, "maximum objects for prefix selection")
 	_ = fs.Parse(args)
-	if *id == "" {
-		return errors.New("-object-id is required")
+	if strings.TrimSpace(*id) == "" && strings.TrimSpace(*bucket) == "" {
+		return errors.New("one of -object-id or -bucket is required")
 	}
-	return c.doJSON(http.MethodPost, "/api/v1/objects/"+*id+"/replicas/refresh", map[string]any{
+	if strings.TrimSpace(*id) != "" && strings.TrimSpace(*bucket) != "" {
+		return errors.New("choose only one of -object-id or -bucket")
+	}
+	if strings.TrimSpace(*id) != "" {
+		return c.doJSON(http.MethodPost, "/api/v1/objects/"+url.PathEscape(*id)+"/replicas/refresh", map[string]any{
+			"target": strings.TrimSpace(*target),
+		})
+	}
+	exactPaths := splitCSV(*paths)
+	if strings.TrimSpace(*dst) != "" {
+		exactPaths = append([]string{strings.TrimSpace(*dst)}, exactPaths...)
+	}
+	modes := 0
+	if len(exactPaths) > 0 {
+		modes++
+	}
+	if strings.TrimSpace(*prefix) != "" {
+		modes++
+	}
+	if *all {
+		modes++
+	}
+	if modes > 1 {
+		return errors.New("choose only one of -path/-paths, -prefix, or -all")
+	}
+	req := map[string]any{
 		"target": strings.TrimSpace(*target),
-	})
+	}
+	if len(exactPaths) == 1 {
+		req["path"] = exactPaths[0]
+	} else if len(exactPaths) > 1 {
+		req["paths"] = exactPaths
+	} else if strings.TrimSpace(*prefix) != "" {
+		req["prefix"] = strings.TrimSpace(*prefix)
+		if *limit > 0 {
+			req["limit"] = *limit
+		}
+	} else {
+		req["all"] = true
+	}
+	if *all {
+		req["all"] = true
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/asset-buckets/"+url.PathEscape(*bucket)+"/replicas/refresh", req)
 }
 
 func repairReplicas(c client, args []string) error {
@@ -4627,6 +4674,7 @@ func usage() {
   supercdnctl [global flags] job -id 1
   supercdnctl [global flags] replicas -object-id 1
   supercdnctl [global flags] refresh-replicas -object-id 1 -target repo_backup
+  supercdnctl [global flags] refresh-replicas -bucket movie-posters -prefix posters/
   supercdnctl [global flags] repair-replicas -object-id 1 -target repo_backup
   supercdnctl [global flags] purge -urls https://example.com/a.css
   supercdnctl [global flags] purge-site -site blog -dry-run

@@ -159,6 +159,7 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("POST /asset-buckets/{slug}/init", s.handleInitAssetBucket)
 	s.apiMux.HandleFunc("POST /asset-buckets/{slug}/purge", s.handlePurgeAssetBucketCache)
 	s.apiMux.HandleFunc("POST /asset-buckets/{slug}/warmup", s.handleWarmupAssetBucket)
+	s.apiMux.HandleFunc("POST /asset-buckets/{slug}/replicas/refresh", s.handleRefreshAssetBucketReplicas)
 	s.apiMux.HandleFunc("POST /asset-buckets/{slug}/objects", s.handleUploadBucketObject)
 	s.apiMux.HandleFunc("GET /asset-buckets/{slug}/objects", s.handleListBucketObjects)
 	s.apiMux.HandleFunc("DELETE /asset-buckets/{slug}/objects", s.handleDeleteBucketObject)
@@ -859,6 +860,34 @@ type bucketWarmupResult struct {
 	HTTPCode  int    `json:"http_code,omitempty"`
 	LatencyMS int64  `json:"latency_ms,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+type refreshAssetBucketReplicasRequest struct {
+	Target string   `json:"target,omitempty"`
+	Path   string   `json:"path"`
+	Paths  []string `json:"paths"`
+	Prefix string   `json:"prefix"`
+	All    bool     `json:"all"`
+	Limit  int      `json:"limit"`
+}
+
+type refreshAssetBucketReplicaObjectResult struct {
+	BucketSlug  string                       `json:"bucket_slug"`
+	LogicalPath string                       `json:"logical_path"`
+	ObjectID    int64                        `json:"object_id"`
+	Status      string                       `json:"status"`
+	Results     []refreshObjectReplicaResult `json:"results,omitempty"`
+	Errors      []string                     `json:"errors,omitempty"`
+}
+
+type refreshAssetBucketReplicasResponse struct {
+	Status      string                                  `json:"status"`
+	Bucket      string                                  `json:"bucket"`
+	Target      string                                  `json:"target,omitempty"`
+	ObjectCount int                                     `json:"object_count"`
+	Objects     []refreshAssetBucketReplicaObjectResult `json:"objects,omitempty"`
+	Warnings    []string                                `json:"warnings,omitempty"`
+	Errors      []string                                `json:"errors,omitempty"`
 }
 
 type syncCloudflareR2Request struct {
@@ -1808,6 +1837,26 @@ func (s *Server) handleWarmupAssetBucket(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.warmupAssetBucket(r.Context(), bucket, req))
+}
+
+func (s *Server) handleRefreshAssetBucketReplicas(w http.ResponseWriter, r *http.Request) {
+	bucket, ok := s.getAssetBucketForAPI(w, r, cleanBucketSlug(r.PathValue("slug")))
+	if !ok {
+		return
+	}
+	var req refreshAssetBucketReplicasRequest
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Path) == "" && len(req.Paths) == 0 && strings.TrimSpace(req.Prefix) == "" && !req.All {
+		req.All = true
+	}
+	resp, err := s.refreshAssetBucketReplicas(r.Context(), bucket, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleUploadBucketObject(w http.ResponseWriter, r *http.Request) {
@@ -7229,6 +7278,74 @@ func (s *Server) warmupAssetBucket(ctx context.Context, bucket *model.AssetBucke
 		}
 	}
 	return resp
+}
+
+func (s *Server) refreshAssetBucketReplicas(ctx context.Context, bucket *model.AssetBucket, req refreshAssetBucketReplicasRequest) (*refreshAssetBucketReplicasResponse, error) {
+	items, warnings, err := s.assetBucketCacheObjects(ctx, bucket.Slug, assetBucketCacheRequest{
+		Path:   req.Path,
+		Paths:  req.Paths,
+		Prefix: req.Prefix,
+		All:    req.All,
+		Limit:  req.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("no bucket objects selected")
+	}
+	resp := &refreshAssetBucketReplicasResponse{
+		Status:      "ok",
+		Bucket:      bucket.Slug,
+		Target:      strings.TrimSpace(req.Target),
+		ObjectCount: len(items),
+		Warnings:    warnings,
+	}
+	for _, item := range items {
+		result := refreshAssetBucketReplicaObjectResult{
+			BucketSlug:  item.BucketSlug,
+			LogicalPath: item.LogicalPath,
+			ObjectID:    item.ObjectID,
+			Status:      "ok",
+		}
+		obj, err := s.db.GetObject(ctx, item.ObjectID)
+		if err != nil {
+			result.Status = "failed"
+			result.Errors = append(result.Errors, err.Error())
+			resp.Errors = append(resp.Errors, item.LogicalPath+": "+err.Error())
+			resp.Objects = append(resp.Objects, result)
+			continue
+		}
+		refreshed, refreshErr := s.refreshObjectReplicas(ctx, obj, refreshObjectReplicasRequest{Target: req.Target})
+		if refreshErr != nil {
+			result.Status = "failed"
+			result.Errors = append(result.Errors, refreshErr.Error())
+			resp.Errors = append(resp.Errors, item.LogicalPath+": "+refreshErr.Error())
+			resp.Objects = append(resp.Objects, result)
+			continue
+		}
+		result.Status = refreshed.Status
+		result.Results = refreshed.Results
+		for _, itemErr := range refreshed.Errors {
+			result.Errors = append(result.Errors, itemErr)
+			resp.Errors = append(resp.Errors, item.LogicalPath+": "+itemErr)
+		}
+		resp.Objects = append(resp.Objects, result)
+	}
+	if len(resp.Errors) > 0 {
+		failed := 0
+		for _, object := range resp.Objects {
+			if object.Status == "failed" {
+				failed++
+			}
+		}
+		if failed == len(resp.Objects) {
+			resp.Status = "failed"
+		} else {
+			resp.Status = "partial"
+		}
+	}
+	return resp, nil
 }
 
 func (s *Server) warmupURL(ctx context.Context, client *http.Client, method, warmURL string) bucketWarmupResult {
