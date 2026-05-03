@@ -20,6 +20,9 @@ const (
 	RoleOwner      = "owner"
 	RoleMaintainer = "maintainer"
 	RoleViewer     = "viewer"
+
+	SiteStatusActive  = "active"
+	SiteStatusOffline = "offline"
 )
 
 type Project struct {
@@ -88,6 +91,7 @@ type Site struct {
 	RouteProfile     string    `json:"route_profile"`
 	DeploymentTarget string    `json:"deployment_target"`
 	RoutingPolicy    string    `json:"routing_policy,omitempty"`
+	Status           string    `json:"status"`
 	Domains          []string  `json:"domains,omitempty"`
 	URL              string    `json:"url,omitempty"`
 	URLs             []string  `json:"urls,omitempty"`

@@ -92,6 +92,14 @@ func main() {
 		err = uploadAsset(c, args[1:])
 	case "create-site":
 		err = createSite(c, args[1:])
+	case "list-sites":
+		err = listSites(c, args[1:])
+	case "offline-site":
+		err = offlineSite(c, args[1:])
+	case "online-site":
+		err = onlineSite(c, args[1:])
+	case "delete-site":
+		err = deleteSite(c, args[1:])
 	case "bind-domain":
 		err = bindDomain(c, args[1:])
 	case "domain-status":
@@ -120,6 +128,8 @@ func main() {
 		err = setR2Credentials(args[1:])
 	case "deploy-site":
 		err = deploySite(c, args[1:])
+	case "update-site":
+		err = updateSite(c, args[1:])
 	case "inspect-site":
 		err = inspectSite(args[1:])
 	case "probe-site":
@@ -435,6 +445,50 @@ func createSite(c client, args []string) error {
 		"skip_default_domain":   *noDefaultDomain,
 	}
 	return c.doJSON(http.MethodPost, "/api/v1/sites", req)
+}
+
+func listSites(c client, args []string) error {
+	fs := flag.NewFlagSet("list-sites", flag.ExitOnError)
+	_ = fs.Parse(args)
+	return c.do(http.MethodGet, "/api/v1/sites", nil, "")
+}
+
+func offlineSite(c client, args []string) error {
+	fs := flag.NewFlagSet("offline-site", flag.ExitOnError)
+	site := fs.String("site", "", "site id")
+	_ = fs.Parse(args)
+	if *site == "" {
+		return errors.New("-site is required")
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/sites/"+url.PathEscape(*site)+"/offline", map[string]any{})
+}
+
+func onlineSite(c client, args []string) error {
+	fs := flag.NewFlagSet("online-site", flag.ExitOnError)
+	site := fs.String("site", "", "site id")
+	_ = fs.Parse(args)
+	if *site == "" {
+		return errors.New("-site is required")
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/sites/"+url.PathEscape(*site)+"/online", map[string]any{})
+}
+
+func deleteSite(c client, args []string) error {
+	fs := flag.NewFlagSet("delete-site", flag.ExitOnError)
+	site := fs.String("site", "", "site id")
+	force := fs.Bool("force", false, "required; delete the site and all tracked resource objects")
+	deleteRemote := fs.Bool("delete-remote", true, "delete remote object replicas while deleting tracked site resources")
+	_ = fs.Parse(args)
+	if *site == "" {
+		return errors.New("-site is required")
+	}
+	if !*force {
+		return errors.New("-force is required")
+	}
+	q := url.Values{}
+	q.Set("force", "true")
+	q.Set("delete_remote", fmt.Sprint(*deleteRemote))
+	return c.do(http.MethodDelete, "/api/v1/sites/"+url.PathEscape(*site)+"?"+q.Encode(), nil, "")
 }
 
 func bindDomain(c client, args []string) error {
@@ -1383,8 +1437,25 @@ func setR2Credentials(args []string) error {
 	return printJSON(out)
 }
 
+type deploySiteCommandOptions struct {
+	Command             string
+	RequireExistingSite bool
+}
+
 func deploySite(c client, args []string) error {
-	fs := flag.NewFlagSet("deploy-site", flag.ExitOnError)
+	return deploySiteWithOptions(c, args, deploySiteCommandOptions{Command: "deploy-site"})
+}
+
+func updateSite(c client, args []string) error {
+	return deploySiteWithOptions(c, args, deploySiteCommandOptions{Command: "update-site", RequireExistingSite: true})
+}
+
+func deploySiteWithOptions(c client, args []string, opts deploySiteCommandOptions) error {
+	command := strings.TrimSpace(opts.Command)
+	if command == "" {
+		command = "deploy-site"
+	}
+	fs := flag.NewFlagSet(command, flag.ExitOnError)
 	site := fs.String("site", "", "site id")
 	dir := fs.String("dir", "", "dist directory")
 	bundle := fs.String("bundle", "", "zip artifact to upload")
@@ -1433,9 +1504,30 @@ func deploySite(c client, args []string) error {
 	resolvedTarget := deploymentTargetAlias(*target)
 	resolvedProfile := *profile
 	resolvedDomains := splitCSV(*domains)
-	if strings.TrimSpace(*target) == "" {
-		defaults, err := c.resolveSiteDeploymentTarget(*site, *profile, "")
+	var defaults siteDeploymentTargetDefaults
+	defaultsResolved := false
+	resolveDefaults := func() error {
+		if defaultsResolved {
+			return nil
+		}
+		next, err := c.resolveSiteDeploymentTarget(*site, *profile, *target)
 		if err != nil {
+			return err
+		}
+		defaults = next
+		defaultsResolved = true
+		return nil
+	}
+	if opts.RequireExistingSite {
+		if err := resolveDefaults(); err != nil {
+			return err
+		}
+		if !defaults.SiteExists {
+			return fmt.Errorf("%s requires an existing site; use create-site or deploy-site for the first publish", command)
+		}
+	}
+	if strings.TrimSpace(*target) == "" {
+		if err := resolveDefaults(); err != nil {
 			return err
 		}
 		resolvedTarget = deploymentTargetAlias(defaults.DeploymentTarget)
@@ -1446,8 +1538,7 @@ func deploySite(c client, args []string) error {
 			resolvedDomains = defaults.Domains
 		}
 	} else if strings.TrimSpace(resolvedProfile) == "" || len(resolvedDomains) == 0 {
-		defaults, err := c.resolveSiteDeploymentTarget(*site, *profile, *target)
-		if err == nil {
+		if err := resolveDefaults(); err == nil {
 			if strings.TrimSpace(resolvedProfile) == "" {
 				resolvedProfile = defaults.RouteProfile
 			}
@@ -1464,10 +1555,10 @@ func deploySite(c client, args []string) error {
 			return errors.New("resource failover is not supported for cloudflare_static deployments")
 		}
 		if *dir == "" {
-			return errors.New("cloudflare_static deploy-site requires -dir")
+			return fmt.Errorf("cloudflare_static %s requires -dir", command)
 		}
 		if *bundle != "" {
-			return errors.New("cloudflare_static deploy-site does not accept -bundle yet")
+			return fmt.Errorf("cloudflare_static %s does not accept -bundle yet", command)
 		}
 		return deploySiteCloudflareStatic(c, cloudflareStaticDeploySiteOptions{
 			Site:              *site,
@@ -1494,10 +1585,10 @@ func deploySite(c client, args []string) error {
 	}
 	if resolvedTarget == "hybrid_edge" {
 		if *dir == "" {
-			return errors.New("hybrid_edge deploy-site requires -dir")
+			return fmt.Errorf("hybrid_edge %s requires -dir", command)
 		}
 		if *bundle != "" {
-			return errors.New("hybrid_edge deploy-site does not accept -bundle yet")
+			return fmt.Errorf("hybrid_edge %s does not accept -bundle yet", command)
 		}
 		return deploySiteHybridEdge(c, hybridEdgeDeploySiteOptions{
 			Site:                *site,
@@ -3873,13 +3964,54 @@ func deleteBucketObject(c client, args []string) error {
 	fs := flag.NewFlagSet("delete-bucket-object", flag.ExitOnError)
 	bucket := fs.String("bucket", "", "bucket slug")
 	dst := fs.String("path", "", "logical path inside the bucket")
+	paths := fs.String("paths", "", "comma-separated logical paths inside the bucket")
+	prefix := fs.String("prefix", "", "delete objects whose logical path is under this prefix")
+	all := fs.Bool("all", false, "delete all tracked objects in the bucket")
+	force := fs.Bool("force", false, "required for -prefix or -all")
 	deleteRemote := fs.Bool("delete-remote", true, "delete remote replicas before removing local metadata")
 	_ = fs.Parse(args)
-	if *bucket == "" || *dst == "" {
-		return errors.New("-bucket and -path are required")
+	if *bucket == "" {
+		return errors.New("-bucket is required")
 	}
-	path := "/api/v1/asset-buckets/" + url.PathEscape(*bucket) + "/objects?path=" + url.QueryEscape(*dst) + "&delete_remote=" + url.QueryEscape(fmt.Sprint(*deleteRemote))
-	return c.do(http.MethodDelete, path, nil, "")
+	exactPaths := splitCSV(*paths)
+	if strings.TrimSpace(*dst) != "" {
+		exactPaths = append([]string{strings.TrimSpace(*dst)}, exactPaths...)
+	}
+	modes := 0
+	if len(exactPaths) > 0 {
+		modes++
+	}
+	if strings.TrimSpace(*prefix) != "" {
+		modes++
+	}
+	if *all {
+		modes++
+	}
+	if modes == 0 {
+		return errors.New("one of -path, -paths, -prefix, or -all is required")
+	}
+	if modes > 1 {
+		return errors.New("choose only one of -path/-paths, -prefix, or -all")
+	}
+	if (strings.TrimSpace(*prefix) != "" || *all) && !*force {
+		return errors.New("-force is required for -prefix or -all")
+	}
+	q := url.Values{}
+	for _, item := range exactPaths {
+		q.Add("path", item)
+	}
+	if strings.TrimSpace(*prefix) != "" {
+		q.Set("prefix", strings.TrimSpace(*prefix))
+	}
+	if *all {
+		q.Set("all", "true")
+	}
+	if *force {
+		q.Set("force", "true")
+	}
+	q.Set("delete_remote", fmt.Sprint(*deleteRemote))
+	pathValue := "/api/v1/asset-buckets/" + url.PathEscape(*bucket) + "/objects?" + q.Encode()
+	return c.do(http.MethodDelete, pathValue, nil, "")
 }
 
 func deleteBucket(c client, args []string) error {
@@ -4405,6 +4537,10 @@ func usage() {
   supercdnctl [global flags] list-users
   supercdnctl [global flags] revoke-token -id tok_xxx
   supercdnctl [global flags] create-project -id assets
+  supercdnctl [global flags] list-sites
+  supercdnctl [global flags] offline-site -site blog
+  supercdnctl [global flags] online-site -site blog
+  supercdnctl [global flags] delete-site -site blog -force
   supercdnctl [global flags] upload -file ./logo.png -project assets -path /img/logo.png -profile overseas
   supercdnctl [global flags] create-site -site blog -name "AI学习星图" -profile china_all -domains example.com,www.example.com
   supercdnctl [global flags] bind-domain -site blog -domain-id blog
@@ -4423,6 +4559,7 @@ func usage() {
   supercdnctl [global flags] deploy-site -site blog -dir ./dist -profile china_all -target hybrid_edge -domains blog.qwk.ccwu.cc -static-spa
   supercdnctl [global flags] deploy-site -site blog -dir ./dist -profile overseas -static-spa
   supercdnctl [global flags] deploy-site -site blog -bundle ./dist.zip -env preview
+  supercdnctl [global flags] update-site -site blog -dir ./dist -static-spa
   supercdnctl inspect-site -dir ./dist
   supercdnctl [global flags] probe-site -site blog -spa-path /movie/123
   supercdnctl probe-site -url https://blog.example.com/ -max-assets 20 -require-direct-assets
@@ -4451,6 +4588,9 @@ func usage() {
   supercdnctl [global flags] purge-bucket -bucket movie-posters -prefix posters/ -dry-run
   supercdnctl [global flags] warmup-bucket -bucket movie-posters -path posters/poster.jpg -dry-run
   supercdnctl [global flags] delete-bucket-object -bucket movie-posters -path posters/poster.jpg
+  supercdnctl [global flags] delete-bucket-object -bucket movie-posters -paths posters/a.jpg,posters/b.jpg
+  supercdnctl [global flags] delete-bucket-object -bucket movie-posters -prefix posters/tmp/ -force
+  supercdnctl [global flags] delete-bucket-object -bucket movie-posters -all -force
   supercdnctl [global flags] delete-bucket -bucket movie-posters -force
   supercdnctl [global flags] job -id 1
   supercdnctl [global flags] replicas -object-id 1

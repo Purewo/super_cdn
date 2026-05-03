@@ -46,6 +46,10 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `create-project` | `POST /api/v1/projects` | 创建普通静态资源项目 |
 | `upload` | `POST /api/v1/preflight/upload` + `POST /api/v1/assets` | 上传普通静态资源 |
 | `create-site` | `POST /api/v1/sites` | 创建静态站点 |
+| `list-sites` | `GET /api/v1/sites` | 列出当前工作区可访问的站点 |
+| `offline-site` | `POST /api/v1/sites/{id}/offline` | 将站点下架并阻断公开访问 |
+| `online-site` | `POST /api/v1/sites/{id}/online` | 恢复已下架站点的公开访问 |
+| `delete-site` | `DELETE /api/v1/sites/{id}?force=true&delete_remote=true` | 强制删除站点并清理其部署对象与元数据 |
 | `bind-domain` | `POST /api/v1/sites/{id}/domains` | 为站点追加或替换绑定域名 |
 | `domain-status` | `GET /api/v1/domains/{domain}/status` | 查询站点域名解析、绑定和证书状态 |
 | `cloudflare-status` | `GET /api/v1/cloudflare/status` | 查询 Cloudflare 账户、R2、DNS 和 Worker 配置状态 |
@@ -54,6 +58,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `ipfs-web-smoke` | site deployment + edge manifest APIs | 部署一个 IPFS-backed preview site，并验证 Web/manifest/gateway 路径 |
 | `refresh-ipfs-pins` | `POST /api/v1/ipfs/pins/refresh` | 刷新已知对象的 Pinata/IPFS pin 状态 |
 | `deploy-site` | `GET /api/v1/sites/{id}/deployment-target` + deploy API | 部署静态站点产物包或目录 |
+| `update-site` | `GET /api/v1/sites/{id}/deployment-target` + deploy API | 更新已有站点，默认复用当前托管目标和域名 |
 | `inspect-site` | 本地目录/zip 检查 | 上传前检查站点产物、入口、资源引用和风险文件 |
 | `probe-site` | 本地 HTTP 探测 + 可选部署查询 | 验证线上 HTML、重定向 JS/CSS 的 MIME/CORS，以及可选 SPA fallback |
 | `list-deployments` | `GET /api/v1/sites/{id}/deployments` | 列出站点部署历史 |
@@ -81,7 +86,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `list-bucket` | `GET /api/v1/asset-buckets/{slug}/objects` | 列出桶对象 |
 | `purge-bucket` | `POST /api/v1/asset-buckets/{slug}/purge` | 按桶对象 URL 清 Cloudflare 缓存 |
 | `warmup-bucket` | `POST /api/v1/asset-buckets/{slug}/warmup` | 按桶对象 URL 预热或探测公开访问 |
-| `delete-bucket-object` | `DELETE /api/v1/asset-buckets/{slug}/objects` | 删除桶内单个对象 |
+| `delete-bucket-object` | `DELETE /api/v1/asset-buckets/{slug}/objects` | 删除桶内对象，支持单路径、批量路径、前缀和整桶选择 |
 | `delete-bucket` | `DELETE /api/v1/asset-buckets/{slug}` | 删除整个桶 |
 | `job` | `GET /api/v1/jobs/{id}` | 查询异步任务 |
 | `replicas` | `GET /api/v1/objects/{id}/replicas` | 查询对象副本 |
@@ -223,6 +228,70 @@ POST /api/v1/sites
 | `-mode` | 否 | `standard` | `standard` 或 `spa` |
 | `-domains` | 否 | 空 | 逗号分隔域名 |
 
+### list-sites
+
+列出当前工作区可访问的站点、绑定域名和默认访问 URL。适合在执行 `update-site` 前确认站点 ID、托管目标和域名是否正确。
+
+```powershell
+.\bin\supercdnctl.exe list-sites
+```
+
+HTTP:
+
+```http
+GET /api/v1/sites
+```
+
+### offline-site
+
+将站点下架。下架后公开域名和 `GET /s/{site}` 会返回 `410 Gone`，但站点记录、部署历史、预览 URL 和资源对象都会保留，之后可用 `online-site` 恢复。
+
+```powershell
+.\bin\supercdnctl.exe offline-site -site blog
+```
+
+HTTP:
+
+```http
+POST /api/v1/sites/{id}/offline
+```
+
+### online-site
+
+恢复已下架站点的公开访问。
+
+```powershell
+.\bin\supercdnctl.exe online-site -site blog
+```
+
+HTTP:
+
+```http
+POST /api/v1/sites/{id}/online
+```
+
+### delete-site
+
+强制删除整个站点。这个操作会先清理站点下所有部署的对象、artifact 和 manifest，再删除站点元数据与关联 project 记录。Cloudflare Worker 版本、custom domains 和 KV 条目不在这个控制面删除范围内。
+
+```powershell
+.\bin\supercdnctl.exe delete-site -site blog -force
+```
+
+HTTP:
+
+```http
+DELETE /api/v1/sites/{id}?force=true&delete_remote=true
+```
+
+参数：
+
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-site` | 是 | 空 | 站点 ID |
+| `-force` | 是 | `false` | 需要显式确认整站删除 |
+| `-delete-remote` | 否 | `true` | 删除 tracked 对象时是否同时删除远端副本 |
+
 ### bind-domain
 
 为已有站点追加或替换绑定域名，也可以重新分配默认子域名。
@@ -278,6 +347,7 @@ GET /api/v1/domains/{domain}/status
 .\bin\supercdnctl.exe deploy-site -site blog -bundle .\dist.zip -env production -promote
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target cloudflare_static -domains blog-static.example.com -static-name supercdn-blog-static
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -profile overseas
+.\bin\supercdnctl.exe update-site -site blog -dir .\dist -static-spa
 ```
 
 `deploy-site` also accepts `-target origin_assisted|cloudflare_static|hybrid_edge`. `deployment_target` is the website hosting target, not the storage route profile. For ordinary overseas static sites use `cloudflare_static`; use `hybrid_edge` when Worker/KV routing should split resources between Cloudflare entry delivery and AList/OpenList, Cloudflare-native static assets, or IPFS/Pinata. R2-backed website resources are legacy compatibility; keep R2 for object-CDN buckets and large files such as video, images and archives.
@@ -297,6 +367,10 @@ Cloudflare Static deploys default to `-static-cache-policy auto`. If the source 
 For SPAs, pass `-static-spa`. The CLI generates a temporary `wrangler.toml` with `assets.not_found_handling = "single-page-application"` so deep links return `index.html` from Cloudflare Static Assets. `-static-not-found-handling` can also be set directly to `none`、`404-page` or `single-page-application`.
 
 Cloudflare Static deployments run `-static-verify wait` by default. After Wrangler publishes, the CLI probes every custom domain over HTTPS before recording the deployment in Super CDN. It checks root HTML, JS/CSS MIME types, direct same-site asset delivery, generated cache headers, and SPA fallback when enabled. The readiness probe uses `-static-verify-resolver 1.1.1.1:53` by default to avoid stale local DNS wildcard cache. A failed wait-mode probe prints the probe report and returns an error, so the control plane does not mark an unreachable custom domain as active. Use `-static-verify warn` to continue after a failed probe or `-static-verify none` to skip it.
+
+`update-site` is the maintenance-facing wrapper for the same deployment path. It requires the site to already exist, resolves the current site deployment target through `GET /api/v1/sites/{id}/deployment-target`, and when `-target` / `-domains` are omitted it reuses the site's existing hosting target and bound domains. This keeps the published production domain stable while replacing the active production deployment, Worker assets and/or edge manifest. Use `deploy-site` or `create-site` for the first publish; use `update-site` for later code changes on a long-lived site.
+
+`update-site` accepts the same flags as `deploy-site`. Production updates still promote by default. `-env preview` can be used for a preview build first, but Cloudflare Static and hybrid-edge production changes should be finalized by rerunning the full update/publish path so Worker assets and KV manifest stay aligned with Super CDN metadata.
 
 本地检查产物但不上传：
 
@@ -1023,16 +1097,22 @@ POST /api/v1/asset-buckets/{slug}/warmup
 
 ### delete-bucket-object
 
-删除桶内一个逻辑对象。默认先删除远端副本，远端删除成功后再删本地 DB 索引。
+删除桶内一个或一组逻辑对象。默认先删除远端副本，远端删除成功后再删本地 DB 索引。
 
 ```powershell
 .\bin\supercdnctl.exe delete-bucket-object -bucket dynamic-wallpapers -path dynamic/20260426T195744Z-01.mp4
+.\bin\supercdnctl.exe delete-bucket-object -bucket dynamic-wallpapers -paths dynamic/a.mp4,dynamic/b.mp4
+.\bin\supercdnctl.exe delete-bucket-object -bucket dynamic-wallpapers -prefix dynamic/tmp/ -force
+.\bin\supercdnctl.exe delete-bucket-object -bucket dynamic-wallpapers -all -force
 ```
 
 HTTP:
 
 ```http
 DELETE /api/v1/asset-buckets/{slug}/objects?path=dynamic%2F20260426T195744Z-01.mp4&delete_remote=true
+DELETE /api/v1/asset-buckets/{slug}/objects?paths=dynamic%2Fa.mp4%2Cdynamic%2Fb.mp4&delete_remote=true
+DELETE /api/v1/asset-buckets/{slug}/objects?prefix=dynamic%2Ftmp%2F&force=true&delete_remote=true
+DELETE /api/v1/asset-buckets/{slug}/objects?all=true&force=true&delete_remote=true
 ```
 
 参数：
@@ -1040,7 +1120,11 @@ DELETE /api/v1/asset-buckets/{slug}/objects?path=dynamic%2F20260426T195744Z-01.m
 | 参数 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `-bucket` | 是 | 空 | 桶 slug |
-| `-path` | 是 | 空 | 桶内逻辑路径 |
+| `-path` | 否 | 空 | 单个桶内逻辑路径 |
+| `-paths` | 否 | 空 | 逗号分隔的多个桶内逻辑路径 |
+| `-prefix` | 否 | 空 | 删除该前缀下的对象；需要 `-force` |
+| `-all` | 否 | `false` | 删除桶内所有 tracked 对象；需要 `-force` |
+| `-force` | 条件 | `false` | `-prefix` 或 `-all` 时必填 |
 | `-delete-remote` | 否 | `true` | 是否删除远端副本 |
 
 返回核心字段：

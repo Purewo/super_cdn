@@ -72,6 +72,29 @@ func (d *DB) ListSiteDeployments(ctx context.Context, siteID string, limit int) 
 	return out, rows.Err()
 }
 
+func (d *DB) ListAllSiteDeployments(ctx context.Context, siteID string) ([]model.SiteDeployment, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT id, site_id, environment, status, route_profile, deployment_target, routing_policy, resource_failover, version, active, pinned,
+			artifact_object_id, artifact_key, artifact_sha256, artifact_size,
+			manifest_object_id, manifest_key, file_count, total_size,
+			manifest_json, rules_json, last_error,
+			created_at, updated_at, ready_at, activated_at, expires_at
+		FROM site_deployments WHERE site_id = ? ORDER BY created_at DESC`, siteID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.SiteDeployment
+	for rows.Next() {
+		dep, err := scanSiteDeployment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *dep)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) ActiveSiteDeployment(ctx context.Context, siteID string) (*model.SiteDeployment, error) {
 	row := d.sql.QueryRowContext(ctx, `
 		SELECT id, site_id, environment, status, route_profile, deployment_target, routing_policy, resource_failover, version, active, pinned,

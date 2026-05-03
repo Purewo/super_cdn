@@ -99,6 +99,112 @@ func TestDeploySiteAndServeIndexAnd404(t *testing.T) {
 	}
 }
 
+func TestSiteOfflineOnlineGatesProductionAccess(t *testing.T) {
+	app := newTestServer(t)
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/sites", "test-token", map[string]any{
+		"id":            "demo",
+		"route_profile": "overseas",
+		"mode":          "standard",
+		"domains":       []string{"demo.local"},
+	})
+	if create.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", create.Code, create.Body.String())
+	}
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html": "home",
+	}, map[string]string{"environment": "production", "promote": "true"})
+
+	get := httptest.NewRequest(http.MethodGet, "/", nil)
+	get.Host = "demo.local"
+	out := httptest.NewRecorder()
+	app.ServeHTTP(out, get)
+	if out.Code != http.StatusOK || out.Body.String() != "home" {
+		t.Fatalf("online status=%d body=%q", out.Code, out.Body.String())
+	}
+
+	offline := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/offline", "test-token", nil)
+	if offline.Code != http.StatusOK || !strings.Contains(offline.Body.String(), `"status":"offline"`) {
+		t.Fatalf("offline status = %d body=%s", offline.Code, offline.Body.String())
+	}
+	blocked := httptest.NewRecorder()
+	app.ServeHTTP(blocked, get)
+	if blocked.Code != http.StatusGone || blocked.Header().Get("X-SuperCDN-Site-Status") != model.SiteStatusOffline {
+		t.Fatalf("blocked status=%d header=%q body=%s", blocked.Code, blocked.Header().Get("X-SuperCDN-Site-Status"), blocked.Body.String())
+	}
+
+	preview := httptest.NewRequest(http.MethodGet, "/p/demo/"+deploymentID+"/", nil)
+	previewRec := httptest.NewRecorder()
+	app.ServeHTTP(previewRec, preview)
+	if previewRec.Code != http.StatusOK || previewRec.Body.String() != "home" {
+		t.Fatalf("preview status=%d body=%q", previewRec.Code, previewRec.Body.String())
+	}
+
+	online := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/online", "test-token", nil)
+	if online.Code != http.StatusOK || !strings.Contains(online.Body.String(), `"status":"active"`) {
+		t.Fatalf("online status = %d body=%s", online.Code, online.Body.String())
+	}
+	out = httptest.NewRecorder()
+	app.ServeHTTP(out, get)
+	if out.Code != http.StatusOK || out.Body.String() != "home" {
+		t.Fatalf("restored status=%d body=%q", out.Code, out.Body.String())
+	}
+}
+
+func TestDeleteSiteCleansActiveDeploymentObjectsAndMetadata(t *testing.T) {
+	app := newTestServer(t)
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/sites", "test-token", map[string]any{
+		"id":            "demo",
+		"route_profile": "overseas",
+		"mode":          "standard",
+		"domains":       []string{"demo.local"},
+	})
+	if create.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", create.Code, create.Body.String())
+	}
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true"})
+	dep, err := app.db.GetSiteDeployment(context.Background(), deploymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileObj, err := app.db.SiteDeploymentFileObject(context.Background(), deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blocked := apiJSON(t, app, http.MethodDelete, "/api/v1/sites/demo", "test-token", nil)
+	if blocked.Code != http.StatusBadRequest {
+		t.Fatalf("delete without force status = %d body=%s", blocked.Code, blocked.Body.String())
+	}
+	rec := apiJSON(t, app, http.MethodDelete, "/api/v1/sites/demo?force=true&delete_remote=true", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var result deleteSiteResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Deleted || !result.DeletedSite || result.DeploymentCount != 1 || result.ObjectCount != 4 || len(result.Errors) > 0 {
+		t.Fatalf("delete result = %+v", result)
+	}
+	if len(result.Deployments) != 1 || !result.Deployments[0].DeletedDeployment || !result.Deployments[0].Deleted {
+		t.Fatalf("deployment result = %+v", result.Deployments)
+	}
+	if _, err := app.db.GetSite(context.Background(), "demo"); err == nil {
+		t.Fatal("site still exists")
+	}
+	if _, err := app.db.GetSiteDeployment(context.Background(), deploymentID); err == nil {
+		t.Fatal("deployment still exists")
+	}
+	for _, objectID := range []int64{fileObj.ID, dep.ArtifactObjectID, dep.ManifestObjectID} {
+		if _, err := app.db.GetObject(context.Background(), objectID); err == nil {
+			t.Fatalf("object %d still exists", objectID)
+		}
+	}
+}
+
 func TestSiteDeploymentTargetComesFromRouteProfileAndManifest(t *testing.T) {
 	app := newTestServer(t)
 	app.cfg.RouteProfiles[0].DeploymentTarget = model.SiteDeploymentTargetCloudflareStatic
@@ -192,6 +298,29 @@ func TestResolveSiteDeploymentTargetUsesExistingSiteDomains(t *testing.T) {
 	} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Fatalf("resolve response missing %s: %s", want, rec.Body.String())
+		}
+	}
+}
+
+func TestListSitesReturnsSiteViews(t *testing.T) {
+	app := newTestServer(t)
+	_, err := app.db.CreateSite(context.Background(), "demo", "Demo", "spa", "overseas", model.SiteDeploymentTargetCloudflareStatic, []string{"demo.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodGet, "/api/v1/sites", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list sites status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{
+		`"id":"demo"`,
+		`"deployment_target":"cloudflare_static"`,
+		`"domains":["demo.example.com"]`,
+		`"url":"http://demo.example.com/"`,
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("list sites response missing %s: %s", want, rec.Body.String())
 		}
 	}
 }
@@ -2943,6 +3072,72 @@ func TestAssetBucketDeleteObjectAndBucket(t *testing.T) {
 	app.ServeHTTP(getRemainingRec, getRemaining)
 	if getRemainingRec.Code != http.StatusNotFound {
 		t.Fatalf("remaining object read status = %d body=%s", getRemainingRec.Code, getRemainingRec.Body.String())
+	}
+}
+
+func TestAssetBucketDeleteObjectsByPathsPrefixAndAll(t *testing.T) {
+	app := newTestServer(t)
+	createAssetBucketForTest(t, app, "posters")
+	for _, logicalPath := range []string{
+		"posters/one.jpg",
+		"posters/two.jpg",
+		"icons/keep.jpg",
+		"tmp/a.jpg",
+		"tmp/b.jpg",
+	} {
+		uploadBucketObjectForTest(t, app, "posters", logicalPath, []byte(logicalPath))
+	}
+
+	deleteExact := apiJSON(t, app, http.MethodDelete, "/api/v1/asset-buckets/posters/objects?paths="+url.QueryEscape("posters/one.jpg,icons/keep.jpg")+"&delete_remote=false", "test-token", nil)
+	if deleteExact.Code != http.StatusOK {
+		t.Fatalf("delete exact status = %d body=%s", deleteExact.Code, deleteExact.Body.String())
+	}
+	var exact deleteBucketObjectsResult
+	if err := json.Unmarshal(deleteExact.Body.Bytes(), &exact); err != nil {
+		t.Fatal(err)
+	}
+	if exact.ObjectCount != 2 || len(exact.Objects) != 2 || exact.DeleteRemote {
+		t.Fatalf("exact result = %+v", exact)
+	}
+	for _, logicalPath := range []string{"posters/one.jpg", "icons/keep.jpg"} {
+		if _, err := app.db.GetAssetBucketObject(context.Background(), "posters", logicalPath); err == nil {
+			t.Fatalf("object %s still exists", logicalPath)
+		}
+	}
+
+	blocked := apiJSON(t, app, http.MethodDelete, "/api/v1/asset-buckets/posters/objects?prefix=posters", "test-token", nil)
+	if blocked.Code != http.StatusBadRequest {
+		t.Fatalf("prefix without force status = %d body=%s", blocked.Code, blocked.Body.String())
+	}
+	deletePrefix := apiJSON(t, app, http.MethodDelete, "/api/v1/asset-buckets/posters/objects?prefix=posters/&force=true&delete_remote=false", "test-token", nil)
+	if deletePrefix.Code != http.StatusOK {
+		t.Fatalf("delete prefix status = %d body=%s", deletePrefix.Code, deletePrefix.Body.String())
+	}
+	var prefix deleteBucketObjectsResult
+	if err := json.Unmarshal(deletePrefix.Body.Bytes(), &prefix); err != nil {
+		t.Fatal(err)
+	}
+	if prefix.Prefix != "posters" || prefix.ObjectCount != 1 || len(prefix.Objects) != 1 || prefix.Objects[0].LogicalPath != "posters/two.jpg" {
+		t.Fatalf("prefix result = %+v", prefix)
+	}
+
+	deleteAll := apiJSON(t, app, http.MethodDelete, "/api/v1/asset-buckets/posters/objects?all=true&force=true&delete_remote=false", "test-token", nil)
+	if deleteAll.Code != http.StatusOK {
+		t.Fatalf("delete all status = %d body=%s", deleteAll.Code, deleteAll.Body.String())
+	}
+	var all deleteBucketObjectsResult
+	if err := json.Unmarshal(deleteAll.Body.Bytes(), &all); err != nil {
+		t.Fatal(err)
+	}
+	if !all.All || all.ObjectCount != 2 || len(all.Objects) != 2 {
+		t.Fatalf("all result = %+v", all)
+	}
+	remaining, err := app.db.ListAllAssetBucketObjects(context.Background(), "posters")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("remaining objects = %+v", remaining)
 	}
 }
 

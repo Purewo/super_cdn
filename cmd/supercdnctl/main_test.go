@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -291,6 +292,166 @@ func TestResolveSiteDeploymentTargetCallsControlPlane(t *testing.T) {
 	}
 	if defaults.DeploymentTarget != "cloudflare_static" || len(defaults.Domains) != 1 || defaults.Domains[0] != "demo.sites.example.com" {
 		t.Fatalf("unexpected defaults: %+v", defaults)
+	}
+}
+
+func TestListSitesCallsControlPlane(t *testing.T) {
+	saw := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.String())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"sites":[{"id":"demo","url":"https://demo.example.com/"}]}`))
+	}))
+	defer srv.Close()
+
+	var listErr error
+	out := captureStdout(t, func() {
+		listErr = listSites(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, nil)
+	})
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if !saw {
+		t.Fatal("server was not called")
+	}
+	if !strings.Contains(out, `"id": "demo"`) {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+}
+
+func TestSiteLifecycleCommandsCallControlPlane(t *testing.T) {
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.String())
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := client{baseURL: srv.URL, token: "test-token", http: srv.Client()}
+	for _, run := range []struct {
+		name string
+		fn   func(client, []string) error
+		args []string
+	}{
+		{name: "offline", fn: offlineSite, args: []string{"-site", "demo"}},
+		{name: "online", fn: onlineSite, args: []string{"-site", "demo"}},
+		{name: "delete", fn: deleteSite, args: []string{"-site", "demo", "-force", "-delete-remote=false"}},
+	} {
+		if err := run.fn(c, run.args); err != nil {
+			t.Fatalf("%s: %v", run.name, err)
+		}
+	}
+	want := []string{
+		"POST /api/v1/sites/demo/offline",
+		"POST /api/v1/sites/demo/online",
+		"DELETE /api/v1/sites/demo?delete_remote=false&force=true",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls = %#v", calls)
+	}
+	if err := deleteSite(c, []string{"-site", "demo"}); err == nil || !strings.Contains(err.Error(), "-force") {
+		t.Fatalf("delete without force error = %v", err)
+	}
+}
+
+func TestUpdateSiteReusesExistingDeploymentDefaults(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), "<h1>updated</h1>")
+
+	sawResolve := false
+	sawUpload := false
+	sawWait := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sites/demo/deployment-target":
+			sawResolve = true
+			if got := r.URL.Query().Get("route_profile"); got != "" {
+				t.Fatalf("route_profile query = %q", got)
+			}
+			if got := r.URL.Query().Get("deployment_target"); got != "" {
+				t.Fatalf("deployment_target query = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"site_id":"demo","site_exists":true,"route_profile":"china_all","deployment_target":"origin_assisted","source":"site","domains":["demo.example.com"]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sites/demo/deployments":
+			sawUpload = true
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatal(err)
+			}
+			for field, want := range map[string]string{
+				"route_profile":     "china_all",
+				"deployment_target": "origin_assisted",
+				"environment":       "production",
+				"promote":           "true",
+			} {
+				if got := r.FormValue(field); got != want {
+					t.Fatalf("%s = %q, want %q", field, got, want)
+				}
+			}
+			file, header, err := r.FormFile("artifact")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = file.Close()
+			if !strings.HasSuffix(strings.ToLower(header.Filename), ".zip") {
+				t.Fatalf("artifact filename = %q", header.Filename)
+			}
+			_, _ = w.Write([]byte(`{"deployment_id":"dpl-update"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sites/demo/deployments/dpl-update":
+			sawWait = true
+			_, _ = w.Write([]byte(`{"id":"dpl-update","site_id":"demo","status":"active","route_profile":"china_all","deployment_target":"origin_assisted","active":true,"production_url":"https://demo.example.com/"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+
+	var updateErr error
+	out := captureStdout(t, func() {
+		updateErr = updateSite(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "demo", "-dir", dir})
+	})
+	if updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if !sawResolve || !sawUpload || !sawWait {
+		t.Fatalf("sawResolve=%v sawUpload=%v sawWait=%v", sawResolve, sawUpload, sawWait)
+	}
+	if !strings.Contains(out, `"production_url": "https://demo.example.com/"`) {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+}
+
+func TestUpdateSiteRequiresExistingSite(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), "<h1>updated</h1>")
+
+	sawUpload := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sites/missing/deployment-target":
+			_, _ = w.Write([]byte(`{"site_id":"missing","site_exists":false,"route_profile":"overseas","deployment_target":"cloudflare_static","source":"route_profile","domains":["missing.example.com"]}`))
+		case r.Method == http.MethodPost:
+			sawUpload = true
+			t.Fatalf("update-site should not upload for a missing site")
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+
+	err := updateSite(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "missing", "-dir", dir})
+	if err == nil || !strings.Contains(err.Error(), "requires an existing site") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sawUpload {
+		t.Fatal("upload should not have been attempted")
 	}
 }
 
@@ -879,6 +1040,44 @@ func TestCreateIPFSBucketUsesArchiveDefaults(t *testing.T) {
 	types, ok := got["allowed_types"].([]any)
 	if !ok || len(types) != 2 || types[0] != "image" || types[1] != "archive" {
 		t.Fatalf("allowed_types = %#v", got["allowed_types"])
+	}
+}
+
+func TestDeleteBucketObjectSelectorQueries(t *testing.T) {
+	var calls []url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/asset-buckets/docs/objects" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		calls = append(calls, r.URL.Query())
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := client{baseURL: srv.URL, token: "test-token", http: srv.Client()}
+	for _, args := range [][]string{
+		{"-bucket", "docs", "-paths", "a.txt,b.txt", "-delete-remote=false"},
+		{"-bucket", "docs", "-prefix", "tmp/", "-force"},
+		{"-bucket", "docs", "-all", "-force"},
+	} {
+		if err := deleteBucketObject(c, args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(calls) != 3 {
+		t.Fatalf("calls = %+v", calls)
+	}
+	if got := calls[0]["path"]; len(got) != 2 || got[0] != "a.txt" || got[1] != "b.txt" || calls[0].Get("delete_remote") != "false" {
+		t.Fatalf("paths query = %+v", calls[0])
+	}
+	if calls[1].Get("prefix") != "tmp/" || calls[1].Get("force") != "true" {
+		t.Fatalf("prefix query = %+v", calls[1])
+	}
+	if calls[2].Get("all") != "true" || calls[2].Get("force") != "true" {
+		t.Fatalf("all query = %+v", calls[2])
+	}
+	if err := deleteBucketObject(c, []string{"-bucket", "docs", "-prefix", "tmp/"}); err == nil || !strings.Contains(err.Error(), "-force") {
+		t.Fatalf("prefix without force error = %v", err)
 	}
 }
 

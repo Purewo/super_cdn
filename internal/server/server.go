@@ -163,7 +163,11 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("GET /asset-buckets/{slug}/objects", s.handleListBucketObjects)
 	s.apiMux.HandleFunc("DELETE /asset-buckets/{slug}/objects", s.handleDeleteBucketObject)
 	s.apiMux.HandleFunc("POST /assets", s.handleUploadAsset)
+	s.apiMux.HandleFunc("GET /sites", s.handleListSites)
 	s.apiMux.HandleFunc("POST /sites", s.handleCreateSite)
+	s.apiMux.HandleFunc("DELETE /sites/{id}", s.handleDeleteSite)
+	s.apiMux.HandleFunc("POST /sites/{id}/offline", s.handleOfflineSite)
+	s.apiMux.HandleFunc("POST /sites/{id}/online", s.handleOnlineSite)
 	s.apiMux.HandleFunc("POST /sites/{id}/domains", s.handleBindSiteDomains)
 	s.apiMux.HandleFunc("POST /sites/{id}/dns", s.handleSyncSiteDNS)
 	s.apiMux.HandleFunc("POST /sites/{id}/worker-routes", s.handleSyncSiteWorkerRoutes)
@@ -750,6 +754,17 @@ type deleteBucketObjectResult struct {
 	Errors       []string              `json:"errors,omitempty"`
 }
 
+type deleteBucketObjectsResult struct {
+	Bucket       string                     `json:"bucket"`
+	DeleteRemote bool                       `json:"delete_remote"`
+	Paths        []string                   `json:"paths,omitempty"`
+	Prefix       string                     `json:"prefix,omitempty"`
+	All          bool                       `json:"all,omitempty"`
+	ObjectCount  int                        `json:"object_count"`
+	Objects      []deleteBucketObjectResult `json:"objects,omitempty"`
+	Errors       []string                   `json:"errors,omitempty"`
+}
+
 type deleteAssetBucketResult struct {
 	Bucket         string                     `json:"bucket"`
 	DeleteObjects  bool                       `json:"delete_objects"`
@@ -783,6 +798,18 @@ type deleteSiteDeploymentResult struct {
 	DeletedDeployment bool                               `json:"deleted_deployment"`
 	Warning           string                             `json:"warning,omitempty"`
 	Errors            []string                           `json:"errors,omitempty"`
+}
+
+type deleteSiteResult struct {
+	SiteID          string                       `json:"site_id"`
+	Deleted         bool                         `json:"deleted"`
+	DeleteRemote    bool                         `json:"delete_remote"`
+	DeploymentCount int                          `json:"deployment_count"`
+	ObjectCount     int                          `json:"object_count"`
+	Deployments     []deleteSiteDeploymentResult `json:"deployments,omitempty"`
+	DeletedSite     bool                         `json:"deleted_site"`
+	Warnings        []string                     `json:"warnings,omitempty"`
+	Errors          []string                     `json:"errors,omitempty"`
 }
 
 type assetBucketCacheRequest struct {
@@ -1811,23 +1838,50 @@ func (s *Server) handleDeleteBucketObject(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "bucket is required")
 		return
 	}
-	logicalPath, err := storage.CleanObjectPath(r.URL.Query().Get("path"))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	deleteRemote, err := queryBool(r, "delete_remote", true)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, ok := s.getAssetBucketForAPI(w, r, slug); !ok {
+	force, err := queryBool(r, "force", false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	result, err := s.deleteBucketObject(r.Context(), slug, logicalPath, deleteRemote)
+	selector, err := deleteBucketObjectsSelectorFromQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	bucket, ok := s.getAssetBucketForAPI(w, r, slug)
+	if !ok {
+		return
+	}
+	if selector.needsForce() && !force {
+		writeError(w, http.StatusBadRequest, "force=true is required for prefix or all object deletion")
+		return
+	}
+	if selector.singlePath() {
+		result, err := s.deleteBucketObject(r.Context(), slug, selector.Paths[0], deleteRemote)
+		if err != nil {
+			status := http.StatusBadGateway
+			if db.IsNotFound(err) {
+				status = http.StatusNotFound
+			}
+			if result != nil {
+				writeJSON(w, status, result)
+			} else {
+				writeError(w, status, err.Error())
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	result, err := s.deleteBucketObjects(r.Context(), bucket, selector, deleteRemote)
 	if err != nil {
 		status := http.StatusBadGateway
-		if db.IsNotFound(err) {
+		if db.IsNotFound(err) || strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
 		}
 		if result != nil {
@@ -1974,6 +2028,82 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.siteView(site))
+}
+
+func (s *Server) handleListSites(w http.ResponseWriter, r *http.Request) {
+	principal := currentPrincipal(r.Context())
+	workspaceID := ""
+	if !principal.Root {
+		workspaceID = principal.WorkspaceID
+	}
+	sites, err := s.db.ListSitesInWorkspace(r.Context(), workspaceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	views := make([]model.Site, 0, len(sites))
+	for i := range sites {
+		site := sites[i]
+		views = append(views, s.siteView(&site))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sites": views})
+}
+
+func (s *Server) handleOfflineSite(w http.ResponseWriter, r *http.Request) {
+	s.handleSetSiteStatus(w, r, model.SiteStatusOffline)
+}
+
+func (s *Server) handleOnlineSite(w http.ResponseWriter, r *http.Request) {
+	s.handleSetSiteStatus(w, r, model.SiteStatusActive)
+}
+
+func (s *Server) handleSetSiteStatus(w http.ResponseWriter, r *http.Request, status string) {
+	siteID := cleanID(r.PathValue("id"))
+	if siteID == "" {
+		writeError(w, http.StatusBadRequest, "site id is required")
+		return
+	}
+	if _, ok := s.getSiteForAPI(w, r, siteID); !ok {
+		return
+	}
+	site, err := s.db.SetSiteStatus(r.Context(), siteID, status)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.siteView(site))
+}
+
+func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request) {
+	siteID := cleanID(r.PathValue("id"))
+	if siteID == "" {
+		writeError(w, http.StatusBadRequest, "site id is required")
+		return
+	}
+	site, ok := s.getSiteForAPI(w, r, siteID)
+	if !ok {
+		return
+	}
+	force, err := queryBool(r, "force", false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !force {
+		writeError(w, http.StatusBadRequest, "force=true is required to delete a site and all tracked resources")
+		return
+	}
+	deleteRemote, err := queryBool(r, "delete_remote", true)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	result := s.deleteSite(r.Context(), site, deleteRemote)
+	if len(result.Errors) > 0 {
+		writeJSON(w, http.StatusBadGateway, result)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleBindSiteDomains(w http.ResponseWriter, r *http.Request) {
@@ -3364,6 +3494,12 @@ func (s *Server) serveSiteByHost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveSitePath(w http.ResponseWriter, r *http.Request, site *model.Site, reqPath string) {
+	if site.Status == model.SiteStatusOffline {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-SuperCDN-Site-Status", model.SiteStatusOffline)
+		writeError(w, http.StatusGone, "site is offline")
+		return
+	}
 	if dep, err := s.db.ActiveSiteDeployment(r.Context(), site.ID); err == nil {
 		s.serveSiteDeploymentPath(w, r, site, dep, reqPath, false)
 		return
@@ -4603,6 +4739,79 @@ func storageGroupFromProjectID(projectID string) string {
 	return storageGroupForBucket(strings.TrimPrefix(projectID, prefix))
 }
 
+type deleteBucketObjectsSelector struct {
+	Paths  []string
+	Prefix string
+	All    bool
+}
+
+func (s deleteBucketObjectsSelector) singlePath() bool {
+	return len(s.Paths) == 1 && s.Prefix == "" && !s.All
+}
+
+func (s deleteBucketObjectsSelector) needsForce() bool {
+	return s.Prefix != "" || s.All
+}
+
+func deleteBucketObjectsSelectorFromQuery(r *http.Request) (deleteBucketObjectsSelector, error) {
+	q := r.URL.Query()
+	rawPaths := append([]string(nil), q["path"]...)
+	for _, value := range q["paths"] {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				rawPaths = append(rawPaths, part)
+			}
+		}
+	}
+	selector := deleteBucketObjectsSelector{}
+	seen := map[string]bool{}
+	for _, raw := range rawPaths {
+		cleaned, err := storage.CleanObjectPath(raw)
+		if err != nil {
+			return selector, err
+		}
+		if seen[cleaned] {
+			continue
+		}
+		seen[cleaned] = true
+		selector.Paths = append(selector.Paths, cleaned)
+	}
+	rawPrefix := strings.TrimSpace(q.Get("prefix"))
+	if rawPrefix != "" {
+		prefix, err := storage.CleanDirectoryPath(rawPrefix)
+		if err != nil {
+			return selector, err
+		}
+		if prefix == "" {
+			return selector, fmt.Errorf("use all=true to delete every object in a bucket")
+		}
+		selector.Prefix = prefix
+	}
+	all, err := queryBool(r, "all", false)
+	if err != nil {
+		return selector, err
+	}
+	selector.All = all
+	modes := 0
+	if len(selector.Paths) > 0 {
+		modes++
+	}
+	if selector.Prefix != "" {
+		modes++
+	}
+	if selector.All {
+		modes++
+	}
+	if modes == 0 {
+		return selector, fmt.Errorf("select at least one bucket object with path, paths, prefix, or all=true")
+	}
+	if modes > 1 {
+		return selector, fmt.Errorf("select only one of path/paths, prefix, or all=true")
+	}
+	return selector, nil
+}
+
 func (s *Server) deleteBucketObject(ctx context.Context, bucketSlug, logicalPath string, deleteRemote bool) (*deleteBucketObjectResult, error) {
 	bucket, err := s.db.GetAssetBucket(ctx, bucketSlug)
 	if err != nil {
@@ -4613,6 +4822,70 @@ func (s *Server) deleteBucketObject(ctx context.Context, bucketSlug, logicalPath
 		return nil, err
 	}
 	return s.deleteBucketObjectItem(ctx, bucket, *item, deleteRemote)
+}
+
+func (s *Server) deleteBucketObjects(ctx context.Context, bucket *model.AssetBucket, selector deleteBucketObjectsSelector, deleteRemote bool) (*deleteBucketObjectsResult, error) {
+	result := &deleteBucketObjectsResult{
+		Bucket:       bucket.Slug,
+		DeleteRemote: deleteRemote,
+		Paths:        append([]string(nil), selector.Paths...),
+		Prefix:       selector.Prefix,
+		All:          selector.All,
+	}
+	items, err := s.bucketObjectsForDelete(ctx, bucket.Slug, selector)
+	if err != nil {
+		result.Errors = append(result.Errors, err.Error())
+		return result, err
+	}
+	result.ObjectCount = len(items)
+	for _, item := range items {
+		deleted, err := s.deleteBucketObjectItem(ctx, bucket, item, deleteRemote)
+		if deleted != nil {
+			result.Objects = append(result.Objects, *deleted)
+		}
+		if err != nil {
+			result.Errors = append(result.Errors, err.Error())
+		}
+	}
+	if len(result.Errors) > 0 {
+		return result, errors.New(strings.Join(result.Errors, "; "))
+	}
+	return result, nil
+}
+
+func (s *Server) bucketObjectsForDelete(ctx context.Context, bucketSlug string, selector deleteBucketObjectsSelector) ([]model.AssetBucketObject, error) {
+	if len(selector.Paths) > 0 {
+		items := make([]model.AssetBucketObject, 0, len(selector.Paths))
+		for _, logicalPath := range selector.Paths {
+			item, err := s.db.GetAssetBucketObject(ctx, bucketSlug, logicalPath)
+			if err != nil {
+				return nil, fmt.Errorf("bucket object %q not found: %w", logicalPath, err)
+			}
+			items = append(items, *item)
+		}
+		return items, nil
+	}
+	items, err := s.db.ListAllAssetBucketObjects(ctx, bucketSlug)
+	if err != nil {
+		return nil, err
+	}
+	if selector.All {
+		return items, nil
+	}
+	filtered := make([]model.AssetBucketObject, 0, len(items))
+	for _, item := range items {
+		if bucketObjectMatchesPrefix(item.LogicalPath, selector.Prefix) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
+}
+
+func bucketObjectMatchesPrefix(logicalPath, prefix string) bool {
+	if prefix == "" {
+		return false
+	}
+	return logicalPath == prefix || strings.HasPrefix(logicalPath, prefix+"/")
 }
 
 func (s *Server) deleteAssetBucket(ctx context.Context, bucket *model.AssetBucket, deleteObjects, deleteRemote bool) (*deleteAssetBucketResult, error) {
@@ -4698,6 +4971,86 @@ type siteDeploymentObjectRef struct {
 	Role     string
 	Path     string
 	ObjectID int64
+}
+
+func (s *Server) deleteSite(ctx context.Context, site *model.Site, deleteRemote bool) deleteSiteResult {
+	result := deleteSiteResult{
+		SiteID:       site.ID,
+		DeleteRemote: deleteRemote,
+	}
+	deployments, err := s.db.ListAllSiteDeployments(ctx, site.ID)
+	if err != nil {
+		result.Errors = append(result.Errors, err.Error())
+		return result
+	}
+	result.DeploymentCount = len(deployments)
+	warnedCloudflare := false
+	for i := range deployments {
+		dep := deployments[i]
+		depResult := deleteSiteDeploymentResult{
+			SiteID:        site.ID,
+			DeploymentID:  dep.ID,
+			DeleteObjects: true,
+			DeleteRemote:  deleteRemote,
+		}
+		if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic || dep.DeploymentTarget == model.SiteDeploymentTargetHybridEdge {
+			depResult.Warning = "deleted Super CDN metadata and tracked resource objects only; Cloudflare Worker versions, custom domains and KV entries are not deleted by this command"
+			if !warnedCloudflare {
+				result.Warnings = append(result.Warnings, depResult.Warning)
+				warnedCloudflare = true
+			}
+		}
+		deleted, err := s.deleteSiteDeploymentObjects(ctx, &dep, deleteRemote)
+		if deleted != nil {
+			depResult.Objects = deleted
+			depResult.ObjectCount = len(deleted)
+			result.ObjectCount += len(deleted)
+			for _, item := range deleted {
+				depResult.Errors = append(depResult.Errors, item.Errors...)
+				result.Errors = append(result.Errors, item.Errors...)
+			}
+		}
+		if err != nil {
+			if len(depResult.Errors) == 0 {
+				depResult.Errors = append(depResult.Errors, err.Error())
+			}
+			result.Errors = append(result.Errors, err.Error())
+		}
+		result.Deployments = append(result.Deployments, depResult)
+	}
+	if len(result.Errors) > 0 {
+		return result
+	}
+	for _, projectID := range siteProjectIDs(site.ID, deployments) {
+		if err := s.db.DeleteProject(ctx, projectID); err != nil && !db.IsNotFound(err) {
+			result.Errors = append(result.Errors, err.Error())
+		}
+	}
+	if len(result.Errors) > 0 {
+		return result
+	}
+	if err := s.db.DeleteSite(ctx, site.ID); err != nil {
+		result.Errors = append(result.Errors, err.Error())
+		return result
+	}
+	for i := range result.Deployments {
+		result.Deployments[i].Deleted = true
+		result.Deployments[i].DeletedDeployment = true
+	}
+	result.DeletedSite = true
+	result.Deleted = true
+	return result
+}
+
+func siteProjectIDs(siteID string, deployments []model.SiteDeployment) []string {
+	ids := []string{
+		"site-artifacts:" + siteID,
+		"site-manifests:" + siteID,
+	}
+	for _, dep := range deployments {
+		ids = append(ids, "site-deployment:"+siteID+":"+dep.ID)
+	}
+	return ids
 }
 
 func (s *Server) deleteSiteDeploymentObjects(ctx context.Context, dep *model.SiteDeployment, deleteRemote bool) ([]deleteSiteDeploymentObjectResult, error) {
@@ -7221,6 +7574,9 @@ func (s *Server) siteView(site *model.Site) model.Site {
 	view := *site
 	if view.DeploymentTarget == "" {
 		view.DeploymentTarget = model.SiteDeploymentTargetOriginAssisted
+	}
+	if view.Status == "" {
+		view.Status = model.SiteStatusActive
 	}
 	view.URLs = s.siteDomainURLs(site.Domains)
 	if len(view.URLs) > 0 {

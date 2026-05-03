@@ -202,6 +202,7 @@ func (d *DB) migrate(ctx context.Context) error {
 			route_profile TEXT NOT NULL,
 			deployment_target TEXT NOT NULL DEFAULT '',
 			routing_policy TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active',
 			created_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS site_deployments (
@@ -276,6 +277,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := d.ensureColumn(ctx, "sites", "routing_policy", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := d.ensureColumn(ctx, "sites", "status", "TEXT NOT NULL DEFAULT 'active'"); err != nil {
 		return err
 	}
 	if err := d.ensureColumn(ctx, "site_deployments", "deployment_target", "TEXT NOT NULL DEFAULT ''"); err != nil {
@@ -954,9 +958,9 @@ func (d *DB) CreateSiteInWorkspace(ctx context.Context, workspaceID, id, name, m
 	}
 	now := nowString()
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO sites(id, workspace_id, name, mode, route_profile, deployment_target, routing_policy, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET name = excluded.name, mode = excluded.mode, route_profile = excluded.route_profile, deployment_target = excluded.deployment_target, routing_policy = excluded.routing_policy`, id, workspaceID, name, mode, routeProfile, deploymentTarget, routingPolicy, now)
+		INSERT INTO sites(id, workspace_id, name, mode, route_profile, deployment_target, routing_policy, status, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET name = excluded.name, mode = excluded.mode, route_profile = excluded.route_profile, deployment_target = excluded.deployment_target, routing_policy = excluded.routing_policy`, id, workspaceID, name, mode, routeProfile, deploymentTarget, routingPolicy, model.SiteStatusActive, now)
 	if err != nil {
 		return nil, err
 	}
@@ -969,13 +973,16 @@ func (d *DB) CreateSiteInWorkspace(ctx context.Context, workspaceID, id, name, m
 func (d *DB) GetSite(ctx context.Context, id string) (*model.Site, error) {
 	var s model.Site
 	var created string
-	err := d.sql.QueryRowContext(ctx, `SELECT id, workspace_id, name, mode, route_profile, deployment_target, routing_policy, created_at FROM sites WHERE id = ?`, id).
-		Scan(&s.ID, &s.WorkspaceID, &s.Name, &s.Mode, &s.RouteProfile, &s.DeploymentTarget, &s.RoutingPolicy, &created)
+	err := d.sql.QueryRowContext(ctx, `SELECT id, workspace_id, name, mode, route_profile, deployment_target, routing_policy, status, created_at FROM sites WHERE id = ?`, id).
+		Scan(&s.ID, &s.WorkspaceID, &s.Name, &s.Mode, &s.RouteProfile, &s.DeploymentTarget, &s.RoutingPolicy, &s.Status, &created)
 	if err != nil {
 		return nil, err
 	}
 	if s.DeploymentTarget == "" {
 		s.DeploymentTarget = model.SiteDeploymentTargetOriginAssisted
+	}
+	if s.Status == "" {
+		s.Status = model.SiteStatusActive
 	}
 	s.CreatedAt = parseTime(created)
 	domains, err := d.DomainsForSite(ctx, id)
@@ -984,6 +991,82 @@ func (d *DB) GetSite(ctx context.Context, id string) (*model.Site, error) {
 	}
 	s.Domains = domains
 	return &s, nil
+}
+
+func (d *DB) ListSitesInWorkspace(ctx context.Context, workspaceID string) ([]model.Site, error) {
+	query := `SELECT id, workspace_id, name, mode, route_profile, deployment_target, routing_policy, status, created_at FROM sites`
+	args := []any{}
+	if workspaceID != "" {
+		query += ` WHERE workspace_id = ?`
+		args = append(args, workspaceID)
+	}
+	query += ` ORDER BY created_at DESC, id`
+	rows, err := d.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	sites := []model.Site{}
+	for rows.Next() {
+		var s model.Site
+		var created string
+		if err := rows.Scan(&s.ID, &s.WorkspaceID, &s.Name, &s.Mode, &s.RouteProfile, &s.DeploymentTarget, &s.RoutingPolicy, &s.Status, &created); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if s.DeploymentTarget == "" {
+			s.DeploymentTarget = model.SiteDeploymentTargetOriginAssisted
+		}
+		if s.Status == "" {
+			s.Status = model.SiteStatusActive
+		}
+		s.CreatedAt = parseTime(created)
+		sites = append(sites, s)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range sites {
+		domains, err := d.DomainsForSite(ctx, sites[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		sites[i].Domains = domains
+	}
+	return sites, nil
+}
+
+func (d *DB) SetSiteStatus(ctx context.Context, siteID, status string) (*model.Site, error) {
+	res, err := d.sql.ExecContext(ctx, `UPDATE sites SET status = ? WHERE id = ?`, status, siteID)
+	if err != nil {
+		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return d.GetSite(ctx, siteID)
+}
+
+func (d *DB) DeleteSite(ctx context.Context, siteID string) error {
+	res, err := d.sql.ExecContext(ctx, `DELETE FROM sites WHERE id = ?`, siteID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (d *DB) SetDomains(ctx context.Context, siteID string, domains []string) error {

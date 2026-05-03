@@ -110,12 +110,18 @@ Run the full operational probe only when real Cloudflare/R2 credentials should b
 ```powershell
 $env:SUPERCDN_TOKEN = "change-me"
 go run .\cmd\supercdnctl -- create-site -site demo -profile overseas -domains demo.local
+go run .\cmd\supercdnctl -- list-sites
 go run .\cmd\supercdnctl -- deploy-site -site demo -dir .\dist
+go run .\cmd\supercdnctl -- update-site -site demo -dir .\dist
 ```
 
 For local testing without DNS, use `http://127.0.0.1:8080/s/demo/`.
 
 Static site deploys use immutable deployments. The CLI uploads a zip artifact, the server unpacks it locally, saves the original zip, writes a manifest, and uploads site files with the original directory layout under `sites/{site}/deployments/{deployment}/root/...`. Preview deployments are available at `/p/{site}/{deployment}/`; production is an atomic promote to the active deployment and can be rolled back by promoting an older deployment.
+
+Use `update-site` for long-lived projects where the production domain must stay stable. It is the maintenance-facing wrapper around the deployment pipeline: the site must already exist, and omitted `-target` / `-domains` values are resolved from the current site record. The command replaces the active production deployment, Worker assets and/or hybrid edge manifest while keeping the same bound domain. Use `deploy-site` or `create-site` for first publish, then `update-site` for later code changes.
+
+Site lifecycle is split between offline and destructive delete. `offline-site -site <id>` only marks the site offline and blocks production/public serving with `410 Gone`; deployments, previews and resource objects stay available for maintenance and can be restored with `online-site -site <id>`. `delete-site -site <id> -force` is the destructive path: it cleans tracked deployment files, artifacts, manifests and related metadata before removing the site record. Cloudflare Worker versions, custom domains and KV entries are outside this cleanup path and must be handled separately when used.
 
 For `cloudflare_static`, promotion is intentionally stricter: the normal `promote-deployment` endpoint will not metadata-promote an older Cloudflare Static record, because the real Worker assets and the Super CDN active row could diverge. Rollback for Cloudflare Static should be done by redeploying the desired assets or by a dedicated Cloudflare Worker rollback flow. Deleting a Cloudflare Static deployment currently deletes Super CDN metadata only; it does not delete Worker versions or custom domains. For origin-assisted deployments, `delete-deployment -delete-objects -delete-remote=true` removes tracked site files, artifacts and manifests through the same remote-replica cleanup path used by asset buckets.
 
@@ -484,12 +490,17 @@ go run .\cmd\supercdnctl -- warmup-bucket -bucket movie-posters -path posters/po
 
 `purge-bucket` and `warmup-bucket` select objects by `-path`, comma-separated `-paths`, `-prefix`, or `-all`. Warmup uses `HEAD` by default; pass `-method GET` only when you intentionally want to fetch full objects through the public URL.
 
-Delete one object or a whole bucket:
+Delete one object, a selected group, or a whole bucket:
 
 ```powershell
 go run .\cmd\supercdnctl -- delete-bucket-object -bucket movie-posters -path posters/poster.jpg
+go run .\cmd\supercdnctl -- delete-bucket-object -bucket movie-posters -paths posters/a.jpg,posters/b.jpg
+go run .\cmd\supercdnctl -- delete-bucket-object -bucket movie-posters -prefix posters/tmp/ -force
+go run .\cmd\supercdnctl -- delete-bucket-object -bucket movie-posters -all -force
 go run .\cmd\supercdnctl -- delete-bucket -bucket movie-posters -force
 ```
+
+`delete-bucket-object` supports the same object selectors as cache purge/warmup: `-path`, comma-separated `-paths`, `-prefix`, or `-all`. Prefix and all-object deletion require `-force`. By default deletions remove tracked remote replicas before removing local metadata; `-delete-remote=false` only drops the local index and should be reserved for recovery work.
 
 Public bucket assets are served at:
 
