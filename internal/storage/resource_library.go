@@ -239,6 +239,11 @@ func (s *ResourceLibraryStore) Stat(ctx context.Context, key string) (*Stat, err
 	for _, binding := range s.bindings {
 		stat, err := binding.Store.Stat(ctx, key)
 		if err == nil {
+			if stat != nil && stat.Locator != "" {
+				updated := *stat
+				updated.Locator = encodeResourceLocator(binding.Name, stat.Locator)
+				return &updated, nil
+			}
 			return stat, nil
 		}
 		lastErr = err

@@ -90,6 +90,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `delete-bucket` | `DELETE /api/v1/asset-buckets/{slug}` | 删除整个桶 |
 | `job` | `GET /api/v1/jobs/{id}` | 查询异步任务 |
 | `replicas` | `GET /api/v1/objects/{id}/replicas` | 查询对象副本 |
+| `refresh-replicas` | `POST /api/v1/objects/{id}/replicas/refresh` | 刷新副本远端可见性、locator 和 IPFS 元数据 |
 | `repair-replicas` | `POST /api/v1/objects/{id}/replicas/repair` | 将失败、缺失或指定副本重新排队复制 |
 | `purge` | `POST /api/v1/cache/purge` | 调 Cloudflare 清缓存 |
 | `sync-site-dns` | `POST /api/v1/sites/{id}/dns` | 同步站点 DNS 记录 |
@@ -1199,6 +1200,26 @@ HTTP:
 
 ```http
 GET /api/v1/objects/{id}/replicas
+```
+
+### refresh-replicas
+
+刷新对象副本的远端可见性。普通资源库会调用 `Stat` 更新 signed locator；IPFS/Pinata 资源会刷新 provider pin 状态和 gateway metadata。远端对象不可见时，副本会标记为 `stale`；资源库请求失败时标记为 `failed`。传 `-target` 可只刷新单个资源库。
+
+```powershell
+.\bin\supercdnctl.exe refresh-replicas -object-id 5
+.\bin\supercdnctl.exe refresh-replicas -object-id 5 -target repo_backup
+```
+
+HTTP:
+
+```http
+POST /api/v1/objects/{id}/replicas/refresh
+Content-Type: application/json
+
+{
+  "target": "repo_backup"
+}
 ```
 
 ### repair-replicas

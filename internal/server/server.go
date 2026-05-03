@@ -192,6 +192,7 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("POST /sites/{id}/gc", s.handleSiteGC)
 	s.apiMux.HandleFunc("GET /jobs/{id}", s.handleGetJob)
 	s.apiMux.HandleFunc("GET /objects/{id}/replicas", s.handleObjectReplicas)
+	s.apiMux.HandleFunc("POST /objects/{id}/replicas/refresh", s.handleRefreshObjectReplicas)
 	s.apiMux.HandleFunc("POST /objects/{id}/replicas/repair", s.handleRepairObjectReplicas)
 	s.apiMux.HandleFunc("POST /cache/purge", s.handlePurgeCache)
 }
@@ -998,6 +999,34 @@ type repairObjectReplicasResponse struct {
 	Jobs     []model.Job                 `json:"jobs,omitempty"`
 	Results  []repairObjectReplicaResult `json:"results,omitempty"`
 	Errors   []string                    `json:"errors,omitempty"`
+}
+
+type refreshObjectReplicasRequest struct {
+	Target string `json:"target,omitempty"`
+}
+
+type refreshObjectReplicaResult struct {
+	Target          string         `json:"target"`
+	PreviousStatus  string         `json:"previous_status,omitempty"`
+	Status          string         `json:"status"`
+	PreviousLocator string         `json:"previous_locator,omitempty"`
+	Locator         string         `json:"locator,omitempty"`
+	Size            int64          `json:"size,omitempty"`
+	ContentType     string         `json:"content_type,omitempty"`
+	CacheControl    string         `json:"cache_control,omitempty"`
+	IPFS            *model.IPFSPin `json:"ipfs,omitempty"`
+	Refreshed       bool           `json:"refreshed"`
+	Skipped         bool           `json:"skipped,omitempty"`
+	SkipReason      string         `json:"skip_reason,omitempty"`
+	Error           string         `json:"error,omitempty"`
+}
+
+type refreshObjectReplicasResponse struct {
+	Status   string                       `json:"status"`
+	ObjectID int64                        `json:"object_id"`
+	Target   string                       `json:"target,omitempty"`
+	Results  []refreshObjectReplicaResult `json:"results,omitempty"`
+	Errors   []string                     `json:"errors,omitempty"`
 }
 
 type cloudflareR2SyncTarget struct {
@@ -3269,6 +3298,33 @@ func (s *Server) handleObjectReplicas(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, replicas)
 }
 
+func (s *Server) handleRefreshObjectReplicas(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid object id")
+		return
+	}
+	var req refreshObjectReplicasRequest
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	obj, err := s.db.GetObject(r.Context(), id)
+	if err != nil {
+		if db.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "object not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	result, err := s.refreshObjectReplicas(r.Context(), obj, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleRepairObjectReplicas(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -4278,6 +4334,166 @@ func (s *Server) hydrateReplicasIPFS(ctx context.Context, objectID int64) ([]mod
 		}
 	}
 	return replicas, nil
+}
+
+func (s *Server) refreshObjectReplicas(ctx context.Context, obj *model.Object, req refreshObjectReplicasRequest) (*refreshObjectReplicasResponse, error) {
+	target := strings.TrimSpace(req.Target)
+	resp := &refreshObjectReplicasResponse{
+		Status:   "ok",
+		ObjectID: obj.ID,
+		Target:   target,
+	}
+	replicas, err := s.db.Replicas(ctx, obj.ID)
+	if err != nil {
+		return nil, err
+	}
+	if target != "" {
+		filtered := replicas[:0]
+		for _, replica := range replicas {
+			if replica.Target == target {
+				filtered = append(filtered, replica)
+			}
+		}
+		replicas = filtered
+		if len(replicas) == 0 {
+			return nil, fmt.Errorf("replica for object %d target %q not found", obj.ID, target)
+		}
+	}
+	if len(replicas) == 0 {
+		return nil, fmt.Errorf("object %d has no replicas", obj.ID)
+	}
+	for _, replica := range replicas {
+		result := s.refreshObjectReplica(ctx, obj, replica)
+		if result.Error != "" {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: %s", result.Target, result.Error))
+		}
+		resp.Results = append(resp.Results, result)
+	}
+	if len(resp.Errors) > 0 {
+		if len(resp.Results) > len(resp.Errors) {
+			resp.Status = "partial"
+		} else {
+			resp.Status = "failed"
+		}
+	}
+	return resp, nil
+}
+
+func (s *Server) refreshObjectReplica(ctx context.Context, obj *model.Object, replica model.Replica) refreshObjectReplicaResult {
+	result := refreshObjectReplicaResult{
+		Target:          replica.Target,
+		PreviousStatus:  replica.Status,
+		Status:          replica.Status,
+		PreviousLocator: replica.Locator,
+		Locator:         replica.Locator,
+	}
+	if replica.Status == model.ReplicaPending && replica.Locator == "" {
+		result.Skipped = true
+		result.SkipReason = "replica is pending without locator"
+		return result
+	}
+	store, ok := s.stores.Get(replica.Target)
+	if !ok {
+		result.Status = model.ReplicaFailed
+		result.Error = fmt.Sprintf("storage target %q is not configured", replica.Target)
+		_, _ = s.db.UpsertReplica(ctx, obj.ID, replica.Target, model.ReplicaFailed, replica.Locator, result.Error)
+		return result
+	}
+	if ipfsResult, handled := s.refreshObjectIPFSReplica(ctx, obj, replica, store, result); handled {
+		return ipfsResult
+	}
+	stat, err := store.Stat(ctx, obj.Key)
+	if err != nil {
+		status := model.ReplicaFailed
+		message := err.Error()
+		if errors.Is(err, storage.ErrNotFound) {
+			status = model.ReplicaStale
+			message = "remote object not found"
+		}
+		result.Status = status
+		result.Error = message
+		_, _ = s.db.UpsertReplica(ctx, obj.ID, replica.Target, status, replica.Locator, message)
+		return result
+	}
+	locator := firstNonEmpty(stat.Locator, replica.Locator, store.PublicURL(obj.Key))
+	saved, err := s.db.UpsertReplica(ctx, obj.ID, replica.Target, model.ReplicaReady, locator, "")
+	if err != nil {
+		result.Status = model.ReplicaFailed
+		result.Error = err.Error()
+		return result
+	}
+	if err := s.recordIPFSReplica(ctx, obj.ID, replica.Target, store, locator); err != nil {
+		result.Status = model.ReplicaFailed
+		result.Error = err.Error()
+		return result
+	}
+	result.Status = saved.Status
+	result.Locator = saved.Locator
+	result.Size = stat.Size
+	result.ContentType = stat.ContentType
+	result.CacheControl = stat.CacheControl
+	result.Refreshed = true
+	return result
+}
+
+func (s *Server) refreshObjectIPFSReplica(ctx context.Context, obj *model.Object, replica model.Replica, store storage.Store, result refreshObjectReplicaResult) (refreshObjectReplicaResult, bool) {
+	cid, ok := storage.IPFSCIDFromLocator(replica.Locator)
+	if !ok {
+		if pin, err := s.db.GetIPFSPin(ctx, obj.ID, replica.Target); err == nil {
+			cid = pin.CID
+			ok = cid != ""
+		}
+	}
+	if !ok {
+		return result, false
+	}
+	refresher, ok := store.(storage.IPFSPinStatusStore)
+	if !ok {
+		return result, false
+	}
+	status, err := refresher.RefreshIPFSPin(ctx, cid)
+	if err != nil {
+		result.Status = model.ReplicaFailed
+		result.Error = err.Error()
+		_, _ = s.db.UpsertReplica(ctx, obj.ID, replica.Target, model.ReplicaFailed, replica.Locator, err.Error())
+		return result, true
+	}
+	pin := model.IPFSPin{
+		ObjectID:      obj.ID,
+		Target:        replica.Target,
+		Provider:      firstNonEmpty(status.Provider, store.Type(), "ipfs"),
+		CID:           firstNonEmpty(status.CID, cid),
+		GatewayURL:    status.GatewayURL,
+		Locator:       storage.PreserveIPFSProviderQuery(firstNonEmpty(status.Locator, replica.Locator), replica.Locator),
+		PinStatus:     firstNonEmpty(status.PinStatus, "unknown"),
+		ProviderPinID: status.ProviderPinID,
+	}
+	savedPin, err := s.db.UpsertIPFSPin(ctx, pin)
+	if err != nil {
+		result.Status = model.ReplicaFailed
+		result.Error = err.Error()
+		return result, true
+	}
+	replicaStatus := model.ReplicaReady
+	lastErr := ""
+	if savedPin.PinStatus != "pinned" {
+		replicaStatus = model.ReplicaStale
+		lastErr = "ipfs pin status is " + firstNonEmpty(savedPin.PinStatus, "unknown")
+	}
+	saved, err := s.db.UpsertReplica(ctx, obj.ID, replica.Target, replicaStatus, firstNonEmpty(savedPin.Locator, replica.Locator), lastErr)
+	if err != nil {
+		result.Status = model.ReplicaFailed
+		result.Error = err.Error()
+		return result, true
+	}
+	result.Status = saved.Status
+	result.Locator = saved.Locator
+	result.IPFS = savedPin
+	result.Refreshed = true
+	if lastErr != "" {
+		result.Error = lastErr
+	}
+	return result, true
 }
 
 func (s *Server) repairObjectReplicas(ctx context.Context, obj *model.Object, req repairObjectReplicasRequest) (*repairObjectReplicasResponse, error) {

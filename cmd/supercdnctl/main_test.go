@@ -1106,6 +1106,31 @@ func TestRepairReplicasPostsRepairRequest(t *testing.T) {
 	}
 }
 
+func TestRefreshReplicasPostsRefreshRequest(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/objects/42/replicas/refresh" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	c := client{baseURL: srv.URL, token: "test-token", http: srv.Client()}
+	if err := refreshReplicas(c, []string{"-object-id", "42", "-target", "repo_backup"}); err != nil {
+		t.Fatal(err)
+	}
+	if got["target"] != "repo_backup" {
+		t.Fatalf("refresh request = %#v", got)
+	}
+	if err := refreshReplicas(c, []string{"-target", "repo_backup"}); err == nil || !strings.Contains(err.Error(), "-object-id") {
+		t.Fatalf("missing object id error = %v", err)
+	}
+}
+
 func TestUploadBucketWarmupCallsWarmupEndpoint(t *testing.T) {
 	var uploadSeen, warmupSeen bool
 	var warmupReq map[string]any

@@ -653,6 +653,151 @@ func TestRepairObjectReplicasQueuesFailedAndMissingTargets(t *testing.T) {
 	}
 }
 
+func TestRefreshObjectReplicasUpdatesLocatorAndMarksStale(t *testing.T) {
+	app := newTestServer(t)
+	fresh := &signedLocatorStore{
+		name:        "fresh",
+		statLocator: "https://fresh.example/objects/demo.txt?sig=new",
+	}
+	missing := &signedLocatorStore{
+		name:    "missing",
+		statErr: storage.ErrNotFound,
+	}
+	app.stores = storage.NewManager([]storage.Store{fresh, missing})
+
+	ctx := context.Background()
+	if _, err := app.db.CreateProject(ctx, "refresh-test"); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := app.db.SaveObject(ctx, model.Object{
+		ProjectID:     "refresh-test",
+		Path:          "files/demo.txt",
+		Key:           "objects/demo.txt",
+		RouteProfile:  "overseas",
+		Size:          12,
+		SHA256:        "abc123",
+		ContentType:   "text/plain",
+		CacheControl:  "public, max-age=60",
+		PrimaryTarget: "fresh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "fresh", model.ReplicaReady, "https://fresh.example/objects/demo.txt?sig=old", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "missing", model.ReplicaReady, "https://missing.example/objects/demo.txt?sig=old", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/objects/"+strconv.FormatInt(obj.ID, 10)+"/replicas/refresh", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp refreshObjectReplicasResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "partial" || len(resp.Results) != 2 || len(resp.Errors) != 1 {
+		t.Fatalf("unexpected refresh response: %+v", resp)
+	}
+	byTarget := map[string]refreshObjectReplicaResult{}
+	for _, result := range resp.Results {
+		byTarget[result.Target] = result
+	}
+	if !byTarget["fresh"].Refreshed || byTarget["fresh"].Status != model.ReplicaReady || byTarget["fresh"].Locator != fresh.statLocator {
+		t.Fatalf("fresh result = %+v", byTarget["fresh"])
+	}
+	if byTarget["missing"].Status != model.ReplicaStale || byTarget["missing"].Error != "remote object not found" {
+		t.Fatalf("missing result = %+v", byTarget["missing"])
+	}
+	replicas, err := app.db.Replicas(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusByTarget := map[string]string{}
+	locatorByTarget := map[string]string{}
+	for _, replica := range replicas {
+		statusByTarget[replica.Target] = replica.Status
+		locatorByTarget[replica.Target] = replica.Locator
+	}
+	if statusByTarget["fresh"] != model.ReplicaReady || locatorByTarget["fresh"] != fresh.statLocator {
+		t.Fatalf("fresh replica status=%q locator=%q", statusByTarget["fresh"], locatorByTarget["fresh"])
+	}
+	if statusByTarget["missing"] != model.ReplicaStale {
+		t.Fatalf("missing status = %q", statusByTarget["missing"])
+	}
+}
+
+func TestRefreshObjectReplicasRefreshesIPFSMetadata(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v3/files/public" || r.URL.Query().Get("cid") != "bafyrefresh" {
+			t.Fatalf("unexpected API request %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"data":{"files":[{"id":"file-refresh","cid":"bafyrefresh"}]}}`))
+	}))
+	defer api.Close()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+
+	app := newPinataStatusTestServer(t, api.URL, gateway.URL)
+	ctx := context.Background()
+	if _, err := app.db.CreateProject(ctx, "refresh-ipfs-test"); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := app.db.SaveObject(ctx, model.Object{
+		ProjectID:     "refresh-ipfs-test",
+		Path:          "files/demo.txt",
+		Key:           "objects/demo.txt",
+		RouteProfile:  "ipfs_archive",
+		Size:          12,
+		SHA256:        "abc123",
+		ContentType:   "text/plain",
+		CacheControl:  "public, max-age=31536000, immutable",
+		PrimaryTarget: "ipfs_pinata",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "ipfs_pinata", model.ReplicaReady, "ipfs://bafyrefresh?pinata_file_id=old-file", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/objects/"+strconv.FormatInt(obj.ID, 10)+"/replicas/refresh", "test-token", map[string]any{
+		"target": "ipfs_pinata",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp refreshObjectReplicasResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "ok" || len(resp.Results) != 1 {
+		t.Fatalf("unexpected refresh response: %+v", resp)
+	}
+	result := resp.Results[0]
+	if !result.Refreshed || result.Status != model.ReplicaReady || result.IPFS == nil || result.IPFS.ProviderPinID != "file-refresh" {
+		t.Fatalf("result = %+v", result)
+	}
+	pin, err := app.db.GetIPFSPin(ctx, obj.ID, "ipfs_pinata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin.CID != "bafyrefresh" || pin.ProviderPinID != "file-refresh" || pin.PinStatus != "pinned" {
+		t.Fatalf("pin = %+v", pin)
+	}
+	replicas, err := app.db.Replicas(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replicas) != 1 || replicas[0].Status != model.ReplicaReady || !strings.Contains(replicas[0].Locator, "pinata_file_id=file-refresh") {
+		t.Fatalf("replicas = %+v", replicas)
+	}
+}
+
 func TestIPFSSiteDeploymentRedirectsAssetToGateway(t *testing.T) {
 	var uploadCount int
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

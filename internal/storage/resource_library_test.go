@@ -83,6 +83,25 @@ func TestResourceLibraryPutWaitsForVerifiedLocator(t *testing.T) {
 	}
 }
 
+func TestResourceLibraryStatPreservesBindingInLocator(t *testing.T) {
+	store := &verifyAfterPutStore{name: "binding"}
+	library, err := NewResourceLibraryStore("repo", []ResourceLibraryBindingStore{{
+		Name:  "binding_path",
+		Store: store,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, err := library.Stat(context.Background(), "objects/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingName, innerLocator, ok := decodeResourceLocator(stat.Locator)
+	if !ok || bindingName != "binding_path" || innerLocator != "https://signed.example/objects/a.txt" {
+		t.Fatalf("locator = %q binding=%q inner=%q ok=%v", stat.Locator, bindingName, innerLocator, ok)
+	}
+}
+
 func TestResourceLibraryGetFallsBackWhenLocatorBindingFails(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

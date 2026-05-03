@@ -192,6 +192,8 @@ func main() {
 		err = getJob(c, args[1:])
 	case "replicas":
 		err = replicas(c, args[1:])
+	case "refresh-replicas":
+		err = refreshReplicas(c, args[1:])
 	case "repair-replicas":
 		err = repairReplicas(c, args[1:])
 	case "purge":
@@ -4056,6 +4058,19 @@ func replicas(c client, args []string) error {
 	return c.do(http.MethodGet, "/api/v1/objects/"+*id+"/replicas", nil, "")
 }
 
+func refreshReplicas(c client, args []string) error {
+	fs := flag.NewFlagSet("refresh-replicas", flag.ExitOnError)
+	id := fs.String("object-id", "", "object id")
+	target := fs.String("target", "", "optional replica target to refresh")
+	_ = fs.Parse(args)
+	if *id == "" {
+		return errors.New("-object-id is required")
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/objects/"+*id+"/replicas/refresh", map[string]any{
+		"target": strings.TrimSpace(*target),
+	})
+}
+
 func repairReplicas(c client, args []string) error {
 	fs := flag.NewFlagSet("repair-replicas", flag.ExitOnError)
 	id := fs.String("object-id", "", "object id")
@@ -4611,6 +4626,7 @@ func usage() {
   supercdnctl [global flags] delete-bucket -bucket movie-posters -force
   supercdnctl [global flags] job -id 1
   supercdnctl [global flags] replicas -object-id 1
+  supercdnctl [global flags] refresh-replicas -object-id 1 -target repo_backup
   supercdnctl [global flags] repair-replicas -object-id 1 -target repo_backup
   supercdnctl [global flags] purge -urls https://example.com/a.css
   supercdnctl [global flags] purge-site -site blog -dry-run
