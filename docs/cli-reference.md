@@ -90,6 +90,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `delete-bucket` | `DELETE /api/v1/asset-buckets/{slug}` | 删除整个桶 |
 | `job` | `GET /api/v1/jobs/{id}` | 查询异步任务 |
 | `replicas` | `GET /api/v1/objects/{id}/replicas` | 查询对象副本 |
+| `repair-replicas` | `POST /api/v1/objects/{id}/replicas/repair` | 将失败、缺失或指定副本重新排队复制 |
 | `purge` | `POST /api/v1/cache/purge` | 调 Cloudflare 清缓存 |
 | `sync-site-dns` | `POST /api/v1/sites/{id}/dns` | 同步站点 DNS 记录 |
 | `sync-worker-routes` | `POST /api/v1/sites/{id}/worker-routes` | 同步站点 Worker routes |
@@ -1198,6 +1199,28 @@ HTTP:
 
 ```http
 GET /api/v1/objects/{id}/replicas
+```
+
+### repair-replicas
+
+将对象的缺失、失败或陈旧副本重新排队复制。默认会按对象的 route profile 检查 primary 和 backups，跳过已经 `ready` 或 `pending` 的副本；传 `-target` 可只修复单个资源库，传 `-force` 会连 `ready/pending` 副本也重新排队。
+
+```powershell
+.\bin\supercdnctl.exe repair-replicas -object-id 5
+.\bin\supercdnctl.exe repair-replicas -object-id 5 -target repo_backup
+.\bin\supercdnctl.exe repair-replicas -object-id 5 -target ipfs_pinata -force
+```
+
+HTTP:
+
+```http
+POST /api/v1/objects/{id}/replicas/repair
+Content-Type: application/json
+
+{
+  "target": "repo_backup",
+  "force": false
+}
 ```
 
 ## IPFS

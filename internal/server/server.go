@@ -192,6 +192,7 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("POST /sites/{id}/gc", s.handleSiteGC)
 	s.apiMux.HandleFunc("GET /jobs/{id}", s.handleGetJob)
 	s.apiMux.HandleFunc("GET /objects/{id}/replicas", s.handleObjectReplicas)
+	s.apiMux.HandleFunc("POST /objects/{id}/replicas/repair", s.handleRepairObjectReplicas)
 	s.apiMux.HandleFunc("POST /cache/purge", s.handlePurgeCache)
 }
 
@@ -971,6 +972,32 @@ type refreshIPFSPinsResponse struct {
 	Target   string          `json:"target,omitempty"`
 	Pins     []model.IPFSPin `json:"pins,omitempty"`
 	Errors   []string        `json:"errors,omitempty"`
+}
+
+type repairObjectReplicasRequest struct {
+	Target string `json:"target,omitempty"`
+	Force  bool   `json:"force"`
+}
+
+type repairObjectReplicaResult struct {
+	Target         string `json:"target"`
+	PreviousStatus string `json:"previous_status,omitempty"`
+	Status         string `json:"status"`
+	JobID          int64  `json:"job_id,omitempty"`
+	Repaired       bool   `json:"repaired"`
+	Skipped        bool   `json:"skipped,omitempty"`
+	SkipReason     string `json:"skip_reason,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
+type repairObjectReplicasResponse struct {
+	Status   string                      `json:"status"`
+	ObjectID int64                       `json:"object_id"`
+	Target   string                      `json:"target,omitempty"`
+	Force    bool                        `json:"force"`
+	Jobs     []model.Job                 `json:"jobs,omitempty"`
+	Results  []repairObjectReplicaResult `json:"results,omitempty"`
+	Errors   []string                    `json:"errors,omitempty"`
 }
 
 type cloudflareR2SyncTarget struct {
@@ -3242,6 +3269,42 @@ func (s *Server) handleObjectReplicas(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, replicas)
 }
 
+func (s *Server) handleRepairObjectReplicas(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid object id")
+		return
+	}
+	var req repairObjectReplicasRequest
+	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	obj, err := s.db.GetObject(r.Context(), id)
+	if err != nil {
+		if db.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "object not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	result, err := s.repairObjectReplicas(r.Context(), obj, req)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "storage target") || strings.Contains(err.Error(), "not configured") {
+			status = http.StatusBadGateway
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if len(result.Errors) > 0 {
+		result.Status = "partial"
+		writeJSON(w, http.StatusBadGateway, result)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handlePurgeCache(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URLs              []string `json:"urls"`
@@ -4215,6 +4278,126 @@ func (s *Server) hydrateReplicasIPFS(ctx context.Context, objectID int64) ([]mod
 		}
 	}
 	return replicas, nil
+}
+
+func (s *Server) repairObjectReplicas(ctx context.Context, obj *model.Object, req repairObjectReplicasRequest) (*repairObjectReplicasResponse, error) {
+	target := strings.TrimSpace(req.Target)
+	resp := &repairObjectReplicasResponse{
+		Status:   "noop",
+		ObjectID: obj.ID,
+		Target:   target,
+		Force:    req.Force,
+	}
+	replicas, err := s.db.Replicas(ctx, obj.ID)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := s.objectReplicaRepairTargets(obj, replicas, target)
+	if err != nil {
+		return nil, err
+	}
+	byTarget := map[string]model.Replica{}
+	for _, replica := range replicas {
+		byTarget[replica.Target] = replica
+	}
+	for _, target := range targets {
+		result := repairObjectReplicaResult{Target: target, Status: model.ReplicaPending}
+		existing, hasReplica := byTarget[target]
+		if hasReplica {
+			result.PreviousStatus = existing.Status
+			if existing.Status == model.ReplicaReady && !req.Force {
+				result.Status = existing.Status
+				result.Skipped = true
+				result.SkipReason = "replica is already ready"
+				resp.Results = append(resp.Results, result)
+				continue
+			}
+			if existing.Status == model.ReplicaPending && !req.Force {
+				result.Status = existing.Status
+				result.Skipped = true
+				result.SkipReason = "replica is already pending"
+				resp.Results = append(resp.Results, result)
+				continue
+			}
+		}
+		if _, ok := s.stores.Get(target); !ok {
+			result.Status = firstNonEmpty(result.PreviousStatus, "missing")
+			result.Error = fmt.Sprintf("storage target %q is not configured", target)
+			resp.Errors = append(resp.Errors, result.Error)
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		if _, err := s.db.UpsertReplica(ctx, obj.ID, target, model.ReplicaPending, "", ""); err != nil {
+			result.Status = firstNonEmpty(result.PreviousStatus, "missing")
+			result.Error = err.Error()
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: %s", target, err.Error()))
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		if err := s.db.DeleteIPFSPin(ctx, obj.ID, target); err != nil {
+			result.Status = model.ReplicaPending
+			result.Error = err.Error()
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: %s", target, err.Error()))
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		payload, _ := json.Marshal(replicatePayload{ObjectID: obj.ID, Target: target})
+		job, err := s.db.CreateJob(ctx, model.JobReplicateObject, string(payload))
+		if err != nil {
+			result.Status = model.ReplicaPending
+			result.Error = err.Error()
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: %s", target, err.Error()))
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		result.JobID = job.ID
+		result.Repaired = true
+		resp.Jobs = append(resp.Jobs, *job)
+		resp.Results = append(resp.Results, result)
+	}
+	if len(resp.Errors) > 0 {
+		if len(resp.Jobs) > 0 {
+			resp.Status = "partial"
+		} else {
+			resp.Status = "failed"
+		}
+	} else if len(resp.Jobs) > 0 {
+		resp.Status = "queued"
+	}
+	return resp, nil
+}
+
+func (s *Server) objectReplicaRepairTargets(obj *model.Object, replicas []model.Replica, requestedTarget string) ([]string, error) {
+	var targets []string
+	allowed := map[string]bool{}
+	add := func(target string) {
+		target = strings.TrimSpace(target)
+		if target == "" || allowed[target] {
+			return
+		}
+		allowed[target] = true
+		targets = append(targets, target)
+	}
+	if profile, ok := s.cfg.Profile(obj.RouteProfile); ok {
+		add(profile.Primary)
+		for _, target := range profile.Backups {
+			add(target)
+		}
+	}
+	add(obj.PrimaryTarget)
+	for _, replica := range replicas {
+		add(replica.Target)
+	}
+	if requestedTarget != "" {
+		if !allowed[requestedTarget] {
+			return nil, fmt.Errorf("target %q is not part of object %d route profile or existing replicas", requestedTarget, obj.ID)
+		}
+		return []string{requestedTarget}, nil
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("object %d has no replica targets to repair", obj.ID)
+	}
+	return targets, nil
 }
 
 func (s *Server) hydrateBucketObjectsIPFS(ctx context.Context, items []model.AssetBucketObject) ([]model.AssetBucketObject, error) {

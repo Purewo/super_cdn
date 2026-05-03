@@ -579,6 +579,80 @@ func TestIPFSUploadPersistsCIDMetadata(t *testing.T) {
 	}
 }
 
+func TestRepairObjectReplicasQueuesFailedAndMissingTargets(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.RouteProfiles = []config.RouteProfile{{
+		Name:    "repair",
+		Primary: "source",
+		Backups: []string{"target", "archive"},
+	}}
+	source := &capturingPutStore{name: "source"}
+	target := &capturingPutStore{name: "target"}
+	archive := &capturingPutStore{name: "archive"}
+	app.stores = storage.NewManager([]storage.Store{source, target, archive})
+
+	ctx := context.Background()
+	if _, err := app.db.CreateProject(ctx, "repair-test"); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := app.db.SaveObject(ctx, model.Object{
+		ProjectID:     "repair-test",
+		Path:          "files/demo.txt",
+		Key:           "objects/demo.txt",
+		RouteProfile:  "repair",
+		Size:          12,
+		SHA256:        "abc123",
+		ContentType:   "text/plain",
+		CacheControl:  "public, max-age=60",
+		PrimaryTarget: "source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "source", model.ReplicaReady, "source://objects/demo.txt", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "target", model.ReplicaFailed, "", "previous failure"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/objects/"+strconv.FormatInt(obj.ID, 10)+"/replicas/repair", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("repair status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp repairObjectReplicasResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "queued" || len(resp.Jobs) != 2 {
+		t.Fatalf("unexpected repair response: %+v", resp)
+	}
+	byTarget := map[string]repairObjectReplicaResult{}
+	for _, result := range resp.Results {
+		byTarget[result.Target] = result
+	}
+	if !byTarget["source"].Skipped || byTarget["source"].PreviousStatus != model.ReplicaReady {
+		t.Fatalf("source result = %+v", byTarget["source"])
+	}
+	if !byTarget["target"].Repaired || byTarget["target"].PreviousStatus != model.ReplicaFailed || byTarget["target"].JobID == 0 {
+		t.Fatalf("target result = %+v", byTarget["target"])
+	}
+	if !byTarget["archive"].Repaired || byTarget["archive"].PreviousStatus != "" || byTarget["archive"].JobID == 0 {
+		t.Fatalf("archive result = %+v", byTarget["archive"])
+	}
+	replicas, err := app.db.Replicas(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusByTarget := map[string]string{}
+	for _, replica := range replicas {
+		statusByTarget[replica.Target] = replica.Status
+	}
+	if statusByTarget["source"] != model.ReplicaReady || statusByTarget["target"] != model.ReplicaPending || statusByTarget["archive"] != model.ReplicaPending {
+		t.Fatalf("replica statuses = %+v", statusByTarget)
+	}
+}
+
 func TestIPFSSiteDeploymentRedirectsAssetToGateway(t *testing.T) {
 	var uploadCount int
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

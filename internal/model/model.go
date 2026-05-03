@@ -6,6 +6,8 @@ const (
 	ReplicaPending = "pending"
 	ReplicaReady   = "ready"
 	ReplicaFailed  = "failed"
+	ReplicaStale   = "stale"
+	ReplicaDeleted = "deleted"
 
 	JobQueued  = "queued"
 	JobRunning = "running"
