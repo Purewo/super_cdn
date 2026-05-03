@@ -72,6 +72,29 @@ func NewResourceLibraryStore(name string, bindings []ResourceLibraryBindingStore
 
 func (s *ResourceLibraryStore) Name() string { return s.name }
 func (s *ResourceLibraryStore) Type() string { return "resource_library" }
+func (s *ResourceLibraryStore) Capabilities() Capabilities {
+	if len(s.bindings) == 0 {
+		return StoreCapabilities(nil)
+	}
+	capabilities := StoreCapabilities(s.bindings[0].Store)
+	capabilities.Notes = append(
+		capabilities.Notes,
+		fmt.Sprintf("resource library uses binding %q as the primary write target", s.bindings[0].Name),
+	)
+	if len(s.bindings) > 1 {
+		capabilities.Notes = append(capabilities.Notes, fmt.Sprintf("library has %d bindings; current writes go to the primary binding and reads can fall through to other bindings", len(s.bindings)))
+	}
+	return capabilities
+}
+
+func (s *ResourceLibraryStore) BindingCapabilities(binding string) (Capabilities, bool) {
+	for _, item := range s.bindings {
+		if item.Name == binding {
+			return StoreCapabilities(item.Store), true
+		}
+	}
+	return Capabilities{}, false
+}
 
 func (s *ResourceLibraryStore) Put(ctx context.Context, opts PutOptions) (string, error) {
 	binding := s.bindings[0]

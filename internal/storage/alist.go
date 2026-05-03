@@ -63,6 +63,24 @@ func NewAListStore(opts AListOptions) (*AListStore, error) {
 
 func (s *AListStore) Name() string { return s.name }
 func (s *AListStore) Type() string { return "alist" }
+func (s *AListStore) Capabilities() Capabilities {
+	publicBase := strings.TrimSpace(s.publicBaseURL)
+	base := firstNonEmpty(publicBase, strings.TrimSpace(s.baseURL))
+	return Capabilities{
+		CanUpload:                true,
+		CanDeleteRemote:          true,
+		CanProducePublicLocator:  base != "",
+		SupportsRangeGET:         true,
+		SupportsHEAD:             false,
+		HTTPOnlyLocatorRisk:      strings.HasPrefix(strings.ToLower(base), "http://"),
+		WebResourceSuitability:   "preferred_resource",
+		CDNBucketSuitability:     "preferred_domestic",
+		ImmutableCIDBehavior:     false,
+		PreferredCachePolicy:     "caller_defined",
+		DirectLocatorDescription: "AList/OpenList raw_url or /d signed proxy URL",
+		Notes:                    []string{"HEAD can be unreliable on downstream cloud drives; validate delivery with GET or Range GET"},
+	}
+}
 
 func (s *AListStore) Put(ctx context.Context, opts PutOptions) (string, error) {
 	f, err := os.Open(opts.FilePath)

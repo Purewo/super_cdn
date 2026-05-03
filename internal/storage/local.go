@@ -37,6 +37,22 @@ func NewLocalStore(name, root string) (*LocalStore, error) {
 
 func (s *LocalStore) Name() string { return s.name }
 func (s *LocalStore) Type() string { return "local" }
+func (s *LocalStore) Capabilities() Capabilities {
+	return Capabilities{
+		CanUpload:                true,
+		CanDeleteRemote:          true,
+		CanProducePublicLocator:  true,
+		SupportsRangeGET:         true,
+		SupportsHEAD:             true,
+		HTTPOnlyLocatorRisk:      false,
+		WebResourceSuitability:   "diagnostic_only",
+		CDNBucketSuitability:     "diagnostic_only",
+		ImmutableCIDBehavior:     false,
+		PreferredCachePolicy:     "caller_defined",
+		DirectLocatorDescription: "local filesystem path",
+		Notes:                    []string{"local store is for diagnostics and compatibility, not public delivery"},
+	}
+}
 
 func (s *LocalStore) Put(_ context.Context, opts PutOptions) (string, error) {
 	dst, err := s.fullPath(opts.Key)

@@ -69,6 +69,22 @@ func NewR2Store(ctx context.Context, opts R2Options) (*R2Store, error) {
 
 func (s *R2Store) Name() string { return s.name }
 func (s *R2Store) Type() string { return "r2" }
+func (s *R2Store) Capabilities() Capabilities {
+	return Capabilities{
+		CanUpload:                true,
+		CanDeleteRemote:          true,
+		CanProducePublicLocator:  strings.TrimSpace(s.publicURL) != "",
+		SupportsRangeGET:         true,
+		SupportsHEAD:             true,
+		HTTPOnlyLocatorRisk:      strings.HasPrefix(strings.ToLower(strings.TrimSpace(s.publicURL)), "http://"),
+		WebResourceSuitability:   "legacy_compatibility",
+		CDNBucketSuitability:     "preferred_overseas",
+		ImmutableCIDBehavior:     false,
+		PreferredCachePolicy:     "public, max-age=31536000, immutable for CDN objects; caller-defined for Web compatibility",
+		DirectLocatorDescription: "R2 public custom domain or r2.dev URL",
+		Notes:                    []string{"R2 is maintained for CDN/object acceleration; new mainstream Web hosting should prefer Cloudflare entry plus non-R2 resource libraries"},
+	}
+}
 
 func (s *R2Store) Put(ctx context.Context, opts PutOptions) (string, error) {
 	f, err := os.Open(opts.FilePath)

@@ -2452,8 +2452,75 @@ func TestResourceLibraryHealthCheckStoresLocalStatus(t *testing.T) {
 	if binding.Status != storage.HealthStatusOK || binding.Health == nil {
 		t.Fatalf("unexpected binding status: %+v", binding)
 	}
+	if status.Libraries[0].Capabilities.WebResourceSuitability != "diagnostic_only" || !status.Libraries[0].Capabilities.SupportsRangeGET {
+		t.Fatalf("unexpected library capabilities: %+v", status.Libraries[0].Capabilities)
+	}
+	if binding.Capabilities.WebResourceSuitability != "diagnostic_only" || !binding.Capabilities.SupportsRangeGET {
+		t.Fatalf("unexpected binding capabilities: %+v", binding.Capabilities)
+	}
 	if binding.Health.CheckMode != storage.HealthModePassive {
 		t.Fatalf("check mode = %q", binding.Health.CheckMode)
+	}
+}
+
+func TestResourceStatusIncludesDirectIPFSTargetCapabilities(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Addr:       "127.0.0.1:0",
+			DataDir:    dir,
+			AdminToken: "test-token",
+		},
+		Database: config.DatabaseConfig{Path: filepath.Join(dir, "test.db")},
+		Storage: []config.StorageConfig{
+			{
+				Name: "local",
+				Type: "local",
+				Local: config.LocalConfig{
+					Root: filepath.Join(dir, "objects"),
+				},
+			},
+			{
+				Name: "ipfs_pinata",
+				Type: "pinata",
+				Pinata: config.PinataConfig{
+					APIBaseURL:     "https://api.pinata.test",
+					UploadBaseURL:  "https://uploads.pinata.test",
+					GatewayBaseURL: "https://gateway.pinata.test",
+					JWT:            "test-jwt",
+				},
+			},
+		},
+	}
+	app, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = app.Close() })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/resource-libraries/status?library=ipfs_pinata", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var status resourceLibraryStatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Libraries) != 1 {
+		t.Fatalf("unexpected status response: %+v", status)
+	}
+	library := status.Libraries[0]
+	if library.Name != "ipfs_pinata" || library.TargetType != "pinata" || len(library.Bindings) != 1 {
+		t.Fatalf("unexpected direct target view: %+v", library)
+	}
+	if !library.Capabilities.ImmutableCIDBehavior || library.Capabilities.WebResourceSuitability != "preferred_immutable_resource" {
+		t.Fatalf("unexpected direct target capabilities: %+v", library.Capabilities)
+	}
+	if library.Bindings[0].Status != "configured" || library.Bindings[0].TargetType != "pinata" {
+		t.Fatalf("unexpected direct target binding: %+v", library.Bindings[0])
 	}
 }
 

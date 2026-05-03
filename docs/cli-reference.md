@@ -680,6 +680,7 @@ GET /api/v1/init/jobs/{id}
 ```powershell
 .\bin\supercdnctl.exe resource-status
 .\bin\supercdnctl.exe resource-status -library repo_china_all
+.\bin\supercdnctl.exe resource-status -library ipfs_pinata
 ```
 
 HTTP:
@@ -687,6 +688,8 @@ HTTP:
 ```http
 GET /api/v1/resource-libraries/status?library=repo_china_all
 ```
+
+返回会包含资源能力声明：是否可上传、是否能删除远端对象、是否能产出公开 locator、Range GET/HEAD 支持、HTTP-only locator 风险、Web/CDN bucket 适用性、CID 不可变行为和建议缓存策略。`resource-status` 也可以查询 `pinata`、`r2`、`alist` 这类直接资源 target；`health-check` 仍只对支持健康检查的资源库执行主动探测。
 
 ### routing-policy-status
 

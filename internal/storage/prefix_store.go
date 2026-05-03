@@ -28,6 +28,13 @@ func (s *PrefixStore) Name() string {
 }
 
 func (s *PrefixStore) Type() string { return s.store.Type() }
+func (s *PrefixStore) Capabilities() Capabilities {
+	capabilities := StoreCapabilities(s.store)
+	if s.prefix != "" {
+		capabilities.Notes = append(capabilities.Notes, "keys are scoped under prefix "+s.prefix)
+	}
+	return capabilities
+}
 
 func (s *PrefixStore) Put(ctx context.Context, opts PutOptions) (string, error) {
 	opts.Key = s.withPrefix(opts.Key)

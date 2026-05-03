@@ -632,18 +632,22 @@ type resourceLibraryStatusResponse struct {
 }
 
 type resourceLibraryStatusView struct {
-	Name     string                       `json:"name"`
-	Bindings []resourceLibraryBindingView `json:"bindings"`
+	Name         string                       `json:"name"`
+	TargetType   string                       `json:"target_type,omitempty"`
+	Capabilities storage.Capabilities         `json:"capabilities"`
+	Bindings     []resourceLibraryBindingView `json:"bindings"`
 }
 
 type resourceLibraryBindingView struct {
-	Name       string                       `json:"name"`
-	Path       string                       `json:"path"`
-	MountPoint string                       `json:"mount_point,omitempty"`
-	Status     string                       `json:"status"`
-	Skipped    bool                         `json:"skipped,omitempty"`
-	SkipReason string                       `json:"skip_reason,omitempty"`
-	Health     *model.ResourceLibraryHealth `json:"health,omitempty"`
+	Name         string                       `json:"name"`
+	Path         string                       `json:"path"`
+	MountPoint   string                       `json:"mount_point,omitempty"`
+	TargetType   string                       `json:"target_type,omitempty"`
+	Status       string                       `json:"status"`
+	Capabilities storage.Capabilities         `json:"capabilities"`
+	Skipped      bool                         `json:"skipped,omitempty"`
+	SkipReason   string                       `json:"skip_reason,omitempty"`
+	Health       *model.ResourceLibraryHealth `json:"health,omitempty"`
 }
 
 type resourceLibraryHealthResponse struct {
@@ -1395,7 +1399,7 @@ func (s *Server) handleInitResourceLibraries(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) handleResourceLibraryStatus(w http.ResponseWriter, r *http.Request) {
 	library := strings.TrimSpace(r.URL.Query().Get("library"))
-	libraries, err := s.resolveResourceLibraries(optionalLibrary(library))
+	libraries, err := s.resolveResourceStatusTargets(optionalLibrary(library))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -4360,16 +4364,33 @@ func (s *Server) resourceLibraryStatusViews(ctx context.Context, libraries []str
 	for _, name := range libraries {
 		config, ok := s.resourceLibraryConfig(name)
 		if !ok {
+			if direct, ok := s.directStorageStatusView(ctx, name, skipped); ok {
+				views = append(views, direct)
+			}
 			continue
 		}
-		view := resourceLibraryStatusView{Name: name}
+		view := resourceLibraryStatusView{Name: name, TargetType: "resource_library"}
+		if store, ok := s.stores.Get(name); ok {
+			view.TargetType = store.Type()
+			view.Capabilities = storage.StoreCapabilities(store)
+		} else {
+			view.Capabilities = storage.StoreCapabilities(nil)
+		}
 		for i, binding := range config.Bindings {
 			bindingName := bindingConfigName(binding, i)
 			bindingView := resourceLibraryBindingView{
-				Name:       bindingName,
-				Path:       binding.Path,
-				MountPoint: binding.MountPoint,
-				Status:     "unknown",
+				Name:         bindingName,
+				Path:         binding.Path,
+				MountPoint:   binding.MountPoint,
+				Status:       "unknown",
+				Capabilities: view.Capabilities,
+			}
+			if store, ok := s.stores.Get(name); ok {
+				if bindingCapable, ok := store.(storage.BindingCapabilityStore); ok {
+					if capabilities, ok := bindingCapable.BindingCapabilities(bindingName); ok {
+						bindingView.Capabilities = capabilities
+					}
+				}
 			}
 			if reason := skipped[name]; reason != "" {
 				bindingView.Skipped = true
@@ -4378,6 +4399,7 @@ func (s *Server) resourceLibraryStatusViews(ctx context.Context, libraries []str
 			if health, ok := healthByKey[name+"/"+bindingName]; ok {
 				healthCopy := health
 				bindingView.Status = health.Status
+				bindingView.TargetType = health.TargetType
 				bindingView.Health = &healthCopy
 			}
 			view.Bindings = append(view.Bindings, bindingView)
@@ -4385,6 +4407,31 @@ func (s *Server) resourceLibraryStatusViews(ctx context.Context, libraries []str
 		views = append(views, view)
 	}
 	return views, nil
+}
+
+func (s *Server) directStorageStatusView(_ context.Context, name string, skipped map[string]string) (resourceLibraryStatusView, bool) {
+	store, ok := s.stores.Get(name)
+	if !ok || !directResourceStatusStoreType(store.Type()) {
+		return resourceLibraryStatusView{}, false
+	}
+	capabilities := storage.StoreCapabilities(store)
+	binding := resourceLibraryBindingView{
+		Name:         name,
+		Path:         "/",
+		TargetType:   store.Type(),
+		Status:       "configured",
+		Capabilities: capabilities,
+	}
+	if reason := skipped[name]; reason != "" {
+		binding.Skipped = true
+		binding.SkipReason = reason
+	}
+	return resourceLibraryStatusView{
+		Name:         name,
+		TargetType:   store.Type(),
+		Capabilities: capabilities,
+		Bindings:     []resourceLibraryBindingView{binding},
+	}, true
 }
 
 func (s *Server) checkRecentResourceLibraryHealth(ctx context.Context, target string) error {
@@ -5003,6 +5050,15 @@ func optionalLibrary(name string) []string {
 	return []string{name}
 }
 
+func directResourceStatusStoreType(targetType string) bool {
+	switch strings.ToLower(strings.TrimSpace(targetType)) {
+	case "alist", "pinata", "r2":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeInitDirectories(dirs []string) ([]string, error) {
 	if len(dirs) == 0 {
 		dirs = defaultResourceLibraryInitDirs
@@ -5066,6 +5122,72 @@ func (s *Server) resolveResourceLibraries(requested []string) ([]string, error) 
 	}
 	if len(names) == 0 {
 		return nil, fmt.Errorf("at least one resource library is required")
+	}
+	return names, nil
+}
+
+func (s *Server) resolveResourceStatusTargets(requested []string) ([]string, error) {
+	configured := map[string]bool{}
+	for _, library := range s.cfg.ResourceLibraries {
+		configured[library.Name] = true
+	}
+	for _, library := range s.cfg.CloudflareLibrariesEffective() {
+		if s.cfg.CloudflareLibraryHasStorage(library) {
+			configured[library.Name] = true
+		}
+	}
+	for _, name := range s.stores.Names() {
+		store, ok := s.stores.Get(name)
+		if ok && directResourceStatusStoreType(store.Type()) {
+			configured[name] = true
+		}
+	}
+	if len(configured) == 0 {
+		return nil, fmt.Errorf("no resource libraries or resource-capable storage targets are configured")
+	}
+	if len(requested) == 0 {
+		names := make([]string, 0, len(configured))
+		seen := map[string]bool{}
+		add := func(name string) {
+			name = strings.TrimSpace(name)
+			if name == "" || seen[name] || !configured[name] {
+				return
+			}
+			seen[name] = true
+			names = append(names, name)
+		}
+		for _, library := range s.cfg.ResourceLibraries {
+			add(library.Name)
+		}
+		for _, library := range s.cfg.CloudflareLibrariesEffective() {
+			if s.cfg.CloudflareLibraryHasStorage(library) {
+				add(library.Name)
+			}
+		}
+		directNames := s.stores.Names()
+		sort.Strings(directNames)
+		for _, name := range directNames {
+			if store, ok := s.stores.Get(name); ok && directResourceStatusStoreType(store.Type()) {
+				add(name)
+			}
+		}
+		return names, nil
+	}
+	names := make([]string, 0, len(requested))
+	seen := map[string]bool{}
+	for _, name := range requested {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		if !configured[name] {
+			return nil, fmt.Errorf("unknown resource library or resource-capable storage target %q", name)
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("at least one resource library or resource-capable storage target is required")
 	}
 	return names, nil
 }

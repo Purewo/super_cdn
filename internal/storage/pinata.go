@@ -70,6 +70,23 @@ func NewPinataStore(opts PinataOptions) (*PinataStore, error) {
 
 func (s *PinataStore) Name() string { return s.name }
 func (s *PinataStore) Type() string { return "pinata" }
+func (s *PinataStore) Capabilities() Capabilities {
+	gateway := strings.TrimSpace(s.gateway)
+	return Capabilities{
+		CanUpload:                true,
+		CanDeleteRemote:          true,
+		CanProducePublicLocator:  gateway != "",
+		SupportsRangeGET:         true,
+		SupportsHEAD:             false,
+		HTTPOnlyLocatorRisk:      strings.HasPrefix(strings.ToLower(gateway), "http://"),
+		WebResourceSuitability:   "preferred_immutable_resource",
+		CDNBucketSuitability:     "archive_or_immutable_assets",
+		ImmutableCIDBehavior:     true,
+		PreferredCachePolicy:     "public, max-age=31536000, immutable",
+		DirectLocatorDescription: "IPFS CID plus configured gateway URL",
+		Notes:                    []string{"IPFS updates produce new CIDs; use refresh-ipfs-pins for provider metadata and gateway validation"},
+	}
+}
 
 func (s *PinataStore) Put(ctx context.Context, opts PutOptions) (string, error) {
 	if s.jwt == "" {

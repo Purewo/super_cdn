@@ -100,6 +100,50 @@ type Store interface {
 	PublicURL(key string) string
 }
 
+type Capabilities struct {
+	CanUpload                bool     `json:"can_upload"`
+	CanDeleteRemote          bool     `json:"can_delete_remote"`
+	CanProducePublicLocator  bool     `json:"can_produce_public_locator"`
+	SupportsRangeGET         bool     `json:"supports_range_get"`
+	SupportsHEAD             bool     `json:"supports_head"`
+	HTTPOnlyLocatorRisk      bool     `json:"http_only_locator_risk"`
+	WebResourceSuitability   string   `json:"web_resource_suitability"`
+	CDNBucketSuitability     string   `json:"cdn_bucket_suitability"`
+	ImmutableCIDBehavior     bool     `json:"immutable_cid_behavior"`
+	PreferredCachePolicy     string   `json:"preferred_cache_policy,omitempty"`
+	DirectLocatorDescription string   `json:"direct_locator_description,omitempty"`
+	Notes                    []string `json:"notes,omitempty"`
+}
+
+type CapabilityStore interface {
+	Capabilities() Capabilities
+}
+
+type BindingCapabilityStore interface {
+	BindingCapabilities(binding string) (Capabilities, bool)
+}
+
+func StoreCapabilities(store Store) Capabilities {
+	if store == nil {
+		return Capabilities{
+			WebResourceSuitability: "unknown",
+			CDNBucketSuitability:   "unknown",
+			Notes:                  []string{"store is not configured"},
+		}
+	}
+	if capable, ok := store.(CapabilityStore); ok {
+		return capable.Capabilities()
+	}
+	return Capabilities{
+		CanUpload:               true,
+		CanDeleteRemote:         true,
+		CanProducePublicLocator: store.PublicURL("_supercdn/capability-probe") != "",
+		WebResourceSuitability:  "unknown",
+		CDNBucketSuitability:    "unknown",
+		Notes:                   []string{"store does not provide explicit capabilities yet"},
+	}
+}
+
 type LocatorDeleteStore interface {
 	DeleteLocator(ctx context.Context, key, locator string) error
 }
