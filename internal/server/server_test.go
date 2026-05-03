@@ -1931,6 +1931,63 @@ func TestSiteNonIndexFilesRedirectToStorage(t *testing.T) {
 	}
 }
 
+func TestSiteOriginDeliveryIgnoresProfileRedirect(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.RouteProfiles[0].AllowRedirect = true
+	create := map[string]any{
+		"id":            "demo",
+		"route_profile": "overseas",
+		"mode":          "spa",
+		"domains":       []string{"demo.local"},
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true"})
+	ctx := context.Background()
+	indexObj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assetObj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, indexObj.ID, indexObj.PrimaryTarget, model.ReplicaReady, "http://storage.example/index.html?sign=fresh", ""); err != nil {
+		t.Fatal(err)
+	}
+	assetLocator := "http://storage.example/assets/app.js?sign=fresh"
+	if _, err := app.db.UpsertReplica(ctx, assetObj.ID, assetObj.PrimaryTarget, model.ReplicaReady, assetLocator, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	index := httptest.NewRequest(http.MethodGet, "/", nil)
+	index.Host = "demo.local"
+	indexOut := httptest.NewRecorder()
+	app.ServeHTTP(indexOut, index)
+	if indexOut.Code != http.StatusOK || indexOut.Header().Get("Location") != "" || indexOut.Body.String() != "home" {
+		t.Fatalf("index status=%d location=%q body=%q", indexOut.Code, indexOut.Header().Get("Location"), indexOut.Body.String())
+	}
+
+	asset := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	asset.Host = "demo.local"
+	assetOut := httptest.NewRecorder()
+	app.ServeHTTP(assetOut, asset)
+	if assetOut.Code != http.StatusFound || assetOut.Header().Get("Location") != assetLocator {
+		t.Fatalf("asset status=%d location=%q body=%q", assetOut.Code, assetOut.Header().Get("Location"), assetOut.Body.String())
+	}
+}
+
 func TestExportEdgeManifestBuildsRoutesAndStorageRedirects(t *testing.T) {
 	app := newTestServer(t)
 	create := map[string]any{
@@ -2552,6 +2609,7 @@ func TestPublishEdgeManifestDryRunPlansKVKeys(t *testing.T) {
 
 func TestSiteDeliveryRuleCanKeepAssetsOnOrigin(t *testing.T) {
 	app := newTestServer(t)
+	app.cfg.RouteProfiles[0].AllowRedirect = true
 	create := map[string]any{
 		"id":            "demo",
 		"route_profile": "overseas",

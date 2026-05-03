@@ -3755,7 +3755,7 @@ func (s *Server) writeSiteFile(w http.ResponseWriter, r *http.Request, site *mod
 			return
 		}
 	}
-	s.streamObject(w, r, obj, status)
+	s.streamObjectNoRedirect(w, r, obj, status)
 }
 
 func (s *Server) shouldRedirectSiteFile(r *http.Request, rules siteRules, objectPath string, status int) bool {
@@ -3843,6 +3843,46 @@ func (s *Server) streamObject(w http.ResponseWriter, r *http.Request, obj *model
 		if target := s.objectReplicaRedirectURL(r, obj, replica, store, statusOverride); target != "" {
 			http.Redirect(w, r, target, http.StatusFound)
 			return
+		}
+		stream, err := store.Get(r.Context(), obj.Key, storage.GetOptions{Range: r.Header.Get("Range"), Locator: replica.Locator})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer stream.Body.Close()
+		s.writeObjectStream(w, r, obj, stream, statusOverride)
+		return
+	}
+	if lastErr != nil {
+		writeError(w, http.StatusBadGateway, lastErr.Error())
+		return
+	}
+	writeError(w, http.StatusNotFound, "ready replica not found")
+}
+
+func (s *Server) streamObjectNoRedirect(w http.ResponseWriter, r *http.Request, obj *model.Object, statusOverride int) {
+	replicas, err := s.db.Replicas(r.Context(), obj.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sort.SliceStable(replicas, func(i, j int) bool {
+		if replicas[i].Target == obj.PrimaryTarget {
+			return true
+		}
+		if replicas[j].Target == obj.PrimaryTarget {
+			return false
+		}
+		return replicas[i].ID < replicas[j].ID
+	})
+	var lastErr error
+	for _, replica := range replicas {
+		if replica.Status != model.ReplicaReady {
+			continue
+		}
+		store, ok := s.stores.Get(replica.Target)
+		if !ok {
+			continue
 		}
 		stream, err := store.Get(r.Context(), obj.Key, storage.GetOptions{Range: r.Header.Get("Range"), Locator: replica.Locator})
 		if err != nil {
