@@ -484,11 +484,14 @@ go run .\cmd\supercdnctl -- upload-bucket -bucket movie-posters -file .\poster.j
 go run .\cmd\supercdnctl -- upload-bucket -bucket overseas-posters -file .\poster.jpg -path posters/v1/poster.jpg -warmup
 go run .\cmd\supercdnctl -- upload-bucket -bucket mobile-posters -file .\poster.jpg -path posters/poster.jpg -asset-type image -warmup
 go run .\cmd\supercdnctl -- upload-bucket -bucket durable-assets -file .\poster.jpg -path posters/v1/poster.jpg -asset-type image -warmup
+go run .\cmd\supercdnctl -- upload-bucket-dir -bucket movie-posters -dir .\posters -prefix posters -concurrency 10
 go run .\cmd\supercdnctl -- ipfs-smoke -file .\poster.jpg -bucket durable-smoke -download-runs 3
 go run .\cmd\supercdnctl -- list-bucket -bucket movie-posters
 ```
 
 Bucket uploads return both the relative `url` and the absolute `public_url`/`urls` fields when `server.public_base_url` is configured. If the storage backend exposes an HTTP direct URL, uploads also return `cdn_url` / `storage_url`; for `overseas_r2` this should be the R2/Cloudflare public URL, and for IPFS/Pinata this is the configured gateway URL for the returned CID. `-warmup` immediately probes the uploaded public URL; use `-warmup-method GET` when you want the edge to fetch the full object.
+
+`upload-bucket-dir` uploads every file under a local directory through the same bucket object API. It preserves the relative directory layout under `-prefix`, runs uploads in parallel with `-concurrency 10` by default, streams multipart bodies instead of buffering whole files in memory, and returns a per-file JSON report. Failed files are reported after the whole batch finishes.
 
 For domestic AList/OpenList buckets, `public_url` is the stable Super CDN `/a/...` URL. `cdn_url` is the signed AList storage URL when available; some downstream cloud drives reject `HEAD` after redirect, so use `GET` or a range `GET` when validating the direct storage path.
 

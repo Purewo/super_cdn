@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestPrepareCloudflareStaticAssetsDirGeneratesHeaders(t *testing.T) {
@@ -1252,6 +1254,144 @@ func TestUploadBucketWarmupCallsWarmupEndpoint(t *testing.T) {
 	}
 	if warmupReq["path"] != "images/one.png" || warmupReq["method"] != "GET" || warmupReq["base_url"] != "https://cdn.example.com" {
 		t.Fatalf("warmup request = %#v", warmupReq)
+	}
+}
+
+func TestUploadBucketDirUploadsFilesWithConcurrencyLimit(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "one.txt"), "one")
+	writeTestFile(t, filepath.Join(dir, "nested", "two.txt"), "two")
+	writeTestFile(t, filepath.Join(dir, "nested", "three.txt"), "three")
+
+	var (
+		mu      sync.Mutex
+		seen    = map[string]string{}
+		current int
+		maxSeen int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/asset-buckets/posters/objects" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("upload method = %s", r.Method)
+		}
+		mu.Lock()
+		current++
+		if current > maxSeen {
+			maxSeen = current
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			current--
+			mu.Unlock()
+		}()
+		time.Sleep(20 * time.Millisecond)
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.FormValue("asset_type"); got != "document" {
+			t.Fatalf("asset_type = %q", got)
+		}
+		if got := r.FormValue("cache_control"); got != "public, max-age=60" {
+			t.Fatalf("cache_control = %q", got)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = file.Close()
+		logicalPath := r.FormValue("path")
+		mu.Lock()
+		seen[logicalPath] = header.Filename
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"bucket": "posters",
+			"bucket_object": map[string]any{
+				"logical_path": logicalPath,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	var uploadErr error
+	out := captureStdout(t, func() {
+		uploadErr = uploadBucketDir(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+			"-bucket", "posters",
+			"-dir", dir,
+			"-prefix", "uploads",
+			"-asset-type", "document",
+			"-cache-control", "public, max-age=60",
+			"-concurrency", "2",
+		})
+	})
+	if uploadErr != nil {
+		t.Fatal(uploadErr)
+	}
+	var report bucketDirUploadReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Total != 3 || report.Succeeded != 3 || report.Failed != 0 || report.Concurrency != 2 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	for _, want := range []string{"uploads/nested/three.txt", "uploads/nested/two.txt", "uploads/one.txt"} {
+		if seen[want] == "" {
+			t.Fatalf("missing upload path %q in %#v", want, seen)
+		}
+	}
+	if maxSeen < 2 || maxSeen > 2 {
+		t.Fatalf("max concurrent uploads = %d, want 2", maxSeen)
+	}
+}
+
+func TestUploadBucketDirReportsFailuresAfterCompletingBatch(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "ok.txt"), "ok")
+	writeTestFile(t, filepath.Join(dir, "bad.txt"), "bad")
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		if r.FormValue("path") == "bad.txt" {
+			http.Error(w, "boom", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"bucket":"posters"}`))
+	}))
+	defer srv.Close()
+
+	var uploadErr error
+	out := captureStdout(t, func() {
+		uploadErr = uploadBucketDir(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+			"-bucket", "posters",
+			"-dir", dir,
+			"-concurrency", "2",
+		})
+	})
+	if uploadErr == nil || !strings.Contains(uploadErr.Error(), "1 of 2 files failed") {
+		t.Fatalf("expected batch failure, got %v", uploadErr)
+	}
+	mu.Lock()
+	if calls != 2 {
+		mu.Unlock()
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+	mu.Unlock()
+	var report bucketDirUploadReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Succeeded != 1 || report.Failed != 1 {
+		t.Fatalf("unexpected report: %+v", report)
 	}
 }
 

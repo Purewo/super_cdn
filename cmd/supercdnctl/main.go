@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"supercdn/internal/siteinspect"
@@ -180,6 +182,8 @@ func main() {
 		err = initBucket(c, args[1:])
 	case "upload-bucket":
 		err = uploadBucket(c, args[1:])
+	case "upload-bucket-dir":
+		err = uploadBucketDir(c, args[1:])
 	case "list-bucket":
 		err = listBucket(c, args[1:])
 	case "purge-bucket":
@@ -3891,24 +3895,14 @@ func uploadBucket(c client, args []string) error {
 	if *bucket == "" || *file == "" || *dst == "" {
 		return errors.New("-bucket, -file and -path are required")
 	}
-	fields := map[string]string{
-		"path":          *dst,
-		"asset_type":    *assetType,
-		"cache_control": *cacheControl,
-	}
-	apiPath := "/api/v1/asset-buckets/" + url.PathEscape(*bucket) + "/objects"
-	if !*warmup {
-		return c.uploadFile(apiPath, "file", *file, fields)
-	}
-	uploadRaw, err := c.uploadFileRaw(apiPath, "file", *file, fields)
+	uploadRaw, err := uploadBucketObject(c, *bucket, *file, *dst, *assetType, *cacheControl)
 	if err != nil {
 		return err
 	}
-	warmupRaw, err := c.doJSONRaw(http.MethodPost, "/api/v1/asset-buckets/"+url.PathEscape(*bucket)+"/warmup", map[string]any{
-		"path":     *dst,
-		"method":   *warmupMethod,
-		"base_url": *warmupBaseURL,
-	})
+	if !*warmup {
+		return printJSON(uploadRaw)
+	}
+	warmupRaw, err := warmupBucketObject(c, *bucket, *dst, *warmupMethod, *warmupBaseURL)
 	if err != nil {
 		return fmt.Errorf("upload succeeded but warmup failed: %w", err)
 	}
@@ -3923,6 +3917,221 @@ func uploadBucket(c client, args []string) error {
 		return err
 	}
 	return printJSON(out)
+}
+
+type bucketDirUploadPlan struct {
+	File        string `json:"file"`
+	LogicalPath string `json:"path"`
+	Size        int64  `json:"size"`
+}
+
+type bucketDirUploadResult struct {
+	File        string          `json:"file"`
+	LogicalPath string          `json:"path"`
+	Size        int64           `json:"size"`
+	Status      string          `json:"status"`
+	Error       string          `json:"error,omitempty"`
+	Upload      json.RawMessage `json:"upload,omitempty"`
+	Warmup      json.RawMessage `json:"warmup,omitempty"`
+}
+
+type bucketDirUploadReport struct {
+	Bucket      string                  `json:"bucket"`
+	Dir         string                  `json:"dir"`
+	Prefix      string                  `json:"prefix,omitempty"`
+	Concurrency int                     `json:"concurrency"`
+	Total       int                     `json:"total"`
+	Succeeded   int                     `json:"succeeded"`
+	Failed      int                     `json:"failed"`
+	Results     []bucketDirUploadResult `json:"results"`
+}
+
+type bucketDirUploadJob struct {
+	Index int
+	Plan  bucketDirUploadPlan
+}
+
+func uploadBucketDir(c client, args []string) error {
+	fs := flag.NewFlagSet("upload-bucket-dir", flag.ExitOnError)
+	bucket := fs.String("bucket", "", "bucket slug")
+	dir := fs.String("dir", "", "directory to upload")
+	prefix := fs.String("prefix", "", "logical path prefix inside the bucket")
+	assetType := fs.String("asset-type", "", "optional asset type override for every file")
+	cacheControl := fs.String("cache-control", "", "Cache-Control value override for every file")
+	concurrency := fs.Int("concurrency", 10, "maximum parallel uploads")
+	warmup := fs.Bool("warmup", false, "warm uploaded public URLs after upload")
+	warmupMethod := fs.String("warmup-method", http.MethodHead, "warmup method: HEAD or GET")
+	warmupBaseURL := fs.String("warmup-base-url", "", "public base URL override for warmup")
+	_ = fs.Parse(args)
+	if *bucket == "" || *dir == "" {
+		return errors.New("-bucket and -dir are required")
+	}
+	if *concurrency <= 0 {
+		return errors.New("-concurrency must be greater than 0")
+	}
+	plans, cleanPrefix, err := planBucketDirUpload(*dir, *prefix)
+	if err != nil {
+		return err
+	}
+	report := bucketDirUploadReport{
+		Bucket:      *bucket,
+		Dir:         *dir,
+		Prefix:      cleanPrefix,
+		Concurrency: *concurrency,
+		Total:       len(plans),
+		Results:     make([]bucketDirUploadResult, len(plans)),
+	}
+	if len(plans) == 0 {
+		raw, err := json.Marshal(report)
+		if err != nil {
+			return err
+		}
+		return printJSON(raw)
+	}
+	jobs := make(chan bucketDirUploadJob)
+	var wg sync.WaitGroup
+	workers := *concurrency
+	if workers > len(plans) {
+		workers = len(plans)
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				report.Results[job.Index] = uploadBucketDirOne(c, *bucket, job.Plan, *assetType, *cacheControl, *warmup, *warmupMethod, *warmupBaseURL)
+			}
+		}()
+	}
+	for i, plan := range plans {
+		jobs <- bucketDirUploadJob{Index: i, Plan: plan}
+	}
+	close(jobs)
+	wg.Wait()
+	for _, result := range report.Results {
+		if result.Status == "ok" {
+			report.Succeeded++
+		} else {
+			report.Failed++
+		}
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	if printErr := printJSON(raw); printErr != nil {
+		return printErr
+	}
+	if report.Failed > 0 {
+		return fmt.Errorf("bucket directory upload failed: %d of %d files failed", report.Failed, report.Total)
+	}
+	return nil
+}
+
+func uploadBucketDirOne(c client, bucket string, plan bucketDirUploadPlan, assetType, cacheControl string, warmup bool, warmupMethod, warmupBaseURL string) bucketDirUploadResult {
+	result := bucketDirUploadResult{
+		File:        plan.File,
+		LogicalPath: plan.LogicalPath,
+		Size:        plan.Size,
+		Status:      "ok",
+	}
+	uploadRaw, err := uploadBucketObject(c, bucket, plan.File, plan.LogicalPath, assetType, cacheControl)
+	if err != nil {
+		result.Status = "error"
+		result.Error = err.Error()
+		return result
+	}
+	result.Upload = json.RawMessage(uploadRaw)
+	if warmup {
+		warmupRaw, err := warmupBucketObject(c, bucket, plan.LogicalPath, warmupMethod, warmupBaseURL)
+		if err != nil {
+			result.Status = "error"
+			result.Error = "upload succeeded but warmup failed: " + err.Error()
+			return result
+		}
+		result.Warmup = json.RawMessage(warmupRaw)
+	}
+	return result
+}
+
+func planBucketDirUpload(dir, prefix string) ([]bucketDirUploadPlan, string, error) {
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, "", err
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, "", err
+	}
+	if !info.IsDir() {
+		return nil, "", fmt.Errorf("-dir %q is not a directory", dir)
+	}
+	cleanPrefix := cleanBucketDirPrefix(prefix)
+	var plans []bucketDirUploadPlan
+	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		logicalPath := rel
+		if cleanPrefix != "" {
+			logicalPath = urlpath.Join(cleanPrefix, rel)
+		}
+		logicalPath = strings.TrimPrefix(logicalPath, "/")
+		if logicalPath == "" || logicalPath == "." {
+			return fmt.Errorf("invalid logical path for %q", path)
+		}
+		plans = append(plans, bucketDirUploadPlan{
+			File:        path,
+			LogicalPath: logicalPath,
+			Size:        info.Size(),
+		})
+		return nil
+	}); err != nil {
+		return nil, "", err
+	}
+	sort.Slice(plans, func(i, j int) bool {
+		return plans[i].LogicalPath < plans[j].LogicalPath
+	})
+	return plans, cleanPrefix, nil
+}
+
+func cleanBucketDirPrefix(prefix string) string {
+	prefix = strings.ReplaceAll(strings.TrimSpace(prefix), "\\", "/")
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "." {
+		return ""
+	}
+	return prefix
+}
+
+func uploadBucketObject(c client, bucket, file, dst, assetType, cacheControl string) ([]byte, error) {
+	fields := map[string]string{
+		"path":          dst,
+		"asset_type":    assetType,
+		"cache_control": cacheControl,
+	}
+	apiPath := "/api/v1/asset-buckets/" + url.PathEscape(bucket) + "/objects"
+	return c.uploadFileRaw(apiPath, "file", file, fields)
+}
+
+func warmupBucketObject(c client, bucket, dst, method, baseURL string) ([]byte, error) {
+	return c.doJSONRaw(http.MethodPost, "/api/v1/asset-buckets/"+url.PathEscape(bucket)+"/warmup", map[string]any{
+		"path":     dst,
+		"method":   method,
+		"base_url": baseURL,
+	})
 }
 
 func listBucket(c client, args []string) error {
@@ -4247,29 +4456,43 @@ func (c client) uploadFile(path, fieldName, filePath string, fields map[string]s
 }
 
 func (c client) uploadFileRaw(path, fieldName, filePath string, fields map[string]string) ([]byte, error) {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	for k, v := range fields {
-		if v != "" {
-			_ = writer.WriteField(k, v)
+	reader, writer := io.Pipe()
+	multipartWriter := multipart.NewWriter(writer)
+	contentType := multipartWriter.FormDataContentType()
+	go func() {
+		var err error
+		defer func() {
+			if err != nil {
+				_ = writer.CloseWithError(err)
+				return
+			}
+			_ = writer.Close()
+		}()
+		for k, v := range fields {
+			if v != "" {
+				if err = multipartWriter.WriteField(k, v); err != nil {
+					return
+				}
+			}
 		}
-	}
-	f, err := os.Open(filePath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	part, err := writer.CreateFormFile(fieldName, filepath.Base(filePath))
-	if err != nil {
-		return nil, err
-	}
-	if _, err := io.Copy(part, f); err != nil {
-		return nil, err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return c.doRaw(http.MethodPost, path, &body, writer.FormDataContentType())
+		f, openErr := os.Open(filePath)
+		if openErr != nil {
+			err = openErr
+			return
+		}
+		defer f.Close()
+		part, createErr := multipartWriter.CreateFormFile(fieldName, filepath.Base(filePath))
+		if createErr != nil {
+			err = createErr
+			return
+		}
+		if _, copyErr := io.Copy(part, f); copyErr != nil {
+			err = copyErr
+			return
+		}
+		err = multipartWriter.Close()
+	}()
+	return c.doRaw(http.MethodPost, path, reader, contentType)
 }
 
 func (c client) do(method, path string, body io.Reader, contentType string) error {
@@ -4691,6 +4914,7 @@ func usage() {
   supercdnctl [global flags] create-ipfs-bucket -slug durable-assets -types image,archive
   supercdnctl [global flags] init-bucket -bucket movie-posters
   supercdnctl [global flags] upload-bucket -bucket movie-posters -file poster.jpg -path posters/poster.jpg -warmup
+  supercdnctl [global flags] upload-bucket-dir -bucket movie-posters -dir ./posters -prefix posters -concurrency 10
   supercdnctl [global flags] list-bucket -bucket movie-posters
   supercdnctl [global flags] purge-bucket -bucket movie-posters -prefix posters/ -dry-run
   supercdnctl [global flags] warmup-bucket -bucket movie-posters -path posters/poster.jpg -dry-run

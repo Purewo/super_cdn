@@ -83,6 +83,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `create-ipfs-bucket` | `POST /api/v1/asset-buckets` | 创建 IPFS/Pinata durable asset 桶快捷命令 |
 | `init-bucket` | `POST /api/v1/asset-buckets/{slug}/init` | 初始化桶目录结构 |
 | `upload-bucket` | `POST /api/v1/asset-buckets/{slug}/objects` | 上传桶对象 |
+| `upload-bucket-dir` | `POST /api/v1/asset-buckets/{slug}/objects` | 并发上传本地目录到桶 |
 | `list-bucket` | `GET /api/v1/asset-buckets/{slug}/objects` | 列出桶对象 |
 | `purge-bucket` | `POST /api/v1/asset-buckets/{slug}/purge` | 按桶对象 URL 清 Cloudflare 缓存 |
 | `warmup-bucket` | `POST /api/v1/asset-buckets/{slug}/warmup` | 按桶对象 URL 预热或探测公开访问 |
@@ -1020,6 +1021,31 @@ CLI 额外参数：
 使用 `-warmup` 时输出为 `{ "upload": {...}, "warmup": {...} }`，其中 `upload.public_url` 是上传后的可访问链接。
 
 国内 AList/OpenList 桶会返回稳定的 Super CDN `/a/...` `public_url`。当底层存储能生成签名直链时也会返回 `cdn_url` / `storage_url`；部分下游网盘对重定向后的 `HEAD` 返回 403，直接链路验证应使用 `GET` 或 Range `GET`。
+
+### upload-bucket-dir
+
+并发上传本地目录中的所有文件。CLI 会扫描 `-dir`，保留相对目录结构，并把文件写到 `-prefix` 下。底层复用单文件 `POST /api/v1/asset-buckets/{slug}/objects`，默认并发为 10，可按用户环境调整。
+
+```powershell
+.\bin\supercdnctl.exe upload-bucket-dir -bucket dynamic-wallpapers -dir .\wallpapers -prefix wallpapers
+.\bin\supercdnctl.exe upload-bucket-dir -bucket downloads -dir .\release -prefix release/v1 -concurrency 20 -warmup
+```
+
+参数：
+
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-bucket` | 是 | 空 | 桶 slug |
+| `-dir` | 是 | 空 | 本地目录 |
+| `-prefix` | 否 | 空 | 桶内逻辑路径前缀 |
+| `-concurrency` | 否 | `10` | 最大并行上传数量，必须大于 0 |
+| `-asset-type` | 否 | 空 | 对所有文件使用同一个资产类型 |
+| `-cache-control` | 否 | 空 | 对所有文件使用同一个缓存策略 |
+| `-warmup` | 否 | `false` | 每个文件上传成功后立即预热 |
+| `-warmup-method` | 否 | `HEAD` | `HEAD` 或 `GET` |
+| `-warmup-base-url` | 否 | `server.public_base_url` | 覆盖预热 URL 的公开域名 |
+
+输出是批量 JSON 报告：`total`、`succeeded`、`failed` 和 `results[]`。命令会完成整个批次后再返回；如果有失败文件，会打印报告并以非零错误退出。
 
 ### list-bucket
 
