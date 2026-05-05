@@ -126,6 +126,45 @@ func TestRouteProfileRejectsUnknownDeploymentTarget(t *testing.T) {
 	}
 }
 
+func TestRouteProfileNormalizesReplicationPolicy(t *testing.T) {
+	cfg := minimalConfig(t)
+	if err := cfg.ApplyDefaults(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.RouteProfiles[0].ReplicationPolicy; got != ReplicationPolicyPrimaryOnly {
+		t.Fatalf("replication policy without backups = %q", got)
+	}
+
+	cfg = minimalConfig(t)
+	cfg.Storage = append(cfg.Storage, StorageConfig{Name: "backup", Type: "local"})
+	cfg.RouteProfiles[0].Backups = []string{"backup"}
+	if err := cfg.ApplyDefaults(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.RouteProfiles[0].ReplicationPolicy; got != ReplicationPolicyBestEffortBackups {
+		t.Fatalf("replication policy with backups = %q", got)
+	}
+
+	cfg = minimalConfig(t)
+	cfg.Storage = append(cfg.Storage, StorageConfig{Name: "backup", Type: "local"})
+	cfg.RouteProfiles[0].Backups = []string{"backup"}
+	cfg.RouteProfiles[0].ReplicationPolicy = "strict"
+	if err := cfg.ApplyDefaults(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.RouteProfiles[0].ReplicationPolicy; got != ReplicationPolicyRequireBackups {
+		t.Fatalf("strict replication policy = %q", got)
+	}
+}
+
+func TestRouteProfileRejectsRequireBackupsWithoutBackups(t *testing.T) {
+	cfg := minimalConfig(t)
+	cfg.RouteProfiles[0].ReplicationPolicy = "require_backups"
+	if err := cfg.ApplyDefaults(t.TempDir()); err == nil {
+		t.Fatal("expected require_backups without backups to fail")
+	}
+}
+
 func TestRoutingPolicyValidatesSourcesAndNormalizesMode(t *testing.T) {
 	cfg := minimalConfig(t)
 	cfg.Storage = append(cfg.Storage, StorageConfig{Name: "backup", Type: "local"})

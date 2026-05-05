@@ -275,7 +275,12 @@ Use `configs/config.full.example.json` as a template and fill environment variab
 - `CF_ZONE_ID`, `CF_API_TOKEN`
 - `SUPERCDN_ADMIN_TOKEN`
 
-Route profiles decide the primary storage and backup replicas. Backups are asynchronous jobs.
+Route profiles decide the primary storage, backup replicas and explicit `replication_policy`. When omitted, profiles without real backups default to `primary_only`, and profiles with backups default to `best_effort_backups`.
+
+- `primary_only`: upload to primary only; configured backup targets are recorded as deleted for that object and are skipped by refresh/repair unless explicitly forced.
+- `best_effort_backups`: upload/deploy succeeds after primary is ready and queues asynchronous backup jobs.
+- `require_backups`: upload/deploy synchronously copies configured backups and fails if a required backup target cannot be written.
+
 Use `refresh-replicas` to recheck remote visibility and refresh signed locator/IPFS metadata for an object or asset bucket; if a replica fails or goes missing, `repair-replicas` can requeue it from the object's route profile without changing the published URL surface.
 
 IPFS/Pinata readiness can be checked without uploading data:
@@ -339,6 +344,12 @@ Route profiles can reference normal storage targets such as `r2_global` or logic
 Reads are failover-capable when more than one ready source exists. Object delivery tries ready replicas in order, and resource-library reads can fall back to another binding when the binding encoded in an older locator is unavailable. This only protects content that actually exists on the alternate binding or has a ready backup replica; configure `route_profiles[].backups` and backfill old objects when a storage line must survive a full provider outage.
 
 Routing policies are explicit opt-in objects under `routing_policies[]`. A site, deployment, or asset bucket can set `routing_policy` only when its route profile includes every policy source as the primary target or a backup. Policies require at least two sources and support `load_balance`, `global_accel`, and `global_load_balance`; the Worker and bucket read path only use ready replicas, so multi-source copies must exist before smart routing can take effect. Resource-library candidates with recent failed health are skipped during edge manifest generation. Check configured policies with `supercdnctl routing-policy-status`.
+
+Use `route-explain` when a published Web resource needs a decision trace. It resolves the active production deployment by default, shows the matched route, ready and skipped candidates, selected target and selection reason. Pass `-country CN` and `-client-ip` to reproduce Cloudflare region and load-balance hashing inputs:
+
+```powershell
+go run .\cmd\supercdnctl -- route-explain -site cyberstream -path /assets/app.js -country CN -client-ip 203.0.113.10
+```
 
 For `hybrid_edge`, smart-routing and resource-failover deployments wait for resource candidates before KV publication. Resource-library writes also verify a post-upload direct locator, so signed AList/OpenList paths are not marked ready until the object can be resolved.
 

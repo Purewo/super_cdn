@@ -187,6 +187,7 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("GET /sites/{id}/deployments/{deployment}", s.handleGetSiteDeployment)
 	s.apiMux.HandleFunc("GET /sites/{id}/deployments/{deployment}/edge-manifest", s.handleExportSiteEdgeManifest)
 	s.apiMux.HandleFunc("POST /sites/{id}/deployments/{deployment}/edge-manifest/publish", s.handlePublishSiteEdgeManifest)
+	s.apiMux.HandleFunc("GET /sites/{id}/route-explain", s.handleExplainSiteRoute)
 	s.apiMux.HandleFunc("POST /sites/{id}/deployments/{deployment}/promote", s.handlePromoteSiteDeployment)
 	s.apiMux.HandleFunc("POST /sites/{id}/deployments/{deployment}/purge", s.handlePurgeSiteDeploymentCache)
 	s.apiMux.HandleFunc("DELETE /sites/{id}/deployments/{deployment}", s.handleDeleteSiteDeployment)
@@ -1332,6 +1333,55 @@ type edgeManifestIPFS struct {
 	GatewayURL    string `json:"gateway_url,omitempty"`
 	PinStatus     string `json:"pin_status,omitempty"`
 	ProviderPinID string `json:"provider_pin_id,omitempty"`
+}
+
+type edgeRouteCandidateEvaluation struct {
+	Target        string            `json:"target"`
+	TargetType    string            `json:"target_type,omitempty"`
+	Type          string            `json:"type,omitempty"`
+	RegionGroup   string            `json:"region_group,omitempty"`
+	Weight        int               `json:"weight,omitempty"`
+	Priority      int               `json:"priority,omitempty"`
+	FallbackOnly  bool              `json:"fallback_only,omitempty"`
+	URL           string            `json:"url,omitempty"`
+	Status        string            `json:"status"`
+	ReplicaStatus string            `json:"replica_status,omitempty"`
+	Reason        string            `json:"reason,omitempty"`
+	Selected      bool              `json:"selected,omitempty"`
+	IPFS          *edgeManifestIPFS `json:"ipfs,omitempty"`
+}
+
+type routeExplainResponse struct {
+	SiteID           string                         `json:"site_id"`
+	DeploymentID     string                         `json:"deployment_id"`
+	Path             string                         `json:"path"`
+	MatchedPath      string                         `json:"matched_path,omitempty"`
+	MatchType        string                         `json:"match_type,omitempty"`
+	RouteProfile     string                         `json:"route_profile"`
+	DeploymentTarget string                         `json:"deployment_target"`
+	RoutingPolicy    string                         `json:"routing_policy,omitempty"`
+	ResourceFailover bool                           `json:"resource_failover"`
+	RegionGroup      string                         `json:"region_group,omitempty"`
+	HashKey          string                         `json:"hash_key,omitempty"`
+	Route            edgeManifestRoute              `json:"route"`
+	Selection        *routeExplainSelection         `json:"selection,omitempty"`
+	Candidates       []edgeRouteCandidateEvaluation `json:"candidates,omitempty"`
+	Warnings         []string                       `json:"warnings,omitempty"`
+}
+
+type routeExplainSelection struct {
+	Target      string `json:"target,omitempty"`
+	TargetType  string `json:"target_type,omitempty"`
+	Type        string `json:"type,omitempty"`
+	RegionGroup string `json:"region_group,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Reason      string `json:"reason"`
+}
+
+type routeExplainOptions struct {
+	Path     string
+	Country  string
+	ClientIP string
 }
 
 type publishEdgeManifestRequest struct {
@@ -2638,6 +2688,44 @@ func (s *Server) handlePublishSiteEdgeManifest(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *Server) handleExplainSiteRoute(w http.ResponseWriter, r *http.Request) {
+	siteID := cleanID(r.PathValue("id"))
+	site, ok := s.getSiteForAPI(w, r, siteID)
+	if !ok {
+		return
+	}
+	deploymentID := cleanDeploymentID(r.URL.Query().Get("deployment"))
+	var dep *model.SiteDeployment
+	var err error
+	if deploymentID != "" {
+		dep, err = s.db.GetSiteDeployment(r.Context(), deploymentID)
+		if err != nil || dep.SiteID != site.ID {
+			writeError(w, http.StatusNotFound, "deployment not found")
+			return
+		}
+	} else {
+		dep, err = s.db.ActiveSiteDeployment(r.Context(), site.ID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "active deployment not found")
+			return
+		}
+	}
+	if dep.Status != model.SiteDeploymentReady && dep.Status != model.SiteDeploymentActive {
+		writeError(w, http.StatusBadRequest, "deployment is not ready")
+		return
+	}
+	resp, err := s.explainSiteRoute(r.Context(), site, dep, routeExplainOptions{
+		Path:     r.URL.Query().Get("path"),
+		Country:  r.URL.Query().Get("country"),
+		ClientIP: r.URL.Query().Get("client_ip"),
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) handlePurgeSiteCache(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	if siteID == "" {
@@ -3520,7 +3608,7 @@ func (s *Server) serveBucketAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if target, policyName, reason, candidate, ok := s.bucketRoutingRedirect(r.Context(), r, bucketConfig, obj); ok {
-		w.Header().Set("Cache-Control", "no-store")
+		setDynamicRedirectNoStore(w.Header())
 		w.Header().Set("X-SuperCDN-Redirect", "storage")
 		w.Header().Set("X-SuperCDN-Route-Policy", policyName)
 		w.Header().Set("X-SuperCDN-Route-Target", candidate.Target)
@@ -3730,7 +3818,7 @@ func (s *Server) writeSiteFile(w http.ResponseWriter, r *http.Request, site *mod
 	}
 	if s.shouldRedirectSiteFile(r, rules, objectPath, status) {
 		if target, policyName, reason, candidate, ok := s.siteRoutingRedirect(r.Context(), r, site, dep, obj); ok {
-			w.Header().Set("Cache-Control", "no-store")
+			setDynamicRedirectNoStore(w.Header())
 			w.Header().Set("X-SuperCDN-Redirect", "storage")
 			w.Header().Set("X-SuperCDN-Route-Policy", policyName)
 			w.Header().Set("X-SuperCDN-Route-Target", candidate.Target)
@@ -3744,7 +3832,7 @@ func (s *Server) writeSiteFile(w http.ResponseWriter, r *http.Request, site *mod
 			target, err = s.objectRedirectURL(r.Context(), obj)
 		}
 		if err == nil && target != "" {
-			w.Header().Set("Cache-Control", "no-store")
+			setDynamicRedirectNoStore(w.Header())
 			w.Header().Set("X-SuperCDN-Redirect", "storage")
 			http.Redirect(w, r, target, http.StatusFound)
 			return
@@ -4021,6 +4109,11 @@ func edgeRoutingPolicySnapshot(policy config.RoutingPolicy) *edgeRoutingPolicy {
 }
 
 func (s *Server) routingPolicyCandidates(ctx context.Context, policy config.RoutingPolicy, obj *model.Object) ([]edgeRouteCandidate, []string) {
+	evaluations, warnings := s.routingPolicyCandidateEvaluations(ctx, policy, obj)
+	return readyCandidatesFromEvaluations(evaluations), warnings
+}
+
+func (s *Server) routingPolicyCandidateEvaluations(ctx context.Context, policy config.RoutingPolicy, obj *model.Object) ([]edgeRouteCandidateEvaluation, []string) {
 	if obj == nil || obj.ID == 0 {
 		return nil, []string{"routing policy candidates unavailable: object is missing"}
 	}
@@ -4035,54 +4128,73 @@ func (s *Server) routingPolicyCandidates(ctx context.Context, policy config.Rout
 		}
 	}
 	var (
-		out      []edgeRouteCandidate
+		out      []edgeRouteCandidateEvaluation
 		warnings []string
 	)
 	for _, source := range policy.Sources {
+		item := edgeRouteCandidateEvaluation{
+			Target:       source.Target,
+			RegionGroup:  firstNonEmpty(source.RegionGroup, policy.DefaultRegionGroup, "overseas"),
+			Weight:       positiveWeight(source.Weight),
+			Priority:     source.Priority,
+			FallbackOnly: source.FallbackOnly,
+			Status:       "skipped",
+		}
 		store, ok := s.stores.Get(source.Target)
 		if !ok {
+			item.Reason = "storage target is not configured"
 			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q is not configured", policy.Name, source.Target))
+			out = append(out, item)
 			continue
 		}
+		item.TargetType = store.Type()
 		if reason, unhealthy := s.recentResourceLibraryHealthFailure(ctx, source.Target); unhealthy {
+			item.Reason = "skipped by health: " + reason
 			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q skipped by health: %s", policy.Name, source.Target, reason))
+			out = append(out, item)
 			continue
 		}
 		replica, ok := byTarget[source.Target]
 		if !ok {
+			item.Reason = fmt.Sprintf("has no replica for object %d", obj.ID)
 			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q has no replica for object %d", policy.Name, source.Target, obj.ID))
+			out = append(out, item)
 			continue
 		}
+		item.ReplicaStatus = firstNonEmpty(replica.Status, "unknown")
 		if replica.Status != model.ReplicaReady {
-			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q replica is %s", policy.Name, source.Target, firstNonEmpty(replica.Status, "unknown")))
+			item.Reason = "replica is " + item.ReplicaStatus
+			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q replica is %s", policy.Name, source.Target, item.ReplicaStatus))
+			out = append(out, item)
 			continue
 		}
 		targetURL, ipfs := s.routingCandidateURL(ctx, obj, replica, store)
 		if targetURL == "" {
+			item.Reason = fmt.Sprintf("has no direct URL for object %d", obj.ID)
 			warnings = append(warnings, fmt.Sprintf("routing_policy %q source %q has no direct URL for object %d", policy.Name, source.Target, obj.ID))
+			out = append(out, item)
 			continue
 		}
 		candidateType := "redirect"
 		if ipfs != nil {
 			candidateType = "ipfs"
 		}
-		out = append(out, edgeRouteCandidate{
-			Target:       source.Target,
-			TargetType:   store.Type(),
-			Type:         candidateType,
-			RegionGroup:  firstNonEmpty(source.RegionGroup, policy.DefaultRegionGroup, "overseas"),
-			Weight:       positiveWeight(source.Weight),
-			Priority:     source.Priority,
-			FallbackOnly: source.FallbackOnly,
-			URL:          targetURL,
-			Status:       model.ReplicaReady,
-			IPFS:         ipfs,
-		})
+		item.Type = candidateType
+		item.URL = targetURL
+		item.Status = model.ReplicaReady
+		item.Reason = "ready"
+		item.IPFS = ipfs
+		out = append(out, item)
 	}
 	return out, warnings
 }
 
 func (s *Server) resourceFailoverCandidates(ctx context.Context, profileName string, obj *model.Object) ([]edgeRouteCandidate, []string) {
+	evaluations, warnings := s.resourceFailoverCandidateEvaluations(ctx, profileName, obj)
+	return readyCandidatesFromEvaluations(evaluations), warnings
+}
+
+func (s *Server) resourceFailoverCandidateEvaluations(ctx context.Context, profileName string, obj *model.Object) ([]edgeRouteCandidateEvaluation, []string) {
 	if obj == nil || obj.ID == 0 {
 		return nil, []string{"resource_failover candidates unavailable: object is missing"}
 	}
@@ -4102,50 +4214,82 @@ func (s *Server) resourceFailoverCandidates(ctx context.Context, profileName str
 		}
 	}
 	var (
-		out      []edgeRouteCandidate
+		out      []edgeRouteCandidateEvaluation
 		warnings []string
 	)
 	for i, target := range targets {
+		item := edgeRouteCandidateEvaluation{
+			Target:      target,
+			RegionGroup: "failover",
+			Weight:      1,
+			Priority:    i,
+			Status:      "skipped",
+		}
 		store, ok := s.stores.Get(target)
 		if !ok {
+			item.Reason = "storage target is not configured"
 			warnings = append(warnings, fmt.Sprintf("resource_failover source %q is not configured", target))
+			out = append(out, item)
 			continue
 		}
+		item.TargetType = store.Type()
 		if reason, unhealthy := s.recentResourceLibraryHealthFailure(ctx, target); unhealthy {
+			item.Reason = "skipped by health: " + reason
 			warnings = append(warnings, fmt.Sprintf("resource_failover source %q skipped by health: %s", target, reason))
+			out = append(out, item)
 			continue
 		}
 		replica, ok := byTarget[target]
 		if !ok {
+			item.Reason = fmt.Sprintf("has no replica for object %d", obj.ID)
 			warnings = append(warnings, fmt.Sprintf("resource_failover source %q has no replica for object %d", target, obj.ID))
+			out = append(out, item)
 			continue
 		}
+		item.ReplicaStatus = firstNonEmpty(replica.Status, "unknown")
 		if replica.Status != model.ReplicaReady {
-			warnings = append(warnings, fmt.Sprintf("resource_failover source %q replica is %s", target, firstNonEmpty(replica.Status, "unknown")))
+			item.Reason = "replica is " + item.ReplicaStatus
+			warnings = append(warnings, fmt.Sprintf("resource_failover source %q replica is %s", target, item.ReplicaStatus))
+			out = append(out, item)
 			continue
 		}
 		targetURL, ipfs := s.routingCandidateURL(ctx, obj, replica, store)
 		if targetURL == "" {
+			item.Reason = fmt.Sprintf("has no direct URL for object %d", obj.ID)
 			warnings = append(warnings, fmt.Sprintf("resource_failover source %q has no direct URL for object %d", target, obj.ID))
+			out = append(out, item)
 			continue
 		}
 		candidateType := "redirect"
 		if ipfs != nil {
 			candidateType = "ipfs"
 		}
-		out = append(out, edgeRouteCandidate{
-			Target:      target,
-			TargetType:  store.Type(),
-			Type:        candidateType,
-			RegionGroup: "failover",
-			Weight:      1,
-			Priority:    i,
-			URL:         targetURL,
-			Status:      model.ReplicaReady,
-			IPFS:        ipfs,
-		})
+		item.Type = candidateType
+		item.URL = targetURL
+		item.Status = model.ReplicaReady
+		item.Reason = "ready"
+		item.IPFS = ipfs
+		out = append(out, item)
 	}
 	return out, warnings
+}
+
+func (e edgeRouteCandidateEvaluation) readyCandidate() (edgeRouteCandidate, bool) {
+	if e.Status != model.ReplicaReady || e.URL == "" {
+		return edgeRouteCandidate{}, false
+	}
+	return edgeRouteCandidate{
+		Target:       e.Target,
+		TargetType:   e.TargetType,
+		Type:         e.Type,
+		RegionGroup:  e.RegionGroup,
+		Weight:       positiveWeight(e.Weight),
+		Priority:     e.Priority,
+		FallbackOnly: e.FallbackOnly,
+		URL:          e.URL,
+		Status:       model.ReplicaReady,
+		IPFS:         e.IPFS,
+	}, true
 }
 
 func (s *Server) routingCandidateURL(ctx context.Context, obj *model.Object, replica model.Replica, store storage.Store) (string, *edgeManifestIPFS) {
@@ -4476,6 +4620,11 @@ func (s *Server) refreshObjectReplica(ctx context.Context, obj *model.Object, re
 		PreviousLocator: replica.Locator,
 		Locator:         replica.Locator,
 	}
+	if replica.Status == model.ReplicaDeleted {
+		result.Skipped = true
+		result.SkipReason = "replica is deleted"
+		return result
+	}
 	if replica.Status == model.ReplicaPending && replica.Locator == "" {
 		result.Skipped = true
 		result.SkipReason = "replica is pending without locator"
@@ -4624,6 +4773,13 @@ func (s *Server) repairObjectReplicas(ctx context.Context, obj *model.Object, re
 				resp.Results = append(resp.Results, result)
 				continue
 			}
+			if existing.Status == model.ReplicaDeleted && !req.Force {
+				result.Status = existing.Status
+				result.Skipped = true
+				result.SkipReason = "replica is deleted"
+				resp.Results = append(resp.Results, result)
+				continue
+			}
 		}
 		if _, ok := s.stores.Get(target); !ok {
 			result.Status = firstNonEmpty(result.PreviousStatus, "missing")
@@ -4685,8 +4841,10 @@ func (s *Server) objectReplicaRepairTargets(obj *model.Object, replicas []model.
 	}
 	if profile, ok := s.cfg.Profile(obj.RouteProfile); ok {
 		add(profile.Primary)
-		for _, target := range profile.Backups {
-			add(target)
+		if replicationPolicyForProfile(profile) != config.ReplicationPolicyPrimaryOnly {
+			for _, target := range routeProfileBackupTargets(profile) {
+				add(target)
+			}
 		}
 	}
 	add(obj.PrimaryTarget)
@@ -4703,6 +4861,32 @@ func (s *Server) objectReplicaRepairTargets(obj *model.Object, replicas []model.
 		return nil, fmt.Errorf("object %d has no replica targets to repair", obj.ID)
 	}
 	return targets, nil
+}
+
+func replicationPolicyForProfile(profile config.RouteProfile) string {
+	policy := strings.TrimSpace(profile.ReplicationPolicy)
+	if policy != "" {
+		return policy
+	}
+	if len(routeProfileBackupTargets(profile)) > 0 {
+		return config.ReplicationPolicyBestEffortBackups
+	}
+	return config.ReplicationPolicyPrimaryOnly
+}
+
+func routeProfileBackupTargets(profile config.RouteProfile) []string {
+	targets := make([]string, 0, len(profile.Backups))
+	seen := map[string]bool{}
+	primary := strings.TrimSpace(profile.Primary)
+	for _, target := range profile.Backups {
+		target = strings.TrimSpace(target)
+		if target == "" || target == primary || seen[target] {
+			continue
+		}
+		seen[target] = true
+		targets = append(targets, target)
+	}
+	return targets
 }
 
 func (s *Server) hydrateBucketObjectsIPFS(ctx context.Context, items []model.AssetBucketObject) ([]model.AssetBucketObject, error) {
@@ -6213,25 +6397,43 @@ func (s *Server) putObjectFromFile(ctx context.Context, in putObjectInput) (*mod
 		return nil, nil, err
 	}
 	var jobs []model.Job
-	for _, target := range in.Profile.Backups {
-		if target == "" || target == in.Profile.Primary {
-			continue
-		}
+	policy := replicationPolicyForProfile(in.Profile)
+	for _, target := range routeProfileBackupTargets(in.Profile) {
 		if _, ok := s.stores.Get(target); !ok {
 			return nil, nil, fmt.Errorf("backup storage %q is not configured", target)
 		}
-		if _, err := s.db.UpsertReplica(ctx, obj.ID, target, model.ReplicaPending, "", ""); err != nil {
-			return nil, nil, err
+		switch policy {
+		case config.ReplicationPolicyPrimaryOnly:
+			if _, err := s.db.UpsertReplica(ctx, obj.ID, target, model.ReplicaDeleted, "", "replication_policy primary_only"); err != nil {
+				return nil, nil, err
+			}
+			if err := s.db.DeleteIPFSPin(ctx, obj.ID, target); err != nil {
+				return nil, nil, err
+			}
+		case config.ReplicationPolicyRequireBackups:
+			if _, err := s.db.UpsertReplica(ctx, obj.ID, target, model.ReplicaPending, "", ""); err != nil {
+				return nil, nil, err
+			}
+			if err := s.db.DeleteIPFSPin(ctx, obj.ID, target); err != nil {
+				return nil, nil, err
+			}
+			if err := s.replicateObject(ctx, replicatePayload{ObjectID: obj.ID, Target: target}); err != nil {
+				return nil, nil, fmt.Errorf("replicate required backup %q: %w", target, err)
+			}
+		default:
+			if _, err := s.db.UpsertReplica(ctx, obj.ID, target, model.ReplicaPending, "", ""); err != nil {
+				return nil, nil, err
+			}
+			if err := s.db.DeleteIPFSPin(ctx, obj.ID, target); err != nil {
+				return nil, nil, err
+			}
+			payload, _ := json.Marshal(replicatePayload{ObjectID: obj.ID, Target: target})
+			job, err := s.db.CreateJob(ctx, model.JobReplicateObject, string(payload))
+			if err != nil {
+				return nil, nil, err
+			}
+			jobs = append(jobs, *job)
 		}
-		if err := s.db.DeleteIPFSPin(ctx, obj.ID, target); err != nil {
-			return nil, nil, err
-		}
-		payload, _ := json.Marshal(replicatePayload{ObjectID: obj.ID, Target: target})
-		job, err := s.db.CreateJob(ctx, model.JobReplicateObject, string(payload))
-		if err != nil {
-			return nil, nil, err
-		}
-		jobs = append(jobs, *job)
 	}
 	obj, err = s.hydrateObjectIPFS(ctx, obj)
 	if err != nil {
@@ -7793,6 +7995,163 @@ func (s *Server) publishSiteEdgeManifest(ctx context.Context, site *model.Site, 
 	return resp, nil
 }
 
+func (s *Server) explainSiteRoute(ctx context.Context, site *model.Site, dep *model.SiteDeployment, opts routeExplainOptions) (routeExplainResponse, error) {
+	reqPath := cleanRequestPath(opts.Path)
+	if strings.TrimSpace(opts.Path) == "" {
+		return routeExplainResponse{}, fmt.Errorf("path is required")
+	}
+	rules := deploymentRules(dep, site)
+	file, obj, matchType, status, err := s.siteDeploymentFileForRouteExplain(ctx, dep, rules, reqPath)
+	if err != nil {
+		return routeExplainResponse{}, err
+	}
+	routingPolicyName := strings.TrimSpace(firstNonEmpty(dep.RoutingPolicy, site.RoutingPolicy))
+	var routingPolicy *config.RoutingPolicy
+	if routingPolicyName != "" {
+		profile, ok := s.cfg.Profile(dep.RouteProfile)
+		if !ok {
+			return routeExplainResponse{}, fmt.Errorf("unknown route_profile %q", dep.RouteProfile)
+		}
+		policy, err := s.routingPolicyForProfile(routingPolicyName, dep.RouteProfile, profile)
+		if err != nil {
+			return routeExplainResponse{}, err
+		}
+		routingPolicy = &policy
+	}
+	route, warnings := s.edgeManifestRouteForFile(ctx, rules, dep.RouteProfile, dep.ResourceFailover, file, obj, status, routingPolicy)
+	resp := routeExplainResponse{
+		SiteID:           site.ID,
+		DeploymentID:     dep.ID,
+		Path:             reqPath,
+		MatchedPath:      edgeRoutePathForFile(file.Path),
+		MatchType:        matchType,
+		RouteProfile:     dep.RouteProfile,
+		DeploymentTarget: dep.DeploymentTarget,
+		RoutingPolicy:    routingPolicyName,
+		ResourceFailover: dep.ResourceFailover,
+		Route:            route,
+		Warnings:         warnings,
+	}
+	if status != http.StatusOK || siteDeliveryMode(rules, file.Path) != "redirect" {
+		return resp, nil
+	}
+	if routingPolicy != nil {
+		decisionReq := routeExplainDecisionRequest(ctx, reqPath, opts)
+		resp.RegionGroup = requestRegionGroup(*routingPolicy, decisionReq)
+		resp.HashKey = routingHashKey(*routingPolicy, decisionReq)
+		evaluations, _ := s.routingPolicyCandidateEvaluations(ctx, *routingPolicy, obj)
+		selected, reason, ok := selectRoutingCandidateForRequest(*routingPolicy, readyCandidatesFromEvaluations(evaluations), decisionReq)
+		if ok {
+			markSelectedEvaluation(evaluations, selected.Target)
+			resp.Selection = routeExplainSelectionFromCandidate(selected, reason)
+		} else {
+			resp.Selection = &routeExplainSelection{Reason: reason}
+		}
+		resp.Candidates = evaluations
+		return resp, nil
+	}
+	if dep.ResourceFailover {
+		evaluations, _ := s.resourceFailoverCandidateEvaluations(ctx, dep.RouteProfile, obj)
+		if selected, ok := firstReadyEvaluation(evaluations); ok {
+			markSelectedEvaluation(evaluations, selected.Target)
+			resp.Selection = routeExplainSelectionFromCandidate(selected, "failover_order")
+		} else {
+			resp.Selection = &routeExplainSelection{Reason: "no_ready_candidates"}
+		}
+		resp.Candidates = evaluations
+	}
+	return resp, nil
+}
+
+func (s *Server) siteDeploymentFileForRouteExplain(ctx context.Context, dep *model.SiteDeployment, rules siteRules, reqPath string) (model.SiteDeploymentFile, *model.Object, string, int, error) {
+	files, err := s.db.ListSiteDeploymentFiles(ctx, dep.ID)
+	if err != nil {
+		return model.SiteDeploymentFile{}, nil, "", 0, err
+	}
+	byPath := map[string]model.SiteDeploymentFile{}
+	for _, file := range files {
+		byPath[file.Path] = file
+	}
+	for _, candidate := range sitePathCandidates(reqPath, firstNonEmpty(rules.Mode, "standard")) {
+		if file, ok := byPath[candidate]; ok {
+			obj, err := s.db.GetObject(ctx, file.ObjectID)
+			if err != nil {
+				return model.SiteDeploymentFile{}, nil, "", 0, err
+			}
+			return file, obj, "file", http.StatusOK, nil
+		}
+	}
+	if rules.Mode == "spa" {
+		if file, ok := byPath["index.html"]; ok {
+			obj, err := s.db.GetObject(ctx, file.ObjectID)
+			if err != nil {
+				return model.SiteDeploymentFile{}, nil, "", 0, err
+			}
+			return file, obj, "spa_fallback", http.StatusOK, nil
+		}
+	}
+	notFoundPath := firstNonEmpty(rules.NotFound, "404.html")
+	if file, ok := byPath[notFoundPath]; ok {
+		obj, err := s.db.GetObject(ctx, file.ObjectID)
+		if err != nil {
+			return model.SiteDeploymentFile{}, nil, "", 0, err
+		}
+		return file, obj, "not_found", http.StatusNotFound, nil
+	}
+	return model.SiteDeploymentFile{}, nil, "", 0, fmt.Errorf("no deployment file matches %s", reqPath)
+}
+
+func routeExplainDecisionRequest(ctx context.Context, reqPath string, opts routeExplainOptions) *http.Request {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://route-explain.local"+reqPath, nil)
+	if country := strings.ToUpper(strings.TrimSpace(opts.Country)); country != "" {
+		req.Header.Set("CF-IPCountry", country)
+	}
+	if clientIP := strings.TrimSpace(opts.ClientIP); clientIP != "" {
+		req.Header.Set("CF-Connecting-IP", clientIP)
+		req.RemoteAddr = clientIP
+	}
+	return req
+}
+
+func routeExplainSelectionFromCandidate(candidate edgeRouteCandidate, reason string) *routeExplainSelection {
+	return &routeExplainSelection{
+		Target:      candidate.Target,
+		TargetType:  candidate.TargetType,
+		Type:        candidate.Type,
+		RegionGroup: candidate.RegionGroup,
+		URL:         candidate.URL,
+		Reason:      reason,
+	}
+}
+
+func readyCandidatesFromEvaluations(evaluations []edgeRouteCandidateEvaluation) []edgeRouteCandidate {
+	out := make([]edgeRouteCandidate, 0, len(evaluations))
+	for _, evaluation := range evaluations {
+		if candidate, ok := evaluation.readyCandidate(); ok {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func firstReadyEvaluation(evaluations []edgeRouteCandidateEvaluation) (edgeRouteCandidate, bool) {
+	for _, evaluation := range evaluations {
+		if candidate, ok := evaluation.readyCandidate(); ok {
+			return candidate, true
+		}
+	}
+	return edgeRouteCandidate{}, false
+}
+
+func markSelectedEvaluation(evaluations []edgeRouteCandidateEvaluation, target string) {
+	for i := range evaluations {
+		if evaluations[i].Target == target {
+			evaluations[i].Selected = true
+			return
+		}
+	}
+}
+
 func (s *Server) edgeManifestRouteForFile(ctx context.Context, rules siteRules, profileName string, resourceFailover bool, file model.SiteDeploymentFile, obj *model.Object, status int, routingPolicy *config.RoutingPolicy) (edgeManifestRoute, []string) {
 	headers := siteHeadersForPath(rules, "/"+file.Path)
 	cacheControl := firstNonEmpty(file.CacheControl, obj.CacheControl)
@@ -8967,6 +9326,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]any{"error": message})
+}
+
+func setDynamicRedirectNoStore(h http.Header) {
+	h.Set("Cache-Control", "no-store")
+	h.Set("CDN-Cache-Control", "no-store")
+	h.Set("Cloudflare-CDN-Cache-Control", "no-store")
 }
 
 func (s *Server) overclockMode() bool {

@@ -86,10 +86,17 @@ type RouteProfile struct {
 	Name                string   `json:"name"`
 	Primary             string   `json:"primary"`
 	Backups             []string `json:"backups"`
+	ReplicationPolicy   string   `json:"replication_policy"`
 	DefaultCacheControl string   `json:"default_cache_control"`
 	AllowRedirect       bool     `json:"allow_redirect"`
 	DeploymentTarget    string   `json:"deployment_target"`
 }
+
+const (
+	ReplicationPolicyPrimaryOnly       = "primary_only"
+	ReplicationPolicyBestEffortBackups = "best_effort_backups"
+	ReplicationPolicyRequireBackups    = "require_backups"
+)
 
 type RoutingPolicy struct {
 	Name               string                `json:"name"`
@@ -334,17 +341,33 @@ func (c *Config) ApplyDefaults(baseDir string) error {
 	}
 	for i := range c.RouteProfiles {
 		p := &c.RouteProfiles[i]
+		p.Name = strings.TrimSpace(p.Name)
+		p.Primary = strings.TrimSpace(p.Primary)
 		if p.Name == "" {
 			return errors.New("route profile name is required")
 		}
 		if !stores[p.Primary] {
 			return fmt.Errorf("route profile %q references missing primary storage %q", p.Name, p.Primary)
 		}
-		for _, b := range p.Backups {
+		hasBackup := false
+		for j, b := range p.Backups {
+			b = strings.TrimSpace(b)
+			p.Backups[j] = b
 			if !stores[b] {
 				return fmt.Errorf("route profile %q references missing backup storage %q", p.Name, b)
 			}
+			if b != "" && b != p.Primary {
+				hasBackup = true
+			}
 		}
+		policy, err := normalizeReplicationPolicy(p.ReplicationPolicy, hasBackup)
+		if err != nil {
+			return fmt.Errorf("route profile %q replication_policy: %w", p.Name, err)
+		}
+		if policy == ReplicationPolicyRequireBackups && !hasBackup {
+			return fmt.Errorf("route profile %q replication_policy require_backups requires at least one backup storage", p.Name)
+		}
+		p.ReplicationPolicy = policy
 		target, err := normalizeDeploymentTarget(p.DeploymentTarget)
 		if err != nil {
 			return fmt.Errorf("route profile %q deployment_target: %w", p.Name, err)
@@ -400,6 +423,26 @@ func (c *Config) ApplyDefaults(baseDir string) error {
 		}
 	}
 	return os.MkdirAll(c.Server.DataDir, 0o755)
+}
+
+func normalizeReplicationPolicy(value string, hasBackups bool) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		if hasBackups {
+			return ReplicationPolicyBestEffortBackups, nil
+		}
+		return ReplicationPolicyPrimaryOnly, nil
+	}
+	switch value {
+	case "primary", "primary_only", "none", "off":
+		return ReplicationPolicyPrimaryOnly, nil
+	case "best_effort", "best_effort_backups", "async", "background":
+		return ReplicationPolicyBestEffortBackups, nil
+	case "require", "required", "require_backups", "strict":
+		return ReplicationPolicyRequireBackups, nil
+	default:
+		return "", fmt.Errorf("must be primary_only, best_effort_backups or require_backups")
+	}
 }
 
 func normalizeRoutingPolicyMode(value string) string {

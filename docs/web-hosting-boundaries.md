@@ -36,6 +36,8 @@ Failover is off by default. It is enabled only when the user explicitly asks for
 
 Backups are storage copies, not automatic Web delivery fallbacks. Without an explicit routing/failover policy, Web resource routes use the primary resource library only.
 
+Route profiles now make that copy behavior explicit with `replication_policy`: `primary_only` keeps the object on the primary line, `best_effort_backups` queues backup replicas asynchronously, and `require_backups` makes backup replication a hard requirement for the upload or deploy path.
+
 The explicit Web resource failover switch is `resource_failover` / `deploy-site -resource-failover`. It requires a route profile with primary plus backup targets. In the edge path, failover routes are proxied by the Worker across ordered manifest candidates. This is intentionally heavier than a redirect, so it stays opt-in.
 
 When a Cloudflare-entry HTTPS page points a manifest resource at an HTTP-only AList/OpenList `/d` URL, the Worker proxies that resource same-origin and marks it with `X-SuperCDN-Edge-Source: storage` plus `X-SuperCDN-Edge-Proxy: mixed_content`. This avoids browser mixed-content blocking without falling back to the Go origin. HTTPS storage locators can still use normal manifest redirects.

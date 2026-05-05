@@ -432,6 +432,65 @@ describe("edge proxy", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("retries smart manifest candidates when resource failover is enabled", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      if (req.url === "http://china.example/app.js") {
+        return new Response("primary down", { status: 502 });
+      }
+      if (req.url === "http://overseas.example/app.js") {
+        return new Response("console.log('overseas')", {
+          status: 200,
+          headers: { "Content-Type": "application/octet-stream" },
+        });
+      }
+      throw new Error(`unexpected fetch ${req.url}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const res = await worker.fetch(
+      new Request("https://site.example.com/assets/app.js", { headers: { "CF-IPCountry": "CN" } }),
+      env({
+        EDGE_MANIFEST_MODE: "route",
+        EDGE_MANIFEST: new MemoryKV({
+          "sites/site.example.com/active/edge-manifest": JSON.stringify(
+            manifest({
+              routing_policy: "global_smart",
+              resource_failover: true,
+              routes: {
+                "/assets/app.js": {
+                  type: "smart",
+                  delivery: "redirect",
+                  file: "assets/app.js",
+                  status: 302,
+                  content_type: "text/javascript; charset=utf-8",
+                  routing_policy: {
+                    name: "global_smart",
+                    mode: "global_accel",
+                    default_region_group: "overseas",
+                  },
+                  candidates: [
+                    { target: "china", type: "redirect", region_group: "china", url: "http://china.example/app.js", status: "ready" },
+                    { target: "overseas", type: "redirect", region_group: "overseas", url: "http://overseas.example/app.js", status: "ready" },
+                  ],
+                },
+              },
+            }),
+          ),
+        }) as unknown as KVNamespace,
+      }),
+      ctx(),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("console.log('overseas')");
+    expect(res.headers.get("X-SuperCDN-Edge-Source")).toBe("resource_failover");
+    expect(res.headers.get("X-SuperCDN-Route-Target")).toBe("overseas");
+    expect(res.headers.get("X-SuperCDN-Route-Reason")).toBe("smart_failover");
+    expect(res.headers.get("X-SuperCDN-Failover-From")).toBe("china");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
   it("includes smart routing decisions in manifest dry-run", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("origin", { status: 200 })));
     const res = await worker.fetch(

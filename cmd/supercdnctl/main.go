@@ -160,6 +160,8 @@ func main() {
 		err = resourceStatus(c, args[1:])
 	case "routing-policy-status":
 		err = routingPolicyStatus(c, args[1:])
+	case "route-explain":
+		err = routeExplain(c, args[1:])
 	case "health-check":
 		err = healthCheck(c, args[1:])
 	case "e2e-probe":
@@ -3713,6 +3715,31 @@ func routingPolicyStatus(c client, args []string) error {
 	return c.do(http.MethodGet, path, nil, "")
 }
 
+func routeExplain(c client, args []string) error {
+	fs := flag.NewFlagSet("route-explain", flag.ExitOnError)
+	site := fs.String("site", "", "site id")
+	routePath := fs.String("path", "", "site request path, for example /assets/app.js")
+	deployment := fs.String("deployment", "", "deployment id; empty uses active production deployment")
+	country := fs.String("country", "", "simulated Cloudflare country code, for example CN")
+	clientIP := fs.String("client-ip", "", "simulated client IP for deterministic load-balance hashing")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*site) == "" || strings.TrimSpace(*routePath) == "" {
+		return errors.New("-site and -path are required")
+	}
+	q := url.Values{}
+	q.Set("path", strings.TrimSpace(*routePath))
+	if strings.TrimSpace(*deployment) != "" {
+		q.Set("deployment", strings.TrimSpace(*deployment))
+	}
+	if strings.TrimSpace(*country) != "" {
+		q.Set("country", strings.TrimSpace(*country))
+	}
+	if strings.TrimSpace(*clientIP) != "" {
+		q.Set("client_ip", strings.TrimSpace(*clientIP))
+	}
+	return c.do(http.MethodGet, "/api/v1/sites/"+url.PathEscape(strings.TrimSpace(*site))+"/route-explain?"+q.Encode(), nil, "")
+}
+
 func healthCheck(c client, args []string) error {
 	fs := flag.NewFlagSet("health-check", flag.ExitOnError)
 	libraries := fs.String("libraries", "", "comma-separated resource library names; empty means all")
@@ -4655,6 +4682,7 @@ func usage() {
   supercdnctl [global flags] init-job -id 1
   supercdnctl [global flags] resource-status -library repo_china_all
   supercdnctl [global flags] routing-policy-status -policy global_smart
+  supercdnctl [global flags] route-explain -site cyberstream -path /assets/app.js -country CN
   supercdnctl [global flags] health-check -libraries repo_china_all
   supercdnctl [global flags] e2e-probe -profile china_all
   supercdnctl [global flags] create-bucket -slug movie-posters -name 影视海报桶 -profile china_all -types image

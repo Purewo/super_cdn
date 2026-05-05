@@ -832,6 +832,43 @@ func TestRefreshEdgeManifestPublishesActiveManifest(t *testing.T) {
 	}
 }
 
+func TestRouteExplainCallsControlPlane(t *testing.T) {
+	saw := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", auth)
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/demo/route-explain" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		saw = true
+		if got := r.URL.Query().Get("path"); got != "/assets/app.js" {
+			t.Fatalf("path query = %q", got)
+		}
+		if got := r.URL.Query().Get("country"); got != "CN" {
+			t.Fatalf("country query = %q", got)
+		}
+		if got := r.URL.Query().Get("client_ip"); got != "203.0.113.10" {
+			t.Fatalf("client_ip query = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"site_id":"demo","deployment_id":"dpl","path":"/assets/app.js","route":{"type":"smart"}}`))
+	}))
+	defer srv.Close()
+
+	err := routeExplain(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+		"-site", "demo",
+		"-path", "/assets/app.js",
+		"-country", "CN",
+		"-client-ip", "203.0.113.10",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("route explain request was not sent")
+	}
+}
+
 func TestRedactSignedURL(t *testing.T) {
 	got := redactSignedURL("https://storage.example.com/app.js?X-Amz-Date=20260430T000000Z&X-Amz-Signature=secret&plain=keep")
 	if strings.Contains(got, "secret") || strings.Contains(got, "20260430T000000Z") || strings.Contains(got, "plain=keep") {

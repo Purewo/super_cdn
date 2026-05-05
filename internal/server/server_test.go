@@ -653,6 +653,56 @@ func TestRepairObjectReplicasQueuesFailedAndMissingTargets(t *testing.T) {
 	}
 }
 
+func TestRepairObjectReplicasSkipsBackupsForPrimaryOnlyPolicy(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.RouteProfiles = []config.RouteProfile{{
+		Name:              "primary-only",
+		Primary:           "source",
+		Backups:           []string{"target"},
+		ReplicationPolicy: config.ReplicationPolicyPrimaryOnly,
+	}}
+	source := &capturingPutStore{name: "source"}
+	target := &capturingPutStore{name: "target"}
+	app.stores = storage.NewManager([]storage.Store{source, target})
+
+	ctx := context.Background()
+	if _, err := app.db.CreateProject(ctx, "primary-only-repair"); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := app.db.SaveObject(ctx, model.Object{
+		ProjectID:     "primary-only-repair",
+		Path:          "files/demo.txt",
+		Key:           "objects/demo.txt",
+		RouteProfile:  "primary-only",
+		Size:          12,
+		SHA256:        "abc123",
+		ContentType:   "text/plain",
+		CacheControl:  "public, max-age=60",
+		PrimaryTarget: "source",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "source", model.ReplicaReady, "source://objects/demo.txt", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/objects/"+strconv.FormatInt(obj.ID, 10)+"/replicas/repair", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("repair status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp repairObjectReplicasResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "noop" || len(resp.Jobs) != 0 || len(resp.Results) != 1 {
+		t.Fatalf("unexpected repair response: %+v", resp)
+	}
+	if resp.Results[0].Target != "source" || !resp.Results[0].Skipped || resp.Results[0].SkipReason != "replica is already ready" {
+		t.Fatalf("source result = %+v", resp.Results[0])
+	}
+}
+
 func TestRefreshObjectReplicasUpdatesLocatorAndMarksStale(t *testing.T) {
 	app := newTestServer(t)
 	fresh := &signedLocatorStore{
@@ -1912,6 +1962,9 @@ func TestSiteNonIndexFilesRedirectToStorage(t *testing.T) {
 	if assetOut.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("redirect cache-control = %q", assetOut.Header().Get("Cache-Control"))
 	}
+	if assetOut.Header().Get("CDN-Cache-Control") != "no-store" || assetOut.Header().Get("Cloudflare-CDN-Cache-Control") != "no-store" {
+		t.Fatalf("redirect cdn cache headers: cdn=%q cloudflare=%q", assetOut.Header().Get("CDN-Cache-Control"), assetOut.Header().Get("Cloudflare-CDN-Cache-Control"))
+	}
 
 	ranged := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
 	ranged.Host = "demo.local"
@@ -2321,6 +2374,89 @@ func TestExportEdgeManifestSkipsUnhealthySmartRoutingCandidate(t *testing.T) {
 	}
 }
 
+func TestRouteExplainShowsSelectedAndSkippedSmartCandidates(t *testing.T) {
+	app := newSmartRoutingTestServer(t)
+	configureSmartRoutingHealthLibraries(app)
+	create := map[string]any{
+		"id":             "demo",
+		"route_profile":  "smart",
+		"routing_policy": "global_smart",
+		"mode":           "standard",
+		"domains":        []string{"demo.local"},
+	}
+	raw, _ := json.Marshal(create)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true", "route_profile": "smart"})
+	ctx := context.Background()
+	obj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "china", model.ReplicaReady, "https://china.example/assets/app.js?sig=cn", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "overseas", model.ReplicaReady, "https://overseas.example/assets/app.js?sig=global", ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := app.db.UpsertResourceLibraryHealth(ctx, model.ResourceLibraryHealth{
+		Library:       "china",
+		Binding:       "china_primary",
+		BindingPath:   "/china",
+		Target:        "china:china_primary",
+		TargetType:    "resource_library",
+		Status:        storage.HealthStatusFailed,
+		CheckMode:     storage.HealthModePassive,
+		LastError:     "dial tcp4 timeout",
+		LastCheckedAt: now,
+		LastFailureAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/sites/demo/route-explain?path=%2Fassets%2Fapp.js&country=CN&client_ip=203.0.113.10", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("route explain status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var explain routeExplainResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &explain); err != nil {
+		t.Fatal(err)
+	}
+	if explain.DeploymentID != deploymentID || explain.Path != "/assets/app.js" || explain.RegionGroup != "china" || explain.HashKey == "" {
+		t.Fatalf("unexpected explain metadata: %+v", explain)
+	}
+	if explain.Route.Type != "redirect" || explain.Route.Location != "https://overseas.example/object?sig=global" {
+		t.Fatalf("unexpected degraded route: %+v", explain.Route)
+	}
+	if explain.Selection == nil || explain.Selection.Target != "overseas" || explain.Selection.Reason != "region_balance_fallback:china" {
+		t.Fatalf("unexpected selection: %+v", explain.Selection)
+	}
+	byTarget := map[string]edgeRouteCandidateEvaluation{}
+	for _, candidate := range explain.Candidates {
+		byTarget[candidate.Target] = candidate
+	}
+	if got := byTarget["china"]; got.Status != "skipped" || !strings.Contains(got.Reason, "skipped by health") || got.Selected {
+		t.Fatalf("china candidate = %+v", got)
+	}
+	if got := byTarget["overseas"]; got.Status != model.ReplicaReady || !got.Selected || got.URL == "" {
+		t.Fatalf("overseas candidate = %+v", got)
+	}
+}
+
 func TestExportEdgeManifestBuildsExplicitResourceFailoverRoute(t *testing.T) {
 	app := newSmartRoutingTestServer(t)
 	create := map[string]any{
@@ -2492,6 +2628,139 @@ func TestReplicateObjectRetriesTransientSourceGet(t *testing.T) {
 	}
 	if targetReplica == nil || targetReplica.Status != model.ReplicaReady || targetReplica.Locator != "target://objects/demo.txt" {
 		t.Fatalf("target replica = %+v", targetReplica)
+	}
+}
+
+func TestPutObjectPrimaryOnlyMarksBackupsDeleted(t *testing.T) {
+	app := newTestServer(t)
+	primary, err := storage.NewLocalStore("primary", filepath.Join(t.TempDir(), "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := storage.NewLocalStore("backup", filepath.Join(t.TempDir(), "backup"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.stores = storage.NewManager([]storage.Store{primary, backup})
+
+	profile := config.RouteProfile{
+		Name:              "primary-only",
+		Primary:           "primary",
+		Backups:           []string{"backup"},
+		ReplicationPolicy: config.ReplicationPolicyPrimaryOnly,
+	}
+	ctx := context.Background()
+	if _, err := app.db.CreateProject(ctx, "policy-test"); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(t.TempDir(), "object.txt")
+	if err := os.WriteFile(payload, []byte("hello policy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	obj, jobs, err := app.putObjectFromFile(ctx, putObjectInput{
+		ProjectID:      "policy-test",
+		ObjectPath:     "object.txt",
+		Key:            "objects/object.txt",
+		Profile:        profile,
+		ProfileName:    profile.Name,
+		CacheControl:   "public, max-age=60",
+		ContentType:    "text/plain",
+		FilePath:       payload,
+		FileName:       "object.txt",
+		Size:           int64(len("hello policy")),
+		SHA256:         "sha256-policy",
+		BatchFileCount: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	replicas, err := app.db.Replicas(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusByTarget := map[string]string{}
+	for _, replica := range replicas {
+		statusByTarget[replica.Target] = replica.Status
+	}
+	if statusByTarget["primary"] != model.ReplicaReady || statusByTarget["backup"] != model.ReplicaDeleted {
+		t.Fatalf("replica statuses = %+v", statusByTarget)
+	}
+	if _, err := backup.Get(ctx, "objects/object.txt", storage.GetOptions{}); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("backup object err = %v", err)
+	}
+}
+
+func TestPutObjectRequireBackupsReplicatesSynchronously(t *testing.T) {
+	app := newTestServer(t)
+	primary, err := storage.NewLocalStore("primary", filepath.Join(t.TempDir(), "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := storage.NewLocalStore("backup", filepath.Join(t.TempDir(), "backup"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.stores = storage.NewManager([]storage.Store{primary, backup})
+
+	profile := config.RouteProfile{
+		Name:              "strict",
+		Primary:           "primary",
+		Backups:           []string{"backup"},
+		ReplicationPolicy: config.ReplicationPolicyRequireBackups,
+	}
+	ctx := context.Background()
+	if _, err := app.db.CreateProject(ctx, "strict-policy-test"); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(t.TempDir(), "object.txt")
+	if err := os.WriteFile(payload, []byte("strict backup"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	obj, jobs, err := app.putObjectFromFile(ctx, putObjectInput{
+		ProjectID:      "strict-policy-test",
+		ObjectPath:     "object.txt",
+		Key:            "objects/object.txt",
+		Profile:        profile,
+		ProfileName:    profile.Name,
+		CacheControl:   "public, max-age=60",
+		ContentType:    "text/plain",
+		FilePath:       payload,
+		FileName:       "object.txt",
+		Size:           int64(len("strict backup")),
+		SHA256:         "sha256-strict",
+		BatchFileCount: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("strict replication should not queue async jobs: %+v", jobs)
+	}
+	replicas, err := app.db.Replicas(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusByTarget := map[string]string{}
+	for _, replica := range replicas {
+		statusByTarget[replica.Target] = replica.Status
+	}
+	if statusByTarget["primary"] != model.ReplicaReady || statusByTarget["backup"] != model.ReplicaReady {
+		t.Fatalf("replica statuses = %+v", statusByTarget)
+	}
+	stream, err := backup.Get(ctx, "objects/object.txt", storage.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	raw, err := io.ReadAll(stream.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "strict backup" {
+		t.Fatalf("backup body = %q", string(raw))
 	}
 }
 
@@ -3311,6 +3580,9 @@ func TestAssetBucketSmartRoutingRedirectsByRegion(t *testing.T) {
 	}
 	if outCN.Header().Get("X-SuperCDN-Route-Policy") != "global_smart" || outCN.Header().Get("X-SuperCDN-Route-Target") != "china" {
 		t.Fatalf("cn route headers: policy=%q target=%q reason=%q", outCN.Header().Get("X-SuperCDN-Route-Policy"), outCN.Header().Get("X-SuperCDN-Route-Target"), outCN.Header().Get("X-SuperCDN-Route-Reason"))
+	}
+	if outCN.Header().Get("Cache-Control") != "no-store" || outCN.Header().Get("Cloudflare-CDN-Cache-Control") != "no-store" {
+		t.Fatalf("cn cache headers: cache=%q cloudflare=%q", outCN.Header().Get("Cache-Control"), outCN.Header().Get("Cloudflare-CDN-Cache-Control"))
 	}
 
 	getUS := httptest.NewRequest(http.MethodGet, "/a/posters/images/poster.jpg", nil)

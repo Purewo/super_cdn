@@ -109,6 +109,7 @@ export interface EdgeManifestDecision {
   action: "site_redirect" | "route" | "fallback" | "not_found" | "miss";
   request_path: string;
   serve_path: string;
+  resource_failover?: boolean;
   route_type?: string;
   delivery?: string;
   file?: string;
@@ -345,13 +346,13 @@ export function resolveEdgeManifestDecision(request: Request, manifest: EdgeMani
 
   const route = manifest.routes?.[servePath];
   if (route) {
-    return decisionFromRoute("route", request, requestPath, servePath, route, "matched_route");
+    return decisionFromRoute("route", request, requestPath, servePath, route, "matched_route", !!manifest.resource_failover);
   }
   if (manifest.fallback) {
-    return decisionFromRoute("fallback", request, requestPath, servePath, manifest.fallback, "spa_fallback");
+    return decisionFromRoute("fallback", request, requestPath, servePath, manifest.fallback, "spa_fallback", !!manifest.resource_failover);
   }
   if (manifest.not_found) {
-    return decisionFromRoute("not_found", request, requestPath, servePath, manifest.not_found, "not_found");
+    return decisionFromRoute("not_found", request, requestPath, servePath, manifest.not_found, "not_found", !!manifest.resource_failover);
   }
   return {
     action: "miss",
@@ -606,6 +607,9 @@ async function directEdgeManifestResponse(
   env: Env,
 ): Promise<Response | undefined> {
   if (decision.selected_candidate?.url) {
+    if (smartFailoverEnabled(decision)) {
+      return fetchSmartFailoverCandidates(request, decision, env);
+    }
     if (decision.selected_candidate.type === "ipfs") {
       return fetchIPFSGatewayCandidate(request, decision, decision.selected_candidate, env);
     }
@@ -761,6 +765,89 @@ async function fetchFailoverCandidates(request: Request, decision: EdgeManifestD
     }
   }
   return edgeManifestRouteErrorResponse(502, "resource_failover_failed", lastError);
+}
+
+async function fetchSmartFailoverCandidates(request: Request, decision: EdgeManifestDecision, env: Env): Promise<Response> {
+  const candidates = orderedSmartFailoverCandidates(decision);
+  let lastError = "no ready smart failover candidate";
+  for (const candidate of candidates) {
+    try {
+      const response = await followStorageRedirects(
+        await fetch(candidate.url, {
+          method: request.method === "HEAD" ? "HEAD" : "GET",
+          headers: storageHeaders(request),
+          redirect: "manual",
+        }),
+        request,
+        3,
+      );
+      if (response.status >= 200 && response.status < 400) {
+        const out = normalizeFailoverCandidateResponse(response, request, decision, candidate, env);
+        applySmartFailoverHeaders(out.headers, decision, candidate);
+        return out;
+      }
+      lastError = `${candidate.target || candidate.url} returned ${response.status}`;
+    } catch (error) {
+      lastError = `${candidate.target || candidate.url} failed: ${errorMessage(error)}`;
+    }
+  }
+  return edgeManifestRouteErrorResponse(502, "resource_failover_failed", lastError);
+}
+
+function smartFailoverEnabled(decision: EdgeManifestDecision): boolean {
+  if (!decision.resource_failover || !decision.selected_candidate?.url) {
+    return false;
+  }
+  return readyRouteCandidates(decision.candidates || []).length > 1;
+}
+
+function orderedSmartFailoverCandidates(decision: EdgeManifestDecision): EdgeRouteCandidate[] {
+  const ready = readyRouteCandidates(decision.candidates || []);
+  const selected = decision.selected_candidate;
+  const selectedKey = candidateKey(selected);
+  const out: EdgeRouteCandidate[] = [];
+  if (selected?.url) {
+    const matched = ready.find((candidate) => candidateKey(candidate) === selectedKey) || selected;
+    out.push(matched);
+  }
+  for (const candidate of ready.sort(routeCandidateOrder)) {
+    if (candidateKey(candidate) !== selectedKey) {
+      out.push(candidate);
+    }
+  }
+  return out;
+}
+
+function readyRouteCandidates(candidates: EdgeRouteCandidate[]): EdgeRouteCandidate[] {
+  return candidates.filter((candidate) => candidate.url && (candidate.status || "ready") === "ready");
+}
+
+function routeCandidateOrder(a: EdgeRouteCandidate, b: EdgeRouteCandidate): number {
+  if ((a.fallback_only ? 1 : 0) !== (b.fallback_only ? 1 : 0)) {
+    return (a.fallback_only ? 1 : 0) - (b.fallback_only ? 1 : 0);
+  }
+  if ((a.priority || 0) !== (b.priority || 0)) {
+    return (a.priority || 0) - (b.priority || 0);
+  }
+  return a.target.localeCompare(b.target);
+}
+
+function candidateKey(candidate?: EdgeRouteCandidate): string {
+  if (!candidate) {
+    return "";
+  }
+  return `${candidate.target}\n${candidate.url}`;
+}
+
+function applySmartFailoverHeaders(headers: Headers, decision: EdgeManifestDecision, candidate: EdgeRouteCandidate): void {
+  if (candidateKey(candidate) === candidateKey(decision.selected_candidate)) {
+    headers.set("X-SuperCDN-Route-Reason", decision.routing_reason || "smart");
+    return;
+  }
+  headers.set("X-SuperCDN-Route-Reason", "smart_failover");
+  if (decision.selected_candidate?.target) {
+    headers.set("X-SuperCDN-Failover-From", decision.selected_candidate.target);
+  }
 }
 
 function ipfsGatewayCandidates(decision: EdgeManifestDecision): string[] {
@@ -1057,11 +1144,13 @@ function decisionFromRoute(
   servePath: string,
   route: EdgeManifestRoute,
   reason: string,
+  resourceFailover = false,
 ): EdgeManifestDecision {
   const decision: EdgeManifestDecision = {
     action,
     request_path: requestPath,
     serve_path: servePath,
+    resource_failover: resourceFailover,
     route_type: route.type,
     delivery: route.delivery,
     file: route.file,

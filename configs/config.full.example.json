@@ -165,6 +165,7 @@
       "name": "overseas",
       "primary": "repo_overseas",
       "backups": ["ipfs_pinata"],
+      "replication_policy": "best_effort_backups",
       "default_cache_control": "public, max-age=3600, s-maxage=86400",
       "allow_redirect": false,
       "deployment_target": "cloudflare_static"
@@ -173,6 +174,7 @@
       "name": "overseas_r2",
       "primary": "overseas_accel",
       "backups": [],
+      "replication_policy": "primary_only",
       "default_cache_control": "public, max-age=31536000, immutable",
       "allow_redirect": true,
       "deployment_target": "origin_assisted"
@@ -181,6 +183,7 @@
       "name": "ipfs_archive",
       "primary": "ipfs_pinata",
       "backups": [],
+      "replication_policy": "primary_only",
       "default_cache_control": "public, max-age=31536000, immutable",
       "allow_redirect": true,
       "deployment_target": "origin_assisted"
@@ -189,6 +192,7 @@
       "name": "china_all",
       "primary": "repo_china_all",
       "backups": ["repo_overseas", "ipfs_pinata"],
+      "replication_policy": "best_effort_backups",
       "default_cache_control": "public, max-age=600, s-maxage=3600",
       "allow_redirect": false,
       "deployment_target": "hybrid_edge"
@@ -197,6 +201,7 @@
       "name": "china_telecom",
       "primary": "repo_china_telecom",
       "backups": ["repo_overseas", "ipfs_pinata"],
+      "replication_policy": "best_effort_backups",
       "default_cache_control": "public, max-age=600, s-maxage=3600",
       "allow_redirect": false,
       "deployment_target": "hybrid_edge"
@@ -205,6 +210,7 @@
       "name": "china_mobile",
       "primary": "repo_china_mobile",
       "backups": ["repo_overseas", "ipfs_pinata"],
+      "replication_policy": "best_effort_backups",
       "default_cache_control": "public, max-age=600, s-maxage=3600",
       "allow_redirect": false,
       "deployment_target": "hybrid_edge"
@@ -213,6 +219,7 @@
       "name": "china_unicom",
       "primary": "repo_china_unicom",
       "backups": ["repo_overseas", "ipfs_pinata"],
+      "replication_policy": "best_effort_backups",
       "default_cache_control": "public, max-age=600, s-maxage=3600",
       "allow_redirect": false,
       "deployment_target": "hybrid_edge"
