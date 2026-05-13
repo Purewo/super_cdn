@@ -28,6 +28,8 @@ The Go service remains the control plane: deploy intake, inspection, health chec
 
 Full CLI reference: [docs/cli-reference.md](docs/cli-reference.md).
 
+Real user onboarding guide: [docs/onboarding.md](docs/onboarding.md).
+
 v0.1.x maintenance scope and runbooks: [docs/v0.1-maintenance.md](docs/v0.1-maintenance.md).
 
 Next feature roadmap: [docs/v0.2-roadmap.md](docs/v0.2-roadmap.md).
@@ -83,9 +85,20 @@ The server admin token remains the root/break-glass credential. For team use, cr
 go run .\cmd\supercdnctl -- -token <root-token> invite-user -name alice -role maintainer
 go run .\cmd\supercdnctl -- -server https://qwk.ccwu.cc -profile alice login -invite-token sci_xxx
 go run .\cmd\supercdnctl -- -profile alice whoami
+go run .\cmd\supercdnctl -- -profile alice doctor
 ```
 
 User tokens are stored in the local `supercdn/cli.json` profile and are scoped to a workspace. Owners can manage invites and tokens; maintainers can create and deploy sites/buckets; viewers are read-only. Cloudflare/R2/AList configuration commands stay root-only.
+
+`doctor` prints a support-safe JSON report for auth, database, storage target, route profile, resource status and routing policy checks. It does not print tokens or secrets; resource-library detail is still root-only and non-root users get a warning when that part is skipped.
+
+For the shortest real-user flow from login to bucket upload, batch upload, site publish and diagnostics, follow [docs/onboarding.md](docs/onboarding.md).
+
+For website issues, use `site-doctor` to package the active deployment, hosting target, route explanation and expected edge headers:
+
+```powershell
+go run .\cmd\supercdnctl -- site-doctor -site cyberstream -path /assets/app.js
+```
 
 ## Foundation check
 
@@ -365,6 +378,8 @@ Resource-library policy lives under `resource_libraries[].policy`. It describes 
 
 Binding-level constraints live under each `resource_libraries[].bindings[].constraints`, not on the resource library. Supported fields are `max_capacity_bytes`, `peak_bandwidth_mbps`, `max_batch_files`, `max_file_size_bytes`, `daily_upload_limit_bytes`, `daily_upload_limit_unlimited`, `supports_online_extract`, `max_online_extract_bytes`, and `notes`. The current service enforces file size, batch file count, runtime daily upload totals, configured resource-library capacity and configured available capacity. Peak speed and online extraction support are stored as capability metadata until those subsystems are added.
 
+Direct storage targets may also declare `storage[].policy` and `storage[].constraints`. This is used for Pinata/IPFS guardrails when the route profile points directly at `ipfs_pinata` instead of a mounted resource library. Cloudflare R2 account libraries use the same `policy` plus binding `constraints` under `cloudflare_libraries[]`. The full example assumes a small 10 GB R2 budget and keeps R2 at 2 GB per file/day with 1 GB reserved; Pinata/IPFS stays at 15 GB per file plus 100 GiB per day. These are Super CDN guardrails, not provider hard limits.
+
 The API also exposes preflight checks:
 
 - `POST /api/v1/preflight/upload`
@@ -485,13 +500,20 @@ go run .\cmd\supercdnctl -- upload-bucket -bucket overseas-posters -file .\poste
 go run .\cmd\supercdnctl -- upload-bucket -bucket mobile-posters -file .\poster.jpg -path posters/poster.jpg -asset-type image -warmup
 go run .\cmd\supercdnctl -- upload-bucket -bucket durable-assets -file .\poster.jpg -path posters/v1/poster.jpg -asset-type image -warmup
 go run .\cmd\supercdnctl -- upload-bucket-dir -bucket movie-posters -dir .\posters -prefix posters -concurrency 10
+go run .\cmd\supercdnctl -- upload-bucket-dir -bucket movie-posters -dir .\posters -prefix posters -dry-run -report-file .\upload-plan.json
+go run .\cmd\supercdnctl -- upload-bucket-dir -bucket movie-posters -dir .\posters -prefix posters -skip-existing -retry 2 -report-file .\upload-report.json
 go run .\cmd\supercdnctl -- ipfs-smoke -file .\poster.jpg -bucket durable-smoke -download-runs 3
 go run .\cmd\supercdnctl -- list-bucket -bucket movie-posters
+go run .\cmd\supercdnctl -- cdn-doctor -bucket movie-posters -path posters/poster.jpg
 ```
 
 Bucket uploads return both the relative `url` and the absolute `public_url`/`urls` fields when `server.public_base_url` is configured. If the storage backend exposes an HTTP direct URL, uploads also return `cdn_url` / `storage_url`; for `overseas_r2` this should be the R2/Cloudflare public URL, and for IPFS/Pinata this is the configured gateway URL for the returned CID. `-warmup` immediately probes the uploaded public URL; use `-warmup-method GET` when you want the edge to fetch the full object.
 
-`upload-bucket-dir` uploads every file under a local directory through the same bucket object API. It preserves the relative directory layout under `-prefix`, runs uploads in parallel with `-concurrency 10` by default, streams multipart bodies instead of buffering whole files in memory, and returns a per-file JSON report. Failed files are reported after the whole batch finishes.
+The CLI also adds `summary`, `copy_urls` and `next_commands` to `upload-bucket` output. `copy_urls.public_url` is the stable Super CDN URL to share, while `copy_urls.cdn_url` / `copy_urls.storage_url` point to the direct backend URL when the storage line exposes one. On upload failure, the error text includes the matching `cdn-doctor` command.
+
+`upload-bucket-dir` uploads every file under a local directory through the same bucket object API. It preserves the relative directory layout under `-prefix`, runs uploads in parallel with `-concurrency 10` by default, streams multipart bodies instead of buffering whole files in memory, and returns a per-file JSON report. Use `-dry-run` to inspect logical paths and sizes before sending files, `-report-file` to persist the report, `-retry <n>` for per-file retry, and `-skip-existing` to leave already tracked logical paths untouched. Failed files are reported after the whole batch finishes. The report includes `summary`, `report_saved_to` and `next_commands` so the operator can rerun only missing files or collect the right `cdn-doctor` output.
+
+`cdn-doctor` produces a support-safe bucket report. With `-path`, it explains the tracked object, public URL, redacted storage URL, replica states, IPFS metadata, routing candidates and selected resource line.
 
 For domestic AList/OpenList buckets, `public_url` is the stable Super CDN `/a/...` URL. `cdn_url` is the signed AList storage URL when available; some downstream cloud drives reject `HEAD` after redirect, so use `GET` or a range `GET` when validating the direct storage path.
 
@@ -513,9 +535,13 @@ go run .\cmd\supercdnctl -- delete-bucket-object -bucket movie-posters -paths po
 go run .\cmd\supercdnctl -- delete-bucket-object -bucket movie-posters -prefix posters/tmp/ -force
 go run .\cmd\supercdnctl -- delete-bucket-object -bucket movie-posters -all -force
 go run .\cmd\supercdnctl -- delete-bucket -bucket movie-posters -force
+go run .\cmd\supercdnctl -- gc -dry-run -older-than 1h
+go run .\cmd\supercdnctl -- gc -dry-run=false -older-than 1h
 ```
 
 `delete-bucket-object` supports the same object selectors as cache purge/warmup: `-path`, comma-separated `-paths`, `-prefix`, or `-all`. Prefix and all-object deletion require `-force`. By default deletions remove tracked remote replicas before removing local metadata; `-delete-remote=false` only drops the local index and should be reserved for recovery work.
+
+`gc` is the conservative manual cleanup entry. The first pass only removes stale local files under `data/staging`; CLI dry-run is on by default, so pass `-dry-run=false` for real deletion. Remote object cleanup remains explicit future work and is not performed by this command yet.
 
 Public bucket assets are served at:
 

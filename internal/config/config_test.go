@@ -275,6 +275,15 @@ func TestCloudflareAccountRejectsPartialR2Credentials(t *testing.T) {
 	}
 }
 
+func TestDirectStorageConstraintsValidate(t *testing.T) {
+	cfg := minimalConfig(t)
+	negative := int64(-1)
+	cfg.Storage[0].Constraints.MaxFileSizeBytes = &negative
+	if err := cfg.ApplyDefaults(t.TempDir()); err == nil {
+		t.Fatal("expected direct storage negative constraint to fail")
+	}
+}
+
 func minimalConfig(t *testing.T) Config {
 	t.Helper()
 	return Config{

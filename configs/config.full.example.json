@@ -26,6 +26,16 @@
     {
       "name": "ipfs_pinata",
       "type": "pinata",
+      "policy": {
+        "notes": "Conservative Super CDN guardrails for Pinata/IPFS. Pinata's current upload ceiling is plan/provider dependent; keep the default at the commonly recommended 15 GB reliability threshold unless the operator validates larger uploads."
+      },
+      "constraints": {
+        "max_batch_files": 200,
+        "max_file_size_bytes": 15000000000,
+        "daily_upload_limit_bytes": 107374182400,
+        "supports_online_extract": false,
+        "notes": "15 GB per file, 100 GiB per day default guardrail for immutable archive assets."
+      },
       "pinata": {
         "api_base_url": "https://api.pinata.cloud",
         "upload_base_url": "https://uploads.pinata.cloud",
@@ -291,13 +301,24 @@
     {
       "name": "overseas_accel",
       "policy": {
-        "notes": "Logical Cloudflare acceleration library. Bind multiple Cloudflare accounts here as independent edge/control-plane mount points."
+        "total_capacity_bytes": 10000000000,
+        "available_bytes": 9000000000,
+        "reserve_bytes": 1000000000,
+        "notes": "Logical Cloudflare acceleration library. Defaults assume a small 10 GB R2 budget; raise only after confirming the account quota and billing plan."
       },
       "bindings": [
         {
           "name": "business_main",
           "account": "cf_business_main",
-          "path": "/assets/overseas"
+          "path": "/assets/overseas",
+          "constraints": {
+            "max_capacity_bytes": 10000000000,
+            "max_batch_files": 100,
+            "max_file_size_bytes": 2000000000,
+            "daily_upload_limit_bytes": 2000000000,
+            "supports_online_extract": false,
+            "notes": "10 GB R2 budget guardrail: 2 GB per file/day by default, with 1 GB reserved at the library level."
+          }
         }
       ]
     }

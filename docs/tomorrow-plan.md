@@ -18,9 +18,10 @@ GitHub operation note: for GitHub network operations such as `git push`, `git fe
 
 Baseline:
 
-- Latest GitHub release: `v0.3.1`.
+- Latest GitHub release: `v0.4.0`.
 - Stable CDN/Web surface is closed enough for real user integration.
 - Do not start a large new product module before the onboarding and diagnostics gaps below are handled.
+- `v0.4.0` freezes the current onboarding, diagnostics, cleanup and guardrail surface before the next larger refactor.
 
 Primary goal:
 
@@ -45,14 +46,15 @@ Current state:
 - Uses default `-concurrency 10`.
 - Outputs a JSON per-file report.
 - Reuses the single-file bucket API.
+- Current branch adds `-dry-run`, `-report-file`, `-retry` and `-skip-existing` for the first real-user hardening pass.
 
-Next improvements:
+Implemented hardening:
 
-- Add `-dry-run` to print the upload plan without sending files.
-- Add `-report-file <path>` to persist the JSON report for support/debugging.
-- Add `-retry <n>` for per-file retry on transient upload or warmup failures.
-- Add `-skip-existing` if the bucket already has the target logical path.
-- Consider `-fail-fast` only as an optional operator mode; default should continue the whole batch and report all failures.
+- `-dry-run` prints the upload plan without sending files.
+- `-report-file <path>` persists the JSON report for support/debugging.
+- `-retry <n>` retries transient per-file upload or warmup failures.
+- `-skip-existing` skips files when the bucket already has the target logical path.
+- `-fail-fast` remains intentionally deferred; default behavior continues the whole batch and reports all failures.
 
 Acceptance criteria:
 
@@ -65,6 +67,13 @@ Acceptance criteria:
 ### 2. Garbage Data Cleanup
 
 This is a required stability feature. Interrupted uploads, failed deployments, partial remote writes and abandoned staging files can create garbage data over time. The system needs both automatic cleanup and explicit operator cleanup.
+
+Current branch first pass:
+
+- Added root-only `gc` / `POST /api/v1/gc`.
+- CLI defaults to dry-run and requires `-dry-run=false` for deletion.
+- Cleans only stale local `data/staging` files older than `-older-than` / `older_than_seconds`.
+- Remote cleanup, bucket-scoped cleanup and site-scoped cleanup are represented in the request/response model but intentionally return warnings until reference-counted cleanup lands.
 
 Scope to cover:
 
@@ -122,6 +131,16 @@ Candidate commands:
 - `cdn-doctor -bucket <slug> [-path <path>]`: bucket-specific diagnostics.
 - `site-doctor -site <id>` or extend `probe-site`/`route-explain` for Web hosting diagnostics.
 
+Current branch first pass:
+
+- Added `doctor` / `GET /api/v1/doctor`.
+- Reports auth summary, DB reachability, storage target count, route profile target checks, staging directory readiness, optional resource-library status and optional routing-policy status.
+- Keeps tokens/secrets out of the report; resource-library details keep the existing root-only boundary and non-root tokens receive a warning when that section is skipped.
+- Added `cdn-doctor` / `GET /api/v1/asset-buckets/{slug}/doctor`.
+- `cdn-doctor -bucket <slug> -path <logical>` reports bucket/profile checks, public URL, redacted storage URL, replicas, IPFS metadata, routing candidates and selected line.
+- Added `site-doctor` / `GET /api/v1/sites/{id}/doctor`.
+- `site-doctor -site <id> -path <request_path>` reports active deployment, hosting target, route explanation, redacted candidates and expected edge headers.
+
 Minimum useful checks:
 
 - Server reachable and authenticated user/token is valid.
@@ -154,6 +173,12 @@ CLI output improvements:
 - After upload, clearly highlight copyable `public_url` and `cdn_url`/`storage_url`.
 - After batch upload, summarize total/succeeded/failed and point to `-report-file`.
 - On common failures, suggest the next diagnostic command.
+
+Current branch first pass:
+
+- Added [docs/onboarding.md](onboarding.md) as the shortest real-user flow for login, CDN bucket creation, one-file upload, batch upload, static Web publish, diagnostics and conservative cleanup.
+- `upload-bucket` output now keeps existing server fields and adds `summary`, `copy_urls` and `next_commands`; upload failures append the matching `cdn-doctor` command.
+- `upload-bucket-dir` reports now include `summary`, `report_saved_to` and `next_commands`, including retry and `cdn-doctor` hints for partial failures.
 
 Acceptance criteria:
 

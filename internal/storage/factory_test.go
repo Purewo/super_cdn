@@ -92,3 +92,39 @@ func TestBuildManagerSkipsControlPlaneOnlyCloudflareLibrary(t *testing.T) {
 		t.Fatal("control-plane-only cloudflare library should not build a storage store")
 	}
 }
+
+func TestBuildManagerAppliesDirectStorageLimits(t *testing.T) {
+	maxFile := int64(5)
+	cfg := &config.Config{
+		Server: config.ServerConfig{AdminToken: "token"},
+		Storage: []config.StorageConfig{{
+			Name: "local_default",
+			Type: "local",
+			Constraints: config.ResourceLibraryBindingConstraints{
+				MaxFileSizeBytes: &maxFile,
+			},
+		}},
+		RouteProfiles: []config.RouteProfile{{
+			Name:    "overseas",
+			Primary: "local_default",
+		}},
+	}
+	if err := cfg.ApplyDefaults(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := BuildManager(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, ok := manager.Get("local_default")
+	if !ok {
+		t.Fatal("missing local_default store")
+	}
+	preflight, ok := store.(PreflightStore)
+	if !ok {
+		t.Fatalf("expected limited direct store to implement PreflightStore, got %T", store)
+	}
+	if _, err := preflight.PreflightPut(context.Background(), PreflightOptions{TotalSize: 6, LargestFileSize: 6, BatchFileCount: 1}); err == nil {
+		t.Fatal("expected direct storage max_file_size_bytes rejection")
+	}
+}

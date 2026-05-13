@@ -2,6 +2,8 @@
 
 本文档按“命令 -> HTTP API -> 参数 -> 返回”的方式记录 `supercdnctl`，用于快速检索和交接。
 
+For the shortest real-user path from login to bucket upload, batch upload, Web publish and diagnostics, see [docs/onboarding.md](onboarding.md).
+
 ## 全局约定
 
 所有 `supercdnctl` 命令都调用 Super CDN HTTP API。控制面 API 需要 Bearer Token；个人/团队使用建议先通过邀请登录，把用户 token 保存到本机 CLI profile：
@@ -40,6 +42,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `login` | `POST /api/v1/auth/accept-invite` | 接受邀请并保存本机 CLI profile |
 | `logout` | 本地 profile 写入 | 删除本机 CLI profile |
 | `whoami` | `GET /api/v1/auth/me` | 查看当前 token 身份、workspace 和角色 |
+| `doctor` | `GET /api/v1/doctor` | First-pass support report for auth, database, storage, route profiles, resource status and routing policy status |
 | `invite-user` | `POST /api/v1/auth/invites` | 创建一次性用户邀请 |
 | `list-users` | `GET /api/v1/users` | 列出当前 workspace 用户 |
 | `revoke-token` | `DELETE /api/v1/tokens/{id}` | 撤销用户 API token |
@@ -69,11 +72,14 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `publish-cloudflare-static` | 本地 Wrangler 调用 | 发布本地目录到 Cloudflare Workers Static Assets |
 | `promote-deployment` | `POST /api/v1/sites/{id}/deployments/{deployment}/promote` | 将部署提升为当前生产版本 |
 | `delete-deployment` | `DELETE /api/v1/sites/{id}/deployments/{deployment}` | 删除未激活且未 pinned 的部署 |
+| `gc` | `POST /api/v1/gc` | 手动垃圾清理入口，首版清理本地 staging 临时文件 |
 | `gc-site` | `POST /api/v1/sites/{id}/gc` | 站点内容清理入口 |
 | `init-libraries` | `POST /api/v1/init/resource-libraries` | 初始化资源库目录结构 |
 | `init-job` | `GET /api/v1/init/jobs/{id}` | 查询初始化任务 |
 | `resource-status` | `GET /api/v1/resource-libraries/status` | 查询资源库状态和本地健康缓存 |
 | `routing-policy-status` | `GET /api/v1/routing-policies/status` | 查询智能路由策略和源状态 |
+| `cdn-doctor` | `GET /api/v1/asset-buckets/{slug}/doctor` | Diagnose one CDN bucket and optionally one logical object path |
+| `site-doctor` | `GET /api/v1/sites/{id}/doctor` | Diagnose one site, active deployment and optionally one routed path |
 | `health-check` | `POST /api/v1/resource-libraries/health-check` | 执行资源库健康检查 |
 | `e2e-probe` | `POST /api/v1/resource-libraries/e2e-probe` | 执行真实上传/读取/清理探针 |
 | `create-bucket` | `POST /api/v1/asset-buckets` | 创建静态资源桶 |
@@ -137,6 +143,23 @@ root 创建邀请：
 ```
 
 `login` 只在接受邀请时收到一次 API token，并写入本机 profile；之后普通命令不需要传 `-token`。`invite-user` 返回的一次性 `invite_token` 需要发给对应成员；用户 API token 不会通过 `list-users` 展示。
+
+### doctor
+
+生成一份可直接发给支持人员的首版诊断报告，不打印 token、密钥或完整签名 URL。
+
+```powershell
+.\bin\supercdnctl.exe doctor
+.\bin\supercdnctl.exe doctor -resources=false
+```
+
+HTTP:
+
+```http
+GET /api/v1/doctor?resources=true&routing=true
+```
+
+返回内容包括当前 token 身份摘要、数据库连通性、storage/route profile 配置检查、本地 staging 状态、资源库能力/健康缓存和路由策略状态。资源库详情沿用现有 root-only 边界；非 root token 可以运行 `doctor`，但会看到资源库诊断被跳过的 warning。
 
 ## 普通静态资源
 
@@ -600,6 +623,24 @@ HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish`
 | `-hybrid-checks` | 否 | `true` | 要求 Cloudflare Static HTML 和 manifest-routed assets |
 | `-redact-probe-urls` | 否 | `true` | 遮蔽探测报告里的签名 URL query 值 |
 
+#### site-doctor
+
+生成一个站点级支持报告。默认检查站点、active production deployment、托管目标和可用 URL；带 `-path` 时复用 route-explain，附带匹配文件、路由类型、候选资源线、当前选择和预期边缘响应头。报告中的 storage/candidate URL query values 会被 redacted。
+
+```powershell
+.\bin\supercdnctl.exe site-doctor -site cyberstream
+.\bin\supercdnctl.exe site-doctor -site cyberstream -path /assets/app.js
+.\bin\supercdnctl.exe site-doctor -site cyberstream -path /assets/app.js -country CN
+```
+
+HTTP:
+
+```http
+GET /api/v1/sites/{id}/doctor?path=/assets/app.js&country=CN
+```
+
+站点存在但没有 active deployment、路径不匹配或候选资源不可用时，命令仍返回诊断 JSON，并在 `checks[]` 中标记 error/warning，便于用户直接贴回支持。
+
 #### publish-cloudflare-static
 
 底层 Cloudflare Static canary/诊断入口，只调用本地 Wrangler 发布目录，不写 Super CDN deployment 记录。
@@ -638,6 +679,40 @@ HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/promote`
 HTTP: `DELETE /api/v1/sites/{id}/deployments/{deployment}?delete_objects=false&delete_remote=true`
 
 参数：`-site`、`-deployment` 均必填；`-delete-objects` 默认 `false`，`-delete-remote` 默认 `true`。
+
+#### gc
+
+手动垃圾清理入口。首版只清理服务端 `data/staging` 下超过阈值的临时文件，例如中断上传、站点打包、manifest 写入或副本修复留下的本地临时文件。CLI 默认 dry-run；真实删除必须显式传 `-dry-run=false`。
+
+```powershell
+.\bin\supercdnctl.exe gc -dry-run -older-than 1h
+.\bin\supercdnctl.exe gc -dry-run=false -older-than 1h
+```
+
+HTTP:
+
+```http
+POST /api/v1/gc
+Content-Type: application/json
+
+{
+  "dry_run": true,
+  "older_than_seconds": 3600
+}
+```
+
+参数：
+
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-dry-run` | 否 | `true` | 只返回计划；传 `-dry-run=false` 才删除 |
+| `-older-than` | 否 | `1h` | 只处理早于该时长的 staging 文件 |
+| `-force` | 否 | `false` | `-older-than` 小于 5 分钟时必须传 |
+| `-bucket` | 否 | 空 | 预留的桶作用域；当前仍只做全局 staging 清理并返回 warning |
+| `-site` | 否 | 空 | 预留的站点作用域；当前仍只做全局 staging 清理并返回 warning |
+| `-delete-remote` | 否 | `false` | 预留远端清理许可；当前不会删除远端对象并返回 warning |
+
+响应中 `items[].status` 可能为 `planned`、`deleted`、`kept_recent`、`kept_non_regular`、`not_found` 或 `error`。当前实现不会删除 active deployment、pinned deployment、bucket object、远端副本、Cloudflare Worker version、custom domain 或 KV manifest。
 
 #### gc-site
 
@@ -856,6 +931,24 @@ POST /api/v1/resource-libraries/e2e-probe
 assets/buckets/{bucket_slug}/{type_dir}/{yyyy}/{mm}/{sha_prefix}/{sha256}{ext}
 ```
 
+### cdn-doctor
+
+诊断一个 CDN bucket。带 `-path` 时会同时解释该逻辑路径的 public URL、可用 storage URL、副本状态、IPFS 元数据、路由候选和当前选择。storage/candidate URL 的 query values 会被 redacted，避免把签名 URL 直接贴到支持记录里。
+
+```powershell
+.\bin\supercdnctl.exe cdn-doctor -bucket downloads
+.\bin\supercdnctl.exe cdn-doctor -bucket downloads -path release/app.zip
+.\bin\supercdnctl.exe cdn-doctor -bucket downloads -path release/app.zip -country CN
+```
+
+HTTP:
+
+```http
+GET /api/v1/asset-buckets/{slug}/doctor?path=release/app.zip&country=CN
+```
+
+不传 `-path` 时只检查 bucket、route profile 和 routing policy 配置；路径不存在会在 JSON 中返回 `object` check error，方便用户直接贴出诊断报告。
+
 ### create-bucket
 
 创建桶。
@@ -1012,13 +1105,20 @@ CLI 额外参数：
 | `bucket_object.physical_key` | 物理存储 key |
 | `bucket_object.sha256` | 内容 SHA256 |
 | `object.id` | 底层对象 ID |
+| `summary` | CLI 生成的人类可读上传摘要 |
 | `url` | 相对公开路径 |
 | `public_url` | 绝对公开链接，依赖 `server.public_base_url` |
 | `cdn_url` | 存储后端可提供 HTTP 直链时返回的 CDN/存储公开链接 |
 | `storage_url` | 同 `cdn_url`，用于明确这是底层存储公开 URL |
 | `urls` | 可直接复制的公开链接数组 |
+| `copy_urls.public_url` | CLI 提取的稳定 Super CDN URL，便于复制给用户或工单 |
+| `copy_urls.cdn_url` | CLI 提取的后端 CDN/存储直链 |
+| `copy_urls.storage_url` | CLI 提取的底层存储直链 |
+| `next_commands[]` | CLI 建议的下一步诊断命令，通常是同 bucket/path 的 `cdn-doctor` |
 
 使用 `-warmup` 时输出为 `{ "upload": {...}, "warmup": {...} }`，其中 `upload.public_url` 是上传后的可访问链接。
+
+如果上传请求失败，CLI 错误文本会追加同一 bucket/path 的 `cdn-doctor` 命令，便于直接收集诊断报告。
 
 国内 AList/OpenList 桶会返回稳定的 Super CDN `/a/...` `public_url`。当底层存储能生成签名直链时也会返回 `cdn_url` / `storage_url`；部分下游网盘对重定向后的 `HEAD` 返回 403，直接链路验证应使用 `GET` 或 Range `GET`。
 
@@ -1029,6 +1129,8 @@ CLI 额外参数：
 ```powershell
 .\bin\supercdnctl.exe upload-bucket-dir -bucket dynamic-wallpapers -dir .\wallpapers -prefix wallpapers
 .\bin\supercdnctl.exe upload-bucket-dir -bucket downloads -dir .\release -prefix release/v1 -concurrency 20 -warmup
+.\bin\supercdnctl.exe upload-bucket-dir -bucket downloads -dir .\release -prefix release/v1 -dry-run -report-file .\upload-plan.json
+.\bin\supercdnctl.exe upload-bucket-dir -bucket downloads -dir .\release -prefix release/v1 -skip-existing -retry 2 -report-file .\upload-report.json
 ```
 
 参数：
@@ -1039,13 +1141,17 @@ CLI 额外参数：
 | `-dir` | 是 | 空 | 本地目录 |
 | `-prefix` | 否 | 空 | 桶内逻辑路径前缀 |
 | `-concurrency` | 否 | `10` | 最大并行上传数量，必须大于 0 |
+| `-dry-run` | 否 | `false` | 只输出上传计划，不发送文件 |
+| `-report-file` | 否 | 空 | 把批量 JSON 报告写入指定文件；成功、部分失败和 dry run 都会写 |
+| `-retry` | 否 | `0` | 单个文件失败后的重试次数；报告中 `results[].attempts` 会记录实际尝试次数 |
+| `-skip-existing` | 否 | `false` | 上传前查询桶对象，已存在同一逻辑路径时标记为 `skipped` 并跳过上传 |
 | `-asset-type` | 否 | 空 | 对所有文件使用同一个资产类型 |
 | `-cache-control` | 否 | 空 | 对所有文件使用同一个缓存策略 |
 | `-warmup` | 否 | `false` | 每个文件上传成功后立即预热 |
 | `-warmup-method` | 否 | `HEAD` | `HEAD` 或 `GET` |
 | `-warmup-base-url` | 否 | `server.public_base_url` | 覆盖预热 URL 的公开域名 |
 
-输出是批量 JSON 报告：`total`、`succeeded`、`failed` 和 `results[]`。命令会完成整个批次后再返回；如果有失败文件，会打印报告并以非零错误退出。
+输出是批量 JSON 报告：`summary`、`total`、`planned`、`succeeded`、`skipped`、`failed`、`report_saved_to`、`next_commands[]` 和 `results[]`。`-dry-run` 时每个结果为 `planned`，包含最终逻辑路径和文件大小。命令会完成整个批次后再返回；如果有失败文件，会打印报告、写入 `-report-file`，然后以非零错误退出。失败报告里的 `next_commands[]` 会给出重试命令和第一个失败路径的 `cdn-doctor` 命令。
 
 ### list-bucket
 

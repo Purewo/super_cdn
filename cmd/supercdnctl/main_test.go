@@ -72,6 +72,96 @@ func TestCLIProfileConfigRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDoctorCallsAPI(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/doctor" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", auth)
+		}
+		if got := r.URL.Query().Get("resources"); got != "false" {
+			t.Fatalf("resources = %q", got)
+		}
+		if got := r.URL.Query().Get("routing"); got != "false" {
+			t.Fatalf("routing = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","checks":[{"name":"auth","status":"ok"}]}`))
+	}))
+	defer srv.Close()
+
+	err := doctor(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-resources=false", "-routing=false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("doctor API was not called")
+	}
+}
+
+func TestCDNDoctorCallsAPI(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/asset-buckets/downloads/doctor" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", auth)
+		}
+		if got := r.URL.Query().Get("path"); got != "release/app.zip" {
+			t.Fatalf("path = %q", got)
+		}
+		if got := r.URL.Query().Get("country"); got != "CN" {
+			t.Fatalf("country = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","checks":[{"name":"bucket_status","status":"ok"}]}`))
+	}))
+	defer srv.Close()
+
+	err := cdnDoctor(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-bucket", "downloads", "-path", "release/app.zip", "-country", "CN"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("cdn-doctor API was not called")
+	}
+}
+
+func TestSiteDoctorCallsAPI(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/cyberstream/doctor" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", auth)
+		}
+		if got := r.URL.Query().Get("path"); got != "/assets/app.js" {
+			t.Fatalf("path = %q", got)
+		}
+		if got := r.URL.Query().Get("deployment"); got != "dpl-abc" {
+			t.Fatalf("deployment = %q", got)
+		}
+		if got := r.URL.Query().Get("country"); got != "CN" {
+			t.Fatalf("country = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","checks":[{"name":"site_status","status":"ok"}]}`))
+	}))
+	defer srv.Close()
+
+	err := siteDoctor(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "cyberstream", "-path", "/assets/app.js", "-deployment", "dpl-abc", "-country", "CN"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("site-doctor API was not called")
+	}
+}
+
 func TestPrepareCloudflareStaticAssetsDirRespectsExistingHeaders(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "index.html"), "ok")
@@ -1237,23 +1327,64 @@ func TestUploadBucketWarmupCallsWarmupEndpoint(t *testing.T) {
 
 	file := filepath.Join(t.TempDir(), "one.png")
 	writeTestFile(t, file, "png")
-	err := uploadBucket(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
-		"-bucket", "posters",
-		"-file", file,
-		"-path", "images/one.png",
-		"-asset-type", "image",
-		"-warmup",
-		"-warmup-method", "GET",
-		"-warmup-base-url", "https://cdn.example.com",
+	var uploadErr error
+	out := captureStdout(t, func() {
+		uploadErr = uploadBucket(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+			"-bucket", "posters",
+			"-file", file,
+			"-path", "images/one.png",
+			"-asset-type", "image",
+			"-warmup",
+			"-warmup-method", "GET",
+			"-warmup-base-url", "https://cdn.example.com",
+		})
 	})
-	if err != nil {
-		t.Fatal(err)
+	if uploadErr != nil {
+		t.Fatal(uploadErr)
 	}
 	if !uploadSeen || !warmupSeen {
 		t.Fatalf("uploadSeen=%v warmupSeen=%v", uploadSeen, warmupSeen)
 	}
 	if warmupReq["path"] != "images/one.png" || warmupReq["method"] != "GET" || warmupReq["base_url"] != "https://cdn.example.com" {
 		t.Fatalf("warmup request = %#v", warmupReq)
+	}
+	var report struct {
+		Summary      string            `json:"summary"`
+		CopyURLs     map[string]string `json:"copy_urls"`
+		NextCommands []string          `json:"next_commands"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary != "uploaded and warmed posters/images/one.png" {
+		t.Fatalf("summary = %q", report.Summary)
+	}
+	if report.CopyURLs["public_url"] != "https://cdn.example.com/a/posters/images/one.png" {
+		t.Fatalf("copy_urls = %#v", report.CopyURLs)
+	}
+	if len(report.NextCommands) != 1 || !strings.Contains(report.NextCommands[0], "cdn-doctor -bucket posters -path images/one.png") {
+		t.Fatalf("next_commands = %#v", report.NextCommands)
+	}
+}
+
+func TestUploadBucketFailureSuggestsCDNDoctor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bucket is not ready", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	file := filepath.Join(t.TempDir(), "one.png")
+	writeTestFile(t, file, "png")
+	err := uploadBucket(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+		"-bucket", "posters",
+		"-file", file,
+		"-path", "images/one.png",
+	})
+	if err == nil {
+		t.Fatal("expected upload error")
+	}
+	if !strings.Contains(err.Error(), "next diagnostic: supercdnctl cdn-doctor -bucket posters -path images/one.png") {
+		t.Fatalf("error missing diagnostic command: %v", err)
 	}
 }
 
@@ -1336,6 +1467,12 @@ func TestUploadBucketDirUploadsFilesWithConcurrencyLimit(t *testing.T) {
 	if report.Total != 3 || report.Succeeded != 3 || report.Failed != 0 || report.Concurrency != 2 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
+	if report.Summary != "3 total, 3 succeeded, 0 skipped, 0 failed" {
+		t.Fatalf("summary = %q", report.Summary)
+	}
+	if len(report.NextCommands) != 1 || !strings.Contains(report.NextCommands[0], "cdn-doctor -bucket posters -path uploads/") {
+		t.Fatalf("next_commands = %#v", report.NextCommands)
+	}
 	for _, want := range []string{"uploads/nested/three.txt", "uploads/nested/two.txt", "uploads/one.txt"} {
 		if seen[want] == "" {
 			t.Fatalf("missing upload path %q in %#v", want, seen)
@@ -1350,6 +1487,7 @@ func TestUploadBucketDirReportsFailuresAfterCompletingBatch(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "ok.txt"), "ok")
 	writeTestFile(t, filepath.Join(dir, "bad.txt"), "bad")
+	reportFile := filepath.Join(t.TempDir(), "failed-report.json")
 	var (
 		mu    sync.Mutex
 		calls int
@@ -1375,6 +1513,7 @@ func TestUploadBucketDirReportsFailuresAfterCompletingBatch(t *testing.T) {
 			"-bucket", "posters",
 			"-dir", dir,
 			"-concurrency", "2",
+			"-report-file", reportFile,
 		})
 	})
 	if uploadErr == nil || !strings.Contains(uploadErr.Error(), "1 of 2 files failed") {
@@ -1392,6 +1531,188 @@ func TestUploadBucketDirReportsFailuresAfterCompletingBatch(t *testing.T) {
 	}
 	if report.Succeeded != 1 || report.Failed != 1 {
 		t.Fatalf("unexpected report: %+v", report)
+	}
+	if report.Summary != "2 total, 1 succeeded, 0 skipped, 1 failed" || report.ReportSavedTo != reportFile {
+		t.Fatalf("unexpected report summary/path: %+v", report)
+	}
+	if len(report.NextCommands) != 2 || !strings.Contains(strings.Join(report.NextCommands, "\n"), "upload-bucket-dir -bucket posters") {
+		t.Fatalf("next_commands = %#v", report.NextCommands)
+	}
+	raw, err := os.ReadFile(reportFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written bucketDirUploadReport
+	if err := json.Unmarshal(raw, &written); err != nil {
+		t.Fatal(err)
+	}
+	if written.Succeeded != 1 || written.Failed != 1 {
+		t.Fatalf("unexpected written failure report: %+v", written)
+	}
+}
+
+func TestUploadBucketDirDryRunWritesPlanReport(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "one.txt"), "one")
+	writeTestFile(t, filepath.Join(dir, "nested", "two.txt"), "two")
+	reportFile := filepath.Join(t.TempDir(), "reports", "upload.json")
+
+	var uploadErr error
+	out := captureStdout(t, func() {
+		uploadErr = uploadBucketDir(client{baseURL: "http://127.0.0.1:1", token: "test-token", http: http.DefaultClient}, []string{
+			"-bucket", "posters",
+			"-dir", dir,
+			"-prefix", "uploads",
+			"-dry-run",
+			"-report-file", reportFile,
+		})
+	})
+	if uploadErr != nil {
+		t.Fatal(uploadErr)
+	}
+	var report bucketDirUploadReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.DryRun || report.Total != 2 || report.Planned != 2 || report.Succeeded != 0 || report.Failed != 0 {
+		t.Fatalf("unexpected dry-run report: %+v", report)
+	}
+	if report.Summary != "2 total, 2 planned, 0 failed" || report.ReportSavedTo != reportFile {
+		t.Fatalf("unexpected dry-run summary/path: %+v", report)
+	}
+	if len(report.NextCommands) != 1 || !strings.Contains(report.NextCommands[0], "upload-bucket-dir -bucket posters") {
+		t.Fatalf("next_commands = %#v", report.NextCommands)
+	}
+	for _, result := range report.Results {
+		if result.Status != "planned" || !strings.HasPrefix(result.LogicalPath, "uploads/") || result.Size == 0 {
+			t.Fatalf("unexpected planned result: %+v", result)
+		}
+	}
+	raw, err := os.ReadFile(reportFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written bucketDirUploadReport
+	if err := json.Unmarshal(raw, &written); err != nil {
+		t.Fatal(err)
+	}
+	if written.Total != report.Total || written.Planned != report.Planned || !written.DryRun {
+		t.Fatalf("unexpected written report: %+v", written)
+	}
+}
+
+func TestUploadBucketDirRetriesFailedFile(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "flaky.txt"), "flaky")
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		if r.FormValue("path") != "flaky.txt" {
+			t.Fatalf("path = %q", r.FormValue("path"))
+		}
+		mu.Lock()
+		calls++
+		current := calls
+		mu.Unlock()
+		if current == 1 {
+			http.Error(w, "temporary failure", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"bucket":"posters"}`))
+	}))
+	defer srv.Close()
+
+	var uploadErr error
+	out := captureStdout(t, func() {
+		uploadErr = uploadBucketDir(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+			"-bucket", "posters",
+			"-dir", dir,
+			"-retry", "1",
+		})
+	})
+	if uploadErr != nil {
+		t.Fatal(uploadErr)
+	}
+	mu.Lock()
+	if calls != 2 {
+		mu.Unlock()
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+	mu.Unlock()
+	var report bucketDirUploadReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Retry != 1 || report.Succeeded != 1 || report.Failed != 0 || len(report.Results) != 1 || report.Results[0].Attempts != 2 {
+		t.Fatalf("unexpected retry report: %+v", report)
+	}
+}
+
+func TestUploadBucketDirSkipExistingOnlyUploadsMissingFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "exists.txt"), "exists")
+	writeTestFile(t, filepath.Join(dir, "new.txt"), "new")
+	var (
+		mu          sync.Mutex
+		uploaded    []string
+		listQueries []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/asset-buckets/posters/objects":
+			prefix := r.URL.Query().Get("prefix")
+			mu.Lock()
+			listQueries = append(listQueries, prefix)
+			mu.Unlock()
+			if prefix == "exists.txt" {
+				_, _ = w.Write([]byte(`{"objects":[{"logical_path":"exists.txt"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"objects":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/asset-buckets/posters/objects":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			uploaded = append(uploaded, r.FormValue("path"))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"bucket":"posters"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+
+	var uploadErr error
+	out := captureStdout(t, func() {
+		uploadErr = uploadBucketDir(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{
+			"-bucket", "posters",
+			"-dir", dir,
+			"-skip-existing",
+		})
+	})
+	if uploadErr != nil {
+		t.Fatal(uploadErr)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(listQueries) != 2 {
+		t.Fatalf("list queries = %#v, want two exact probes", listQueries)
+	}
+	if len(uploaded) != 1 || uploaded[0] != "new.txt" {
+		t.Fatalf("uploaded = %#v", uploaded)
+	}
+	var report bucketDirUploadReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.SkipExisting || report.Succeeded != 1 || report.Skipped != 1 || report.Failed != 0 {
+		t.Fatalf("unexpected skip-existing report: %+v", report)
 	}
 }
 

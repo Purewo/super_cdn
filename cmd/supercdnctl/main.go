@@ -82,6 +82,8 @@ func main() {
 		err = logout(*profile, args[1:])
 	case "whoami":
 		err = whoami(c, args[1:])
+	case "doctor":
+		err = doctor(c, args[1:])
 	case "invite-user":
 		err = inviteUser(c, args[1:])
 	case "list-users":
@@ -152,6 +154,8 @@ func main() {
 		err = promoteDeployment(c, args[1:])
 	case "delete-deployment":
 		err = deleteDeployment(c, args[1:])
+	case "gc":
+		err = gc(c, args[1:])
 	case "gc-site":
 		err = gcSite(c, args[1:])
 	case "init-libraries":
@@ -164,6 +168,10 @@ func main() {
 		err = routingPolicyStatus(c, args[1:])
 	case "route-explain":
 		err = routeExplain(c, args[1:])
+	case "cdn-doctor":
+		err = cdnDoctor(c, args[1:])
+	case "site-doctor":
+		err = siteDoctor(c, args[1:])
 	case "health-check":
 		err = healthCheck(c, args[1:])
 	case "e2e-probe":
@@ -347,6 +355,17 @@ func whoami(c client, args []string) error {
 	fs := flag.NewFlagSet("whoami", flag.ExitOnError)
 	_ = fs.Parse(args)
 	return c.do(http.MethodGet, "/api/v1/auth/me", nil, "")
+}
+
+func doctor(c client, args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	resources := fs.Bool("resources", true, "include resource library status; root token required for details")
+	routing := fs.Bool("routing", true, "include routing policy status")
+	_ = fs.Parse(args)
+	q := url.Values{}
+	q.Set("resources", strconv.FormatBool(*resources))
+	q.Set("routing", strconv.FormatBool(*routing))
+	return c.do(http.MethodGet, "/api/v1/doctor?"+q.Encode(), nil, "")
 }
 
 func inviteUser(c client, args []string) error {
@@ -3663,6 +3682,31 @@ func deleteDeployment(c client, args []string) error {
 	return c.do(http.MethodDelete, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment)+"?"+q.Encode(), nil, "")
 }
 
+func gc(c client, args []string) error {
+	fs := flag.NewFlagSet("gc", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", true, "plan cleanup without deleting; pass -dry-run=false to delete")
+	bucket := fs.String("bucket", "", "bucket slug scope for future remote cleanup")
+	site := fs.String("site", "", "site id scope for future remote cleanup")
+	olderThan := fs.Duration("older-than", time.Hour, "only clean local staging files older than this duration")
+	deleteRemote := fs.Bool("delete-remote", false, "allow future remote cleanup; current implementation only cleans local staging")
+	force := fs.Bool("force", false, "required for very small -older-than values")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*bucket) != "" && strings.TrimSpace(*site) != "" {
+		return errors.New("choose only one of -bucket or -site")
+	}
+	if *olderThan <= 0 {
+		return errors.New("-older-than must be greater than 0")
+	}
+	return c.doJSON(http.MethodPost, "/api/v1/gc", map[string]any{
+		"dry_run":            *dryRun,
+		"bucket":             strings.TrimSpace(*bucket),
+		"site":               strings.TrimSpace(*site),
+		"older_than_seconds": int64(olderThan.Seconds()),
+		"delete_remote":      *deleteRemote,
+		"force":              *force,
+	})
+}
+
 func gcSite(c client, args []string) error {
 	fs := flag.NewFlagSet("gc-site", flag.ExitOnError)
 	site := fs.String("site", "", "site id")
@@ -3742,6 +3786,64 @@ func routeExplain(c client, args []string) error {
 		q.Set("client_ip", strings.TrimSpace(*clientIP))
 	}
 	return c.do(http.MethodGet, "/api/v1/sites/"+url.PathEscape(strings.TrimSpace(*site))+"/route-explain?"+q.Encode(), nil, "")
+}
+
+func cdnDoctor(c client, args []string) error {
+	fs := flag.NewFlagSet("cdn-doctor", flag.ExitOnError)
+	bucket := fs.String("bucket", "", "asset bucket slug")
+	objectPath := fs.String("path", "", "optional bucket logical path")
+	country := fs.String("country", "", "simulated Cloudflare country code for routing selection, for example CN")
+	clientIP := fs.String("client-ip", "", "simulated client IP for deterministic load-balance hashing")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*bucket) == "" {
+		return errors.New("-bucket is required")
+	}
+	q := url.Values{}
+	if strings.TrimSpace(*objectPath) != "" {
+		q.Set("path", strings.TrimSpace(*objectPath))
+	}
+	if strings.TrimSpace(*country) != "" {
+		q.Set("country", strings.TrimSpace(*country))
+	}
+	if strings.TrimSpace(*clientIP) != "" {
+		q.Set("client_ip", strings.TrimSpace(*clientIP))
+	}
+	apiPath := "/api/v1/asset-buckets/" + url.PathEscape(strings.TrimSpace(*bucket)) + "/doctor"
+	if encoded := q.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	return c.do(http.MethodGet, apiPath, nil, "")
+}
+
+func siteDoctor(c client, args []string) error {
+	fs := flag.NewFlagSet("site-doctor", flag.ExitOnError)
+	site := fs.String("site", "", "site id")
+	routePath := fs.String("path", "", "optional site request path, for example /assets/app.js")
+	deployment := fs.String("deployment", "", "deployment id; empty uses active production deployment")
+	country := fs.String("country", "", "simulated Cloudflare country code for routing selection, for example CN")
+	clientIP := fs.String("client-ip", "", "simulated client IP for deterministic load-balance hashing")
+	_ = fs.Parse(args)
+	if strings.TrimSpace(*site) == "" {
+		return errors.New("-site is required")
+	}
+	q := url.Values{}
+	if strings.TrimSpace(*routePath) != "" {
+		q.Set("path", strings.TrimSpace(*routePath))
+	}
+	if strings.TrimSpace(*deployment) != "" {
+		q.Set("deployment", strings.TrimSpace(*deployment))
+	}
+	if strings.TrimSpace(*country) != "" {
+		q.Set("country", strings.TrimSpace(*country))
+	}
+	if strings.TrimSpace(*clientIP) != "" {
+		q.Set("client_ip", strings.TrimSpace(*clientIP))
+	}
+	apiPath := "/api/v1/sites/" + url.PathEscape(strings.TrimSpace(*site)) + "/doctor"
+	if encoded := q.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	return c.do(http.MethodGet, apiPath, nil, "")
 }
 
 func healthCheck(c client, args []string) error {
@@ -3897,26 +3999,168 @@ func uploadBucket(c client, args []string) error {
 	}
 	uploadRaw, err := uploadBucketObject(c, *bucket, *file, *dst, *assetType, *cacheControl)
 	if err != nil {
-		return err
+		return bucketUploadDiagnosticError(err, *bucket, *dst)
 	}
 	if !*warmup {
-		return printJSON(uploadRaw)
+		return printBucketUploadOutput(uploadRaw, nil, *bucket, *dst)
 	}
 	warmupRaw, err := warmupBucketObject(c, *bucket, *dst, *warmupMethod, *warmupBaseURL)
 	if err != nil {
-		return fmt.Errorf("upload succeeded but warmup failed: %w", err)
+		return fmt.Errorf("upload succeeded but warmup failed: %w; next diagnostic: %s", err, makeCDNDoctorCommand(*bucket, *dst))
 	}
-	out, err := json.Marshal(struct {
-		Upload json.RawMessage `json:"upload"`
-		Warmup json.RawMessage `json:"warmup"`
-	}{
-		Upload: json.RawMessage(uploadRaw),
-		Warmup: json.RawMessage(warmupRaw),
-	})
+	return printBucketUploadOutput(uploadRaw, warmupRaw, *bucket, *dst)
+}
+
+func printBucketUploadOutput(uploadRaw, warmupRaw []byte, bucket, logicalPath string) error {
+	if len(warmupRaw) == 0 {
+		var root map[string]any
+		if err := json.Unmarshal(uploadRaw, &root); err != nil {
+			return printJSON(uploadRaw)
+		}
+		enrichBucketUploadObject(root, bucket, logicalPath, "uploaded")
+		raw, err := json.Marshal(root)
+		if err != nil {
+			return err
+		}
+		return printJSON(raw)
+	}
+	root := map[string]any{
+		"upload":  json.RawMessage(uploadRaw),
+		"warmup":  json.RawMessage(warmupRaw),
+		"summary": bucketUploadSummary("uploaded and warmed", bucket, logicalPath),
+	}
+	var uploadFields map[string]any
+	if err := json.Unmarshal(uploadRaw, &uploadFields); err == nil {
+		if copyURLs := bucketUploadCopyURLs(uploadFields); len(copyURLs) > 0 {
+			root["copy_urls"] = copyURLs
+		}
+	}
+	if commands := bucketUploadNextCommands(bucket, logicalPath); len(commands) > 0 {
+		root["next_commands"] = commands
+	}
+	raw, err := json.Marshal(root)
 	if err != nil {
 		return err
 	}
-	return printJSON(out)
+	return printJSON(raw)
+}
+
+func enrichBucketUploadObject(root map[string]any, bucket, logicalPath, verb string) {
+	if root == nil {
+		return
+	}
+	root["summary"] = bucketUploadSummary(verb, bucket, logicalPath)
+	if copyURLs := bucketUploadCopyURLs(root); len(copyURLs) > 0 {
+		root["copy_urls"] = copyURLs
+	}
+	root["next_commands"] = appendCommandHints(stringSliceFromAny(root["next_commands"]), bucketUploadNextCommands(bucket, logicalPath)...)
+}
+
+func bucketUploadSummary(verb, bucket, logicalPath string) string {
+	subject := strings.Trim(strings.TrimSpace(bucket)+"/"+strings.Trim(strings.TrimSpace(logicalPath), "/"), "/")
+	if subject == "" {
+		subject = strings.TrimSpace(logicalPath)
+	}
+	if subject == "" {
+		subject = strings.TrimSpace(bucket)
+	}
+	if subject == "" {
+		return verb
+	}
+	return verb + " " + subject
+}
+
+func bucketUploadCopyURLs(root map[string]any) map[string]string {
+	copyURLs := map[string]string{}
+	for _, key := range []string{"public_url", "cdn_url", "storage_url"} {
+		if value := stringFieldFromMap(root, key); value != "" {
+			copyURLs[key] = value
+		}
+	}
+	if len(copyURLs) == 0 {
+		return nil
+	}
+	return copyURLs
+}
+
+func bucketUploadNextCommands(bucket, logicalPath string) []string {
+	if cmd := makeCDNDoctorCommand(bucket, logicalPath); cmd != "" {
+		return []string{cmd}
+	}
+	return nil
+}
+
+func bucketUploadDiagnosticError(err error, bucket, logicalPath string) error {
+	if err == nil {
+		return nil
+	}
+	if cmd := makeCDNDoctorCommand(bucket, logicalPath); cmd != "" {
+		return fmt.Errorf("%w; next diagnostic: %s", err, cmd)
+	}
+	return err
+}
+
+func makeCDNDoctorCommand(bucket, logicalPath string) string {
+	bucket = strings.TrimSpace(bucket)
+	logicalPath = strings.Trim(strings.TrimSpace(logicalPath), "/")
+	if bucket == "" {
+		return ""
+	}
+	cmd := "supercdnctl cdn-doctor -bucket " + cliHintArg(bucket)
+	if logicalPath != "" {
+		cmd += " -path " + cliHintArg(logicalPath)
+	}
+	return cmd
+}
+
+func stringFieldFromMap(root map[string]any, key string) string {
+	if root == nil {
+		return ""
+	}
+	value, _ := root[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func stringSliceFromAny(value any) []string {
+	switch items := value.(type) {
+	case []string:
+		return append([]string(nil), items...)
+	case []any:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, strings.TrimSpace(text))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func appendCommandHints(existing []string, additions ...string) []string {
+	out := make([]string, 0, len(existing)+len(additions))
+	seen := map[string]bool{}
+	for _, value := range append(existing, additions...) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func cliHintArg(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return `""`
+	}
+	if strings.ContainsAny(value, " \t\r\n\"") {
+		return strconv.Quote(value)
+	}
+	return value
 }
 
 type bucketDirUploadPlan struct {
@@ -3930,20 +4174,30 @@ type bucketDirUploadResult struct {
 	LogicalPath string          `json:"path"`
 	Size        int64           `json:"size"`
 	Status      string          `json:"status"`
+	Attempts    int             `json:"attempts,omitempty"`
 	Error       string          `json:"error,omitempty"`
 	Upload      json.RawMessage `json:"upload,omitempty"`
 	Warmup      json.RawMessage `json:"warmup,omitempty"`
 }
 
 type bucketDirUploadReport struct {
-	Bucket      string                  `json:"bucket"`
-	Dir         string                  `json:"dir"`
-	Prefix      string                  `json:"prefix,omitempty"`
-	Concurrency int                     `json:"concurrency"`
-	Total       int                     `json:"total"`
-	Succeeded   int                     `json:"succeeded"`
-	Failed      int                     `json:"failed"`
-	Results     []bucketDirUploadResult `json:"results"`
+	Bucket        string                  `json:"bucket"`
+	Summary       string                  `json:"summary,omitempty"`
+	Dir           string                  `json:"dir"`
+	Prefix        string                  `json:"prefix,omitempty"`
+	DryRun        bool                    `json:"dry_run,omitempty"`
+	ReportFile    string                  `json:"report_file,omitempty"`
+	ReportSavedTo string                  `json:"report_saved_to,omitempty"`
+	Retry         int                     `json:"retry,omitempty"`
+	SkipExisting  bool                    `json:"skip_existing,omitempty"`
+	Concurrency   int                     `json:"concurrency"`
+	Total         int                     `json:"total"`
+	Planned       int                     `json:"planned,omitempty"`
+	Succeeded     int                     `json:"succeeded"`
+	Skipped       int                     `json:"skipped,omitempty"`
+	Failed        int                     `json:"failed"`
+	NextCommands  []string                `json:"next_commands,omitempty"`
+	Results       []bucketDirUploadResult `json:"results"`
 }
 
 type bucketDirUploadJob struct {
@@ -3959,6 +4213,10 @@ func uploadBucketDir(c client, args []string) error {
 	assetType := fs.String("asset-type", "", "optional asset type override for every file")
 	cacheControl := fs.String("cache-control", "", "Cache-Control value override for every file")
 	concurrency := fs.Int("concurrency", 10, "maximum parallel uploads")
+	dryRun := fs.Bool("dry-run", false, "print the upload plan without sending files")
+	reportFile := fs.String("report-file", "", "write the JSON report to this file")
+	retry := fs.Int("retry", 0, "per-file retry count after the initial attempt")
+	skipExisting := fs.Bool("skip-existing", false, "skip files whose logical path already exists in the bucket")
 	warmup := fs.Bool("warmup", false, "warm uploaded public URLs after upload")
 	warmupMethod := fs.String("warmup-method", http.MethodHead, "warmup method: HEAD or GET")
 	warmupBaseURL := fs.String("warmup-base-url", "", "public base URL override for warmup")
@@ -3969,52 +4227,113 @@ func uploadBucketDir(c client, args []string) error {
 	if *concurrency <= 0 {
 		return errors.New("-concurrency must be greater than 0")
 	}
+	if *retry < 0 {
+		return errors.New("-retry must be non-negative")
+	}
 	plans, cleanPrefix, err := planBucketDirUpload(*dir, *prefix)
 	if err != nil {
 		return err
 	}
 	report := bucketDirUploadReport{
-		Bucket:      *bucket,
-		Dir:         *dir,
-		Prefix:      cleanPrefix,
-		Concurrency: *concurrency,
-		Total:       len(plans),
-		Results:     make([]bucketDirUploadResult, len(plans)),
+		Bucket:       *bucket,
+		Dir:          *dir,
+		Prefix:       cleanPrefix,
+		DryRun:       *dryRun,
+		ReportFile:   strings.TrimSpace(*reportFile),
+		Retry:        *retry,
+		SkipExisting: *skipExisting,
+		Concurrency:  *concurrency,
+		Total:        len(plans),
+		Results:      make([]bucketDirUploadResult, len(plans)),
 	}
 	if len(plans) == 0 {
-		raw, err := json.Marshal(report)
+		return finishBucketDirUploadReport(report, report.ReportFile)
+	}
+	if *dryRun {
+		for i, plan := range plans {
+			report.Results[i] = bucketDirUploadResult{
+				File:        plan.File,
+				LogicalPath: plan.LogicalPath,
+				Size:        plan.Size,
+				Status:      "planned",
+			}
+		}
+		summarizeBucketDirUploadReport(&report)
+		return finishBucketDirUploadReport(report, report.ReportFile)
+	}
+	existing := map[string]bool{}
+	if *skipExisting {
+		existing, err = existingBucketDirUploadPaths(c, *bucket, plans)
 		if err != nil {
 			return err
 		}
-		return printJSON(raw)
+	}
+	uploadJobs := make([]bucketDirUploadJob, 0, len(plans))
+	for i, plan := range plans {
+		if existing[plan.LogicalPath] {
+			report.Results[i] = bucketDirUploadResult{
+				File:        plan.File,
+				LogicalPath: plan.LogicalPath,
+				Size:        plan.Size,
+				Status:      "skipped",
+			}
+			continue
+		}
+		uploadJobs = append(uploadJobs, bucketDirUploadJob{Index: i, Plan: plan})
 	}
 	jobs := make(chan bucketDirUploadJob)
 	var wg sync.WaitGroup
 	workers := *concurrency
-	if workers > len(plans) {
-		workers = len(plans)
+	if workers > len(uploadJobs) {
+		workers = len(uploadJobs)
 	}
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				report.Results[job.Index] = uploadBucketDirOne(c, *bucket, job.Plan, *assetType, *cacheControl, *warmup, *warmupMethod, *warmupBaseURL)
+				report.Results[job.Index] = uploadBucketDirOne(c, *bucket, job.Plan, *assetType, *cacheControl, *warmup, *warmupMethod, *warmupBaseURL, *retry)
 			}
 		}()
 	}
-	for i, plan := range plans {
-		jobs <- bucketDirUploadJob{Index: i, Plan: plan}
+	for _, job := range uploadJobs {
+		jobs <- job
 	}
 	close(jobs)
 	wg.Wait()
+	summarizeBucketDirUploadReport(&report)
+	reportErr := finishBucketDirUploadReport(report, report.ReportFile)
+	if report.Failed > 0 {
+		uploadErr := fmt.Errorf("bucket directory upload failed: %d of %d files failed", report.Failed, report.Total)
+		if reportErr != nil {
+			return fmt.Errorf("%w; additionally failed to write report: %v", uploadErr, reportErr)
+		}
+		return uploadErr
+	}
+	return reportErr
+}
+
+func summarizeBucketDirUploadReport(report *bucketDirUploadReport) {
+	report.Planned = 0
+	report.Succeeded = 0
+	report.Skipped = 0
+	report.Failed = 0
 	for _, result := range report.Results {
-		if result.Status == "ok" {
+		switch result.Status {
+		case "ok":
 			report.Succeeded++
-		} else {
+		case "skipped":
+			report.Skipped++
+		case "planned":
+			report.Planned++
+		default:
 			report.Failed++
 		}
 	}
+}
+
+func finishBucketDirUploadReport(report bucketDirUploadReport, reportFile string) error {
+	prepareBucketDirUploadReport(&report, reportFile)
 	raw, err := json.Marshal(report)
 	if err != nil {
 		return err
@@ -4022,36 +4341,193 @@ func uploadBucketDir(c client, args []string) error {
 	if printErr := printJSON(raw); printErr != nil {
 		return printErr
 	}
-	if report.Failed > 0 {
-		return fmt.Errorf("bucket directory upload failed: %d of %d files failed", report.Failed, report.Total)
+	if strings.TrimSpace(reportFile) == "" {
+		return nil
 	}
-	return nil
+	return writeJSONReportFile(reportFile, raw)
 }
 
-func uploadBucketDirOne(c client, bucket string, plan bucketDirUploadPlan, assetType, cacheControl string, warmup bool, warmupMethod, warmupBaseURL string) bucketDirUploadResult {
+func prepareBucketDirUploadReport(report *bucketDirUploadReport, reportFile string) {
+	if report == nil {
+		return
+	}
+	report.ReportSavedTo = strings.TrimSpace(reportFile)
+	report.Summary = bucketDirUploadSummary(report)
+	report.NextCommands = appendCommandHints(report.NextCommands, bucketDirUploadNextCommands(report)...)
+}
+
+func bucketDirUploadSummary(report *bucketDirUploadReport) string {
+	if report == nil {
+		return ""
+	}
+	if report.Planned > 0 {
+		return fmt.Sprintf("%d total, %d planned, %d failed", report.Total, report.Planned, report.Failed)
+	}
+	return fmt.Sprintf("%d total, %d succeeded, %d skipped, %d failed", report.Total, report.Succeeded, report.Skipped, report.Failed)
+}
+
+func bucketDirUploadNextCommands(report *bucketDirUploadReport) []string {
+	if report == nil || strings.TrimSpace(report.Bucket) == "" {
+		return nil
+	}
+	var commands []string
+	if path := firstBucketDirResultPath(report, "error"); path != "" {
+		commands = append(commands, makeCDNDoctorCommand(report.Bucket, path))
+	}
+	if report.Failed > 0 {
+		commands = append(commands, bucketDirUploadRetryCommand(report))
+		return appendCommandHints(nil, commands...)
+	}
+	if path := firstBucketDirResultPath(report, "ok", "skipped"); path != "" {
+		commands = append(commands, makeCDNDoctorCommand(report.Bucket, path))
+	}
+	if report.Planned > 0 {
+		commands = append(commands, bucketDirUploadRunCommand(report))
+	}
+	return appendCommandHints(nil, commands...)
+}
+
+func firstBucketDirResultPath(report *bucketDirUploadReport, statuses ...string) string {
+	if report == nil {
+		return ""
+	}
+	want := map[string]bool{}
+	for _, status := range statuses {
+		want[status] = true
+	}
+	for _, result := range report.Results {
+		if want[result.Status] && strings.TrimSpace(result.LogicalPath) != "" {
+			return result.LogicalPath
+		}
+	}
+	return ""
+}
+
+func bucketDirUploadRetryCommand(report *bucketDirUploadReport) string {
+	if report == nil {
+		return ""
+	}
+	retry := report.Retry
+	if retry < 1 {
+		retry = 2
+	}
+	parts := []string{
+		"supercdnctl upload-bucket-dir",
+		"-bucket " + cliHintArg(report.Bucket),
+		"-dir " + cliHintArg(report.Dir),
+	}
+	if strings.TrimSpace(report.Prefix) != "" {
+		parts = append(parts, "-prefix "+cliHintArg(report.Prefix))
+	}
+	parts = append(parts, "-skip-existing", "-retry "+strconv.Itoa(retry))
+	if strings.TrimSpace(report.ReportFile) != "" {
+		parts = append(parts, "-report-file "+cliHintArg(report.ReportFile))
+	}
+	return strings.Join(parts, " ")
+}
+
+func bucketDirUploadRunCommand(report *bucketDirUploadReport) string {
+	if report == nil {
+		return ""
+	}
+	parts := []string{
+		"supercdnctl upload-bucket-dir",
+		"-bucket " + cliHintArg(report.Bucket),
+		"-dir " + cliHintArg(report.Dir),
+	}
+	if strings.TrimSpace(report.Prefix) != "" {
+		parts = append(parts, "-prefix "+cliHintArg(report.Prefix))
+	}
+	if strings.TrimSpace(report.ReportFile) != "" {
+		parts = append(parts, "-report-file "+cliHintArg(report.ReportFile))
+	}
+	return strings.Join(parts, " ")
+}
+
+func writeJSONReportFile(pathValue string, raw []byte) error {
+	pathValue = strings.TrimSpace(pathValue)
+	if pathValue == "" {
+		return nil
+	}
+	if dir := filepath.Dir(pathValue); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, raw, "", "  ") == nil {
+		pretty.WriteByte('\n')
+		return os.WriteFile(pathValue, pretty.Bytes(), 0o644)
+	}
+	raw = append(raw, '\n')
+	return os.WriteFile(pathValue, raw, 0o644)
+}
+
+func uploadBucketDirOne(c client, bucket string, plan bucketDirUploadPlan, assetType, cacheControl string, warmup bool, warmupMethod, warmupBaseURL string, retry int) bucketDirUploadResult {
 	result := bucketDirUploadResult{
 		File:        plan.File,
 		LogicalPath: plan.LogicalPath,
 		Size:        plan.Size,
-		Status:      "ok",
 	}
-	uploadRaw, err := uploadBucketObject(c, bucket, plan.File, plan.LogicalPath, assetType, cacheControl)
-	if err != nil {
-		result.Status = "error"
-		result.Error = err.Error()
-		return result
-	}
-	result.Upload = json.RawMessage(uploadRaw)
-	if warmup {
-		warmupRaw, err := warmupBucketObject(c, bucket, plan.LogicalPath, warmupMethod, warmupBaseURL)
+	maxAttempts := retry + 1
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		result.Attempts = attempt
+		result.Upload = nil
+		result.Warmup = nil
+		uploadRaw, err := uploadBucketObject(c, bucket, plan.File, plan.LogicalPath, assetType, cacheControl)
 		if err != nil {
 			result.Status = "error"
-			result.Error = "upload succeeded but warmup failed: " + err.Error()
-			return result
+			result.Error = err.Error()
+			continue
 		}
-		result.Warmup = json.RawMessage(warmupRaw)
+		result.Upload = json.RawMessage(uploadRaw)
+		if warmup {
+			warmupRaw, err := warmupBucketObject(c, bucket, plan.LogicalPath, warmupMethod, warmupBaseURL)
+			if err != nil {
+				result.Status = "error"
+				result.Error = "upload succeeded but warmup failed: " + err.Error()
+				continue
+			}
+			result.Warmup = json.RawMessage(warmupRaw)
+		}
+		result.Status = "ok"
+		result.Error = ""
+		return result
 	}
 	return result
+}
+
+func existingBucketDirUploadPaths(c client, bucket string, plans []bucketDirUploadPlan) (map[string]bool, error) {
+	existing := map[string]bool{}
+	checked := map[string]bool{}
+	for _, plan := range plans {
+		if checked[plan.LogicalPath] {
+			continue
+		}
+		checked[plan.LogicalPath] = true
+		q := url.Values{}
+		q.Set("prefix", plan.LogicalPath)
+		q.Set("limit", "1")
+		raw, err := c.doRaw(http.MethodGet, "/api/v1/asset-buckets/"+url.PathEscape(bucket)+"/objects?"+q.Encode(), nil, "")
+		if err != nil {
+			return nil, err
+		}
+		var resp struct {
+			Objects []struct {
+				LogicalPath string `json:"logical_path"`
+			} `json:"objects"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return nil, err
+		}
+		for _, object := range resp.Objects {
+			if object.LogicalPath == plan.LogicalPath {
+				existing[plan.LogicalPath] = true
+				break
+			}
+		}
+	}
+	return existing, nil
 }
 
 func planBucketDirUpload(dir, prefix string) ([]bucketDirUploadPlan, string, error) {
@@ -4862,6 +5338,7 @@ func usage() {
 	fmt.Println(`Usage:
   supercdnctl [global flags] login -invite-token sci_xxx
   supercdnctl [global flags] whoami
+  supercdnctl [global flags] doctor
   supercdnctl [global flags] invite-user -name alice -role maintainer
   supercdnctl [global flags] list-users
   supercdnctl [global flags] revoke-token -id tok_xxx
@@ -4900,12 +5377,17 @@ func usage() {
   supercdnctl publish-cloudflare-static -site blog -dir ./dist -domains blog-static-test.example.com -dry-run=false
   supercdnctl [global flags] promote-deployment -site blog -deployment dpl-abc
   supercdnctl [global flags] delete-deployment -site blog -deployment dpl-abc
+  supercdnctl [global flags] gc -dry-run -older-than 1h
+  supercdnctl [global flags] gc -dry-run=false -older-than 1h
   supercdnctl [global flags] gc-site -site blog
   supercdnctl [global flags] init-libraries -dry-run
   supercdnctl [global flags] init-job -id 1
+  supercdnctl [global flags] doctor -resources=false
   supercdnctl [global flags] resource-status -library repo_china_all
   supercdnctl [global flags] routing-policy-status -policy global_smart
   supercdnctl [global flags] route-explain -site cyberstream -path /assets/app.js -country CN
+  supercdnctl [global flags] cdn-doctor -bucket movie-posters -path posters/poster.jpg
+  supercdnctl [global flags] site-doctor -site cyberstream -path /assets/app.js
   supercdnctl [global flags] health-check -libraries repo_china_all
   supercdnctl [global flags] e2e-probe -profile china_all
   supercdnctl [global flags] create-bucket -slug movie-posters -name 影视海报桶 -profile china_all -types image
@@ -4915,6 +5397,7 @@ func usage() {
   supercdnctl [global flags] init-bucket -bucket movie-posters
   supercdnctl [global flags] upload-bucket -bucket movie-posters -file poster.jpg -path posters/poster.jpg -warmup
   supercdnctl [global flags] upload-bucket-dir -bucket movie-posters -dir ./posters -prefix posters -concurrency 10
+  supercdnctl [global flags] upload-bucket-dir -bucket movie-posters -dir ./posters -prefix posters -skip-existing -retry 2 -report-file ./upload-report.json
   supercdnctl [global flags] list-bucket -bucket movie-posters
   supercdnctl [global flags] purge-bucket -bucket movie-posters -prefix posters/ -dry-run
   supercdnctl [global flags] warmup-bucket -bucket movie-posters -path posters/poster.jpg -dry-run

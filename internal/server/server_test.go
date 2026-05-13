@@ -369,6 +369,275 @@ func TestTeamInviteLoginAndRolePermissions(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsControlPlaneBaseline(t *testing.T) {
+	app := newTestServer(t)
+	rec := apiJSON(t, app, http.MethodGet, "/api/v1/doctor?resources=false", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("doctor status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Auth   struct {
+			Root        bool   `json:"root"`
+			WorkspaceID string `json:"workspace_id"`
+			Role        string `json:"role"`
+			TokenID     string `json:"token_id"`
+		} `json:"auth"`
+		Server struct {
+			StorageTargetCount    int  `json:"storage_target_count"`
+			RouteProfileCount     int  `json:"route_profile_count"`
+			MaxActiveTransfers    int  `json:"max_active_transfers"`
+			StagingDirInitialized bool `json:"staging_dir_initialized"`
+		} `json:"server"`
+		Checks []doctorCheck `json:"checks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "ok" || !resp.Auth.Root || resp.Auth.WorkspaceID != model.DefaultWorkspaceID || resp.Auth.Role != model.RoleOwner {
+		t.Fatalf("unexpected doctor auth/status: %+v", resp)
+	}
+	if resp.Auth.TokenID != "" {
+		t.Fatalf("doctor response should not expose token id: %+v", resp.Auth)
+	}
+	if resp.Server.StorageTargetCount != 1 || resp.Server.RouteProfileCount != 1 || resp.Server.MaxActiveTransfers != 5 || !resp.Server.StagingDirInitialized {
+		t.Fatalf("unexpected doctor server summary: %+v", resp.Server)
+	}
+	for _, want := range []string{"auth", "database", "storage_targets", "staging", "route_profiles", "routing_policies"} {
+		found := false
+		for _, check := range resp.Checks {
+			if check.Name == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("doctor response missing check %q: %+v", want, resp.Checks)
+		}
+	}
+}
+
+func TestDoctorKeepsResourceDetailsRootOnly(t *testing.T) {
+	app := newTestServer(t)
+	inviteToken := createInviteForTest(t, app, "viewer", model.RoleViewer)
+	apiToken := acceptInviteForTest(t, app, inviteToken)
+
+	rec := apiJSON(t, app, http.MethodGet, "/api/v1/doctor", apiToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("doctor status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"warning"`) {
+		t.Fatalf("doctor should warn for skipped resource diagnostics: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "resource library diagnostics require a root token") {
+		t.Fatalf("doctor response missing root boundary warning: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "token_id") {
+		t.Fatalf("doctor response should not expose token ids: %s", rec.Body.String())
+	}
+}
+
+func TestCDNDoctorReportsBucketObjectAndRedactedCandidates(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.Server.PublicBaseURL = "https://cdn.example.com"
+	app.cfg.RouteProfiles = []config.RouteProfile{{
+		Name:                "smart",
+		Primary:             "edge",
+		Backups:             []string{"backup"},
+		AllowRedirect:       true,
+		DefaultCacheControl: "public, max-age=60",
+	}}
+	app.cfg.RoutingPolicies = []config.RoutingPolicy{{
+		Name:               "global_smart",
+		Mode:               "global_load_balance",
+		DefaultRegionGroup: "overseas",
+		Sources: []config.RoutingPolicySource{
+			{Target: "edge", RegionGroup: "overseas", Weight: 1},
+			{Target: "backup", RegionGroup: "china", Weight: 1},
+		},
+	}}
+	app.stores = storage.NewManager([]storage.Store{
+		&signedLocatorStore{name: "edge", statLocator: "https://edge.example/release/app.js?sig=edge-secret&plain=keep"},
+		&signedLocatorStore{name: "backup", statLocator: "https://backup.example/release/app.js?sig=backup-secret"},
+	})
+	ctx := context.Background()
+	if _, err := app.db.CreateProjectInWorkspace(ctx, "bucket:downloads", model.DefaultWorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.CreateAssetBucket(ctx, model.AssetBucket{
+		Slug:                "downloads",
+		WorkspaceID:         model.DefaultWorkspaceID,
+		Name:                "Downloads",
+		RouteProfile:        "smart",
+		RoutingPolicy:       "global_smart",
+		AllowedTypes:        []string{model.AssetTypeArchive},
+		DefaultCacheControl: "public, max-age=60",
+		Status:              model.AssetBucketActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := app.db.SaveObject(ctx, model.Object{
+		ProjectID:     "bucket:downloads",
+		Path:          "release/app.js",
+		Key:           "assets/buckets/downloads/other/app.js",
+		RouteProfile:  "smart",
+		Size:          12,
+		SHA256:        strings.Repeat("a", 64),
+		ContentType:   "text/javascript",
+		CacheControl:  "public, max-age=60",
+		PrimaryTarget: "edge",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SaveAssetBucketObject(ctx, model.AssetBucketObject{
+		BucketSlug:  "downloads",
+		LogicalPath: "release/app.js",
+		ObjectID:    obj.ID,
+		AssetType:   model.AssetTypeOther,
+		PhysicalKey: obj.Key,
+		Size:        obj.Size,
+		SHA256:      obj.SHA256,
+		ContentType: obj.ContentType,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "edge", model.ReplicaReady, "https://edge.example/stale?sig=old", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "backup", model.ReplicaReady, "https://backup.example/stale?sig=old", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodGet, "/api/v1/asset-buckets/downloads/doctor?path=release/app.js&country=CN", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cdn doctor status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp cdnDoctorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "ok" || resp.Object == nil || resp.Object.ObjectID != obj.ID {
+		t.Fatalf("unexpected cdn doctor response: %+v", resp)
+	}
+	if resp.PublicURL != "https://cdn.example.com/a/downloads/release/app.js" {
+		t.Fatalf("public_url = %q", resp.PublicURL)
+	}
+	if strings.Contains(rec.Body.String(), "edge-secret") || strings.Contains(rec.Body.String(), "backup-secret") || strings.Contains(rec.Body.String(), "plain=keep") {
+		t.Fatalf("cdn doctor leaked signed query values: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "%3Credacted%3E") {
+		t.Fatalf("cdn doctor did not redact signed query values: %s", rec.Body.String())
+	}
+	if len(resp.Replicas) != 2 || len(resp.Candidates) != 2 || resp.Selection == nil || resp.Selection.Target == "" {
+		t.Fatalf("missing replica/candidate selection details: %+v", resp)
+	}
+}
+
+func TestCDNDoctorReportsMissingObjectAsDiagnostic(t *testing.T) {
+	app := newTestServer(t)
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets", "test-token", map[string]any{
+		"slug":          "downloads",
+		"name":          "Downloads",
+		"route_profile": "overseas",
+		"allowed_types": []string{"archive"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create bucket status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = apiJSON(t, app, http.MethodGet, "/api/v1/asset-buckets/downloads/doctor?path=missing.zip", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cdn doctor missing path status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"error"`) || !strings.Contains(rec.Body.String(), "bucket object not found") {
+		t.Fatalf("missing object should be a diagnostic error: %s", rec.Body.String())
+	}
+}
+
+func TestSiteDoctorReportsRouteAndRedactsCandidates(t *testing.T) {
+	app := newTestServer(t)
+	app.cfg.Server.PublicBaseURL = "https://origin.example.com"
+	app.cfg.RouteProfiles = []config.RouteProfile{{
+		Name:                "smart",
+		Primary:             "edge",
+		Backups:             []string{"backup"},
+		AllowRedirect:       true,
+		DefaultCacheControl: "public, max-age=60",
+	}}
+	app.cfg.RoutingPolicies = []config.RoutingPolicy{{
+		Name:               "global_smart",
+		Mode:               "global_load_balance",
+		DefaultRegionGroup: "overseas",
+		Sources: []config.RoutingPolicySource{
+			{Target: "edge", RegionGroup: "overseas", Weight: 1},
+			{Target: "backup", RegionGroup: "china", Weight: 1},
+		},
+	}}
+	app.stores = storage.NewManager([]storage.Store{
+		&signedLocatorStore{name: "edge", statLocator: "https://edge.example/assets/app.js?sig=edge-secret&plain=keep"},
+		&signedLocatorStore{name: "backup", statLocator: "https://backup.example/assets/app.js?sig=backup-secret"},
+	})
+	deploymentID := createDeployment(t, app, "cyberstream", map[string]string{
+		"index.html":    `<script type="module" src="/assets/app.js"></script>`,
+		"assets/app.js": `console.log("ok")`,
+	}, map[string]string{
+		"environment":    "production",
+		"promote":        "true",
+		"route_profile":  "smart",
+		"routing_policy": "global_smart",
+	})
+	obj, err := app.db.SiteDeploymentFileObject(context.Background(), deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(context.Background(), obj.ID, "backup", model.ReplicaReady, "https://backup.example/assets/app.js?sig=backup-secret", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodGet, "/api/v1/sites/cyberstream/doctor?path=/assets/app.js&country=CN", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("site doctor status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp siteDoctorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "ok" || resp.Deployment == nil || resp.Deployment.ID != deploymentID || resp.Route == nil {
+		t.Fatalf("unexpected site doctor response: %+v", resp)
+	}
+	if resp.Route.Selection == nil || resp.Route.Selection.Target == "" {
+		t.Fatalf("route selection missing: %+v", resp.Route)
+	}
+	if resp.ExpectedEdgeHeaders["X-SuperCDN-Redirect"] != "storage" || resp.ExpectedEdgeHeaders["X-SuperCDN-Route-Policy"] != "global_smart" {
+		t.Fatalf("unexpected expected headers: %+v", resp.ExpectedEdgeHeaders)
+	}
+	if strings.Contains(rec.Body.String(), "edge-secret") || strings.Contains(rec.Body.String(), "backup-secret") || strings.Contains(rec.Body.String(), "plain=keep") {
+		t.Fatalf("site doctor leaked signed query values: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "%3Credacted%3E") {
+		t.Fatalf("site doctor did not redact signed query values: %s", rec.Body.String())
+	}
+}
+
+func TestSiteDoctorReportsMissingActiveDeploymentAsDiagnostic(t *testing.T) {
+	app := newTestServer(t)
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites", "test-token", map[string]any{
+		"id":            "empty-site",
+		"route_profile": "overseas",
+		"mode":          "standard",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = apiJSON(t, app, http.MethodGet, "/api/v1/sites/empty-site/doctor?path=/", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("site doctor missing deployment status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"error"`) || !strings.Contains(rec.Body.String(), "active production deployment not found") {
+		t.Fatalf("missing active deployment should be a diagnostic error: %s", rec.Body.String())
+	}
+}
+
 func TestViewerCannotMutateTeamResources(t *testing.T) {
 	app := newTestServer(t)
 	inviteToken := createInviteForTest(t, app, "viewer", model.RoleViewer)
@@ -3063,6 +3332,12 @@ func TestPreflightUploadRejectsResourceLibraryLimit(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("preflight status = %d body=%s", rec.Code, rec.Body.String())
 	}
+	body := rec.Body.String()
+	for _, want := range []string{`resource library \"limited_repo\"`, `binding \"limited_binding\"`, "allows files up to 4 bytes", "largest file got 5 bytes"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("preflight error body %q does not contain %q", body, want)
+		}
+	}
 }
 
 func TestPreflightSiteDeployRejectsBatchLimit(t *testing.T) {
@@ -3082,6 +3357,12 @@ func TestPreflightSiteDeployRejectsBatchLimit(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("preflight status = %d body=%s", rec.Code, rec.Body.String())
 	}
+	body := rec.Body.String()
+	for _, want := range []string{`resource library \"limited_repo\"`, `binding \"limited_binding\"`, "allows at most 2 files per upload", "got 3"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("preflight error body %q does not contain %q", body, want)
+		}
+	}
 }
 
 func TestPreflightSiteDeployRejectsDefaultFileLimit(t *testing.T) {
@@ -3100,6 +3381,12 @@ func TestPreflightSiteDeployRejectsDefaultFileLimit(t *testing.T) {
 	app.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("preflight status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"site deploy allows at most 5 files", "got 6"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("preflight error body %q does not contain %q", body, want)
+		}
 	}
 }
 
@@ -3943,6 +4230,72 @@ func TestAssetBucketWarmupDryRunBuildsEscapedObjectURL(t *testing.T) {
 	}
 	if got, want := resp.URLs[0], "https://cdn.example.com/a/docs/manuals/hello%20world.txt"; got != want {
 		t.Fatalf("warmup url = %q want %q", got, want)
+	}
+}
+
+func TestManualGCDryRunAndDeleteStaleStagingFiles(t *testing.T) {
+	app := newTestServer(t)
+	oldPath := filepath.Join(app.staging, "upload-old")
+	recentPath := filepath.Join(app.staging, "upload-recent")
+	if err := os.WriteFile(oldPath, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recentPath, []byte("recent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().UTC().Add(-2 * time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	dryRun := apiJSON(t, app, http.MethodPost, "/api/v1/gc", "test-token", map[string]any{
+		"dry_run":            true,
+		"older_than_seconds": 3600,
+	})
+	if dryRun.Code != http.StatusOK {
+		t.Fatalf("gc dry-run status = %d body=%s", dryRun.Code, dryRun.Body.String())
+	}
+	var planned gcResponse
+	if err := json.Unmarshal(dryRun.Body.Bytes(), &planned); err != nil {
+		t.Fatal(err)
+	}
+	if planned.Status != "planned" || planned.Planned != 1 || planned.Deleted != 0 || planned.Kept != 1 {
+		t.Fatalf("unexpected dry-run gc response: %+v", planned)
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("old staging file should remain after dry-run: %v", err)
+	}
+
+	deleted := apiJSON(t, app, http.MethodPost, "/api/v1/gc", "test-token", map[string]any{
+		"dry_run":            false,
+		"older_than_seconds": 3600,
+	})
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("gc delete status = %d body=%s", deleted.Code, deleted.Body.String())
+	}
+	var cleaned gcResponse
+	if err := json.Unmarshal(deleted.Body.Bytes(), &cleaned); err != nil {
+		t.Fatal(err)
+	}
+	if cleaned.Status != "ok" || cleaned.Deleted != 1 || cleaned.Kept != 1 || cleaned.ErrorCount != 0 {
+		t.Fatalf("unexpected delete gc response: %+v", cleaned)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old staging file should be deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(recentPath); err != nil {
+		t.Fatalf("recent staging file should remain: %v", err)
+	}
+}
+
+func TestManualGCRejectsUnsafeYoungThresholdWithoutForce(t *testing.T) {
+	app := newTestServer(t)
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/gc", "test-token", map[string]any{
+		"dry_run":            false,
+		"older_than_seconds": 60,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("gc unsafe threshold status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

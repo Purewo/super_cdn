@@ -18,7 +18,7 @@ func BuildManager(ctx context.Context, cfg *config.Config) (*Manager, error) {
 			if err != nil {
 				return nil, err
 			}
-			stores = append(stores, store)
+			stores = append(stores, applyDirectStorageLimits(store, s))
 		case "r2":
 			store, err := NewR2Store(ctx, R2Options{
 				Name:            s.Name,
@@ -33,7 +33,7 @@ func BuildManager(ctx context.Context, cfg *config.Config) (*Manager, error) {
 			if err != nil {
 				return nil, err
 			}
-			stores = append(stores, store)
+			stores = append(stores, applyDirectStorageLimits(store, s))
 		case "alist":
 			store, err := NewAListStore(AListOptions{
 				Name:          s.Name,
@@ -50,7 +50,7 @@ func BuildManager(ctx context.Context, cfg *config.Config) (*Manager, error) {
 			if err != nil {
 				return nil, err
 			}
-			stores = append(stores, store)
+			stores = append(stores, applyDirectStorageLimits(store, s))
 		case "pinata":
 			store, err := NewPinataStore(PinataOptions{
 				APIBaseURL:     s.Pinata.APIBaseURL,
@@ -64,7 +64,7 @@ func BuildManager(ctx context.Context, cfg *config.Config) (*Manager, error) {
 			if err != nil {
 				return nil, err
 			}
-			stores = append(stores, store)
+			stores = append(stores, applyDirectStorageLimits(store, s))
 		default:
 			return nil, fmt.Errorf("unsupported storage type %q for %q", s.Type, s.Name)
 		}
@@ -245,4 +245,28 @@ func toStorageLibraryPolicy(p config.ResourceLibraryPolicy, ignoreLimits bool) R
 		Notes:              p.Notes,
 		IgnoreLimits:       ignoreLimits,
 	}
+}
+
+func applyDirectStorageLimits(store Store, cfg config.StorageConfig) Store {
+	if !directStorageLimitsConfigured(cfg) {
+		return store
+	}
+	return NewLimitedStore(store, toStorageLibraryPolicy(cfg.Policy, false), toStorageConstraints(cfg.Constraints))
+}
+
+func directStorageLimitsConfigured(cfg config.StorageConfig) bool {
+	return cfg.Policy.MaxBindings != nil ||
+		cfg.Policy.TotalCapacityBytes != nil ||
+		cfg.Policy.AvailableBytes != nil ||
+		cfg.Policy.ReserveBytes != nil ||
+		strings.TrimSpace(cfg.Policy.Notes) != "" ||
+		cfg.Constraints.MaxCapacityBytes != nil ||
+		cfg.Constraints.PeakBandwidthMbps != nil ||
+		cfg.Constraints.MaxBatchFiles != nil ||
+		cfg.Constraints.MaxFileSizeBytes != nil ||
+		cfg.Constraints.DailyUploadLimitBytes != nil ||
+		cfg.Constraints.DailyUploadLimitUnlimited ||
+		cfg.Constraints.SupportsOnlineExtract != nil ||
+		cfg.Constraints.MaxOnlineExtractBytes != nil ||
+		strings.TrimSpace(cfg.Constraints.Notes) != ""
 }

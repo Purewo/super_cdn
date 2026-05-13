@@ -114,12 +114,14 @@ type RoutingPolicySource struct {
 }
 
 type StorageConfig struct {
-	Name   string       `json:"name"`
-	Type   string       `json:"type"`
-	Local  LocalConfig  `json:"local"`
-	R2     R2Config     `json:"r2"`
-	AList  AListConfig  `json:"alist"`
-	Pinata PinataConfig `json:"pinata"`
+	Name        string                            `json:"name"`
+	Type        string                            `json:"type"`
+	Policy      ResourceLibraryPolicy             `json:"policy,omitempty"`
+	Constraints ResourceLibraryBindingConstraints `json:"constraints,omitempty"`
+	Local       LocalConfig                       `json:"local"`
+	R2          R2Config                          `json:"r2"`
+	AList       AListConfig                       `json:"alist"`
+	Pinata      PinataConfig                      `json:"pinata"`
 }
 
 type MountPointConfig struct {
@@ -282,6 +284,12 @@ func (c *Config) ApplyDefaults(baseDir string) error {
 				s.Local.Root = filepath.Join(c.Server.DataDir, "objects", s.Name)
 			}
 			s.Local.Root = absPath(baseDir, s.Local.Root)
+		}
+		if err := validateResourceLibraryPolicy("storage:"+s.Name, s.Policy, 1, c.Limits.OverclockMode); err != nil {
+			return err
+		}
+		if err := validateBindingConstraints("storage:"+s.Name, 0, s.Constraints); err != nil {
+			return err
 		}
 	}
 	mounts := map[string]bool{}
