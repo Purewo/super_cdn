@@ -39,4 +39,24 @@ func TestCreateAndListAuditEvents(t *testing.T) {
 	if events[0].Action != "site.create" || events[0].Resource != "site:demo" || events[0].UserID != 42 {
 		t.Fatalf("unexpected listed audit event: %+v", events[0])
 	}
+
+	if _, err := state.CreateAuditEvent(ctx, model.AuditEvent{
+		WorkspaceID: "workspace-1",
+		Action:      "asset_bucket.object.upload",
+		Resource:    "asset_bucket:docs;path:guides/readme.txt",
+	}); err != nil {
+		t.Fatalf("CreateAuditEvent() second error = %v", err)
+	}
+	filtered, err := state.AuditEventsFiltered(ctx, AuditEventFilter{
+		WorkspaceID:      "workspace-1",
+		Action:           "asset_bucket.object.upload",
+		ResourceContains: "guides/readme",
+		Limit:            10,
+	})
+	if err != nil {
+		t.Fatalf("AuditEventsFiltered() error = %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].Action != "asset_bucket.object.upload" {
+		t.Fatalf("unexpected filtered events: %+v", filtered)
+	}
 }

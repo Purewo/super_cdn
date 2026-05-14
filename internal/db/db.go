@@ -395,6 +395,17 @@ func (d *DB) GetObjectByProjectPath(ctx context.Context, projectID, objectPath s
 	return d.GetObject(ctx, id)
 }
 
+func (d *DB) UpdateObjectPrimaryTarget(ctx context.Context, id int64, target string) (*model.Object, error) {
+	res, err := d.sql.ExecContext(ctx, `UPDATE objects SET primary_target = ?, updated_at = ? WHERE id = ?`, target, nowString(), id)
+	if err != nil {
+		return nil, err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return d.GetObject(ctx, id)
+}
+
 func (d *DB) DeleteObject(ctx context.Context, id int64) error {
 	_, err := d.sql.ExecContext(ctx, `DELETE FROM objects WHERE id = ?`, id)
 	return err

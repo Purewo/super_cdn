@@ -44,6 +44,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `logout` | 本地 profile 写入 | 删除本机 CLI profile |
 | `whoami` | `GET /api/v1/auth/me` | 查看当前 token 身份、workspace 和角色 |
 | `doctor` | `GET /api/v1/doctor` | First-pass support report for auth, database, storage, route profiles, resource status and routing policy status |
+| `audit-log` | `GET /api/v1/audit-events` | 查询 mutation 审计事件，支持 workspace/action/resource/limit 过滤 |
 | `invite-user` | `POST /api/v1/auth/invites` | 创建一次性用户邀请 |
 | `list-users` | `GET /api/v1/users` | 列出当前 workspace 用户 |
 | `revoke-token` | `DELETE /api/v1/tokens/{id}` | 撤销用户 API token |
@@ -70,6 +71,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `export-edge-manifest` | `GET /api/v1/sites/{id}/deployments/{deployment}/edge-manifest` | 导出可用于边缘路由的部署 manifest |
 | `publish-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 发布边缘 manifest 到 Cloudflare Workers KV |
 | `refresh-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 刷新 active edge manifest 并默认执行 hybrid 探测 |
+| `rollback-plan` | `GET /api/v1/sites/{id}/deployments/{deployment}` | 只读生成 deployment 回滚方式，区分 metadata promote 与 Cloudflare 重新发布 |
 | `publish-cloudflare-static` | 本地 Wrangler 调用 | 发布本地目录到 Cloudflare Workers Static Assets |
 | `promote-deployment` | `POST /api/v1/sites/{id}/deployments/{deployment}/promote` | 将部署提升为当前生产版本 |
 | `delete-deployment` | `DELETE /api/v1/sites/{id}/deployments/{deployment}` | 删除未激活且未 pinned 的部署 |
@@ -81,6 +83,8 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `routing-policy-status` | `GET /api/v1/routing-policies/status` | 查询智能路由策略和源状态 |
 | `cdn-doctor` | `GET /api/v1/asset-buckets/{slug}/doctor` | Diagnose one CDN bucket and optionally one logical object path |
 | `site-doctor` | `GET /api/v1/sites/{id}/doctor` | Diagnose one site, active deployment and optionally one routed path |
+| `switch-plan` | `cdn-doctor` / `site-doctor` | 只读生成手动线路切换前的候选、风险和建议命令 |
+| `switch-apply` | `POST /api/v1/asset-buckets/{slug}/objects/primary-target` / `POST /api/v1/sites/{id}/files/primary-target` | 用户确认后把单个对象或站点文件切到已就绪副本，并返回回滚命令 |
 | `health-check` | `POST /api/v1/resource-libraries/health-check` | 执行资源库健康检查 |
 | `e2e-probe` | `POST /api/v1/resource-libraries/e2e-probe` | 执行真实上传/读取/清理探针 |
 | `create-bucket` | `POST /api/v1/asset-buckets` | 创建静态资源桶 |
@@ -161,6 +165,18 @@ GET /api/v1/doctor?resources=true&routing=true
 ```
 
 返回内容包括当前 token 身份摘要、数据库连通性、storage/route profile 配置检查、本地 staging 状态、资源库能力/健康缓存和路由策略状态。资源库详情沿用现有 root-only 边界；非 root token 可以运行 `doctor`，但会看到资源库诊断被跳过的 warning。
+
+#### audit-log
+
+查询 mutation 审计事件。root 可以查看所有 workspace 或用 `-workspace` 过滤；普通 owner/maintainer 只能查看自己的 workspace；viewer 无权查看。
+
+```powershell
+.\bin\supercdnctl.exe audit-log -limit 50
+.\bin\supercdnctl.exe audit-log -action site.deployment.promote -resource site:cyberstream
+.\bin\supercdnctl.exe audit-log -workspace default -limit 100
+```
+
+响应字段包括 `events[]` 和 `limit`。每条事件包含 `id`、`workspace_id`、`user_id`、`action`、`resource`、`created_at`。审计事件不应包含 token、签名 URL 或密钥值；需要定位敏感操作时用 resource id、site id、bucket/path、deployment id 等非秘密字段。
 
 ## 普通静态资源
 
@@ -536,6 +552,7 @@ local only
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target hybrid_edge -profile china_mobile -domains blog.qwk.ccwu.cc -static-spa
 .\bin\supercdnctl.exe publish-cloudflare-static -site blog -dir .\dist -domains blog-static-test.example.com -dry-run=false
 .\bin\supercdnctl.exe promote-deployment -site blog -deployment dpl-abc
+.\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc -dry-run
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc -delete-objects -delete-remote=true
 .\bin\supercdnctl.exe gc-site -site blog
@@ -642,6 +659,39 @@ GET /api/v1/sites/{id}/doctor?path=/assets/app.js&country=CN
 
 站点存在但没有 active deployment、路径不匹配或候选资源不可用时，命令仍返回诊断 JSON，并在 `checks[]` 中标记 error/warning，便于用户直接贴回支持。
 
+`recommendations[]` 会给出可操作建议，例如先跑资源库健康检查、先修复副本、刷新 active edge manifest，或提醒 Cloudflare Static 回滚需要重新发布真实资产。它只给建议，不会自动切换线路。
+
+#### switch-plan
+
+只读生成手动线路切换前的计划。它复用 `site-doctor` 或 `cdn-doctor` 报告，整理 `candidate_ready`、`apply_supported`、`safe_to_switch`、候选数量、ready 候选、当前选择、风险、`recommendations[]` 和 `next_commands[]`。这个命令不会修改站点、bucket、route profile、KV manifest 或任何远端资源。
+
+```powershell
+.\bin\supercdnctl.exe switch-plan -site cyberstream -path /assets/app.js -country CN
+.\bin\supercdnctl.exe switch-plan -bucket downloads -path release/app.zip -country CN
+```
+
+`candidate_ready=true` 只表示当前报告里至少有两个 ready candidates 且没有 error 级候选风险。`apply_supported=true` 表示当前对象/路径可以走已有的 `switch-apply` primary-target apply 路径。`safe_to_switch=true` 需要两者同时成立。使用 `routing_policy` 或 `resource_failover` 的路径即使候选都 ready，也会返回 `apply_supported=false`，因为真实流量由策略或 failover manifest 控制，不能靠改 `primary_target` 完成切流。
+这类不支持直接 apply 的计划会在 `next_commands[]` 里补 `routing-policy-status` 或 `route-explain`，用于继续诊断真实路由策略。
+
+#### switch-apply
+
+把某个 bucket 对象或站点部署文件的 `primary_target` 切到一个已就绪副本。默认是 dry-run；真实切换必须同时传 `-dry-run=false` 和 `-confirm switch`。响应会包含 `previous_target`、`target`、`effective_now`、检查项、warning、`next_commands[]` 和 `rollback_command`。
+
+```powershell
+.\bin\supercdnctl.exe switch-apply -bucket downloads -path release/app.zip -target repo_backup
+.\bin\supercdnctl.exe switch-apply -bucket downloads -path release/app.zip -target repo_backup -expected-current repo_primary -dry-run=false -confirm switch
+.\bin\supercdnctl.exe switch-apply -site cyberstream -path /assets/app.js -target repo_backup -dry-run=false -confirm switch
+.\bin\supercdnctl.exe switch-apply -site cyberstream -deployment dpl-abc -path /assets/app.js -target repo_primary -expected-current repo_backup -dry-run=false -confirm switch
+```
+
+限制：
+- `switch-apply` 只处理单对象/单文件的主副本切换，不修改 route profile、routing policy、Cloudflare Worker、KV manifest 或远端资源。
+- bucket 或站点部署使用 `routing_policy` 时会拒绝，因为策略会接管正常选路，改 `primary_target` 不能代表真实切流。
+- 站点部署使用 `resource_failover` 时也会拒绝，因为 failover route 的候选顺序由 route profile/manifest 控制，改 `primary_target` 不能代表真实切流。
+- `cloudflare_static` 部署会拒绝，因为真实资产版本在 Cloudflare；回滚应重新发布目标产物或走专门 Worker rollback 流程。
+- `hybrid_edge` 非策略路径切换后需要运行 `refresh-edge-manifest` 才能发布到 active KV manifest。
+被拒绝的切换尝试会写入 `asset_bucket.object.primary_target.switch.rejected` 或 `site.deployment.file.primary_target.switch.rejected` 审计事件，便于追溯误操作。
+
 #### publish-cloudflare-static
 
 底层 Cloudflare Static canary/诊断入口，只调用本地 Wrangler 发布目录，不写 Super CDN deployment 记录。
@@ -673,13 +723,34 @@ HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/promote`
 
 参数：`-site`、`-deployment` 均必填。
 
+安全边界：普通 `origin_assisted` deployment 可以通过 metadata promote 回滚。非 active 的 `cloudflare_static` 和 `hybrid_edge` deployment 会被拒绝，因为真实线上状态还依赖 Cloudflare Worker assets 和/或 active KV manifest；这类回滚必须重新运行对应的 `deploy-site -target cloudflare_static|hybrid_edge` 流程，让资产版本、Worker 和 KV manifest 一起更新。
+被拒绝的 Cloudflare-backed metadata promote 尝试会写入 `site.deployment.promote.rejected` 审计事件，可用 `audit-log -action site.deployment.promote.rejected` 追溯。
+
+#### rollback-plan
+
+只读生成某个历史 deployment 的回滚计划，不会修改 Super CDN 元数据、Cloudflare Worker、KV 或远端资源。
+
+```powershell
+.\bin\supercdnctl.exe rollback-plan -site blog -deployment dpl-old
+.\bin\supercdnctl.exe rollback-plan -site blog -deployment dpl-static -dir .\dist-rollback
+```
+
+输出字段包括 `action`、`metadata_promote_supported`、`redeploy_required`、`safe_to_run`、`rollback_write_ready`、`write_blockers[]`、`missing_evidence[]`、`evidence`、`warnings[]` 和 `next_commands[]`。`evidence` 会带出可核对的 route profile、artifact hash、manifest key、站点域名，以及 Cloudflare Static 的 Worker 名称、version id、assets hash、域名和验证状态。
+
+- `origin_assisted` 且 ready 的历史 deployment 会给出 `metadata_promote` 和 `promote-deployment` 命令。
+- `cloudflare_static` 会给出 `redeploy_cloudflare_static`，提醒必须用目标产物重新发布 Cloudflare Static，不能做 metadata-only promote，并用 `write_blockers[]`/`missing_evidence[]` 说明为什么当前不能做真正的 Cloudflare rollback write。`next_commands[]` 还会给出重发布后的 `probe-site -require-edge-static-html` 验证命令。
+- `hybrid_edge` 会给出 `redeploy_hybrid_edge`，提醒 Worker assets 与 active KV manifest 必须一起重新发布，并列出缺少的 Worker/KV/manifest 证据。`next_commands[]` 会包含 `probe-site -require-edge-static-html -require-edge-manifest-assets`，用来验证 HTML 和 JS/CSS 首跳没有回到 Go origin。
+- 不传 `-dir` 时，Cloudflare 重发布命令会保留 `<dist>` 占位符，表示需要操作者提供正确历史产物目录。
+
 #### delete-deployment
 
-删除未 active 且未 pinned 的 deployment。默认只删除 deployment 元数据；传 `-delete-objects` 时会删除该 deployment 跟踪的站点文件、artifact 和 manifest 对象，`-delete-remote=true` 会同步删除远端副本。
+删除未 active 且未 pinned 的 deployment。默认只删除 deployment 元数据；传 `-delete-objects` 时会删除该 deployment 跟踪的站点文件、artifact 和 manifest 对象，`-delete-remote=true` 会同步删除远端副本。建议先传 `-dry-run` 生成只读计划，确认 `safe_to_run`、`warnings[]` 和 `next_commands[]` 后再执行真实删除。
 
-HTTP: `DELETE /api/v1/sites/{id}/deployments/{deployment}?delete_objects=false&delete_remote=true`
+HTTP: `DELETE /api/v1/sites/{id}/deployments/{deployment}?delete_objects=false&delete_remote=true&dry_run=false`
 
-参数：`-site`、`-deployment` 均必填；`-delete-objects` 默认 `false`，`-delete-remote` 默认 `true`。
+参数：`-site`、`-deployment` 均必填；`-delete-objects` 默认 `false`，`-delete-remote` 默认 `true`，`-dry-run` 默认 `false`。
+
+`-dry-run` 会先读取 `GET /api/v1/sites/{id}/deployments/{deployment}`，不会删除元数据或远端对象。输出字段包括 `deployment_target`、`active`、`pinned`、`delete_objects`、`delete_remote`、`safe_to_run`、`remote_cleanup_supported`、`remote_cleanup_blockers[]`、`evidence`、`warnings[]` 和 `next_commands[]`。直接调用 API 时也可以在 `DELETE` 上传 `dry_run=true` 获得服务端安全计划。对 active 或 pinned deployment 会标记 `safe_to_run=false` 且不执行删除；对 `cloudflare_static` 和 `hybrid_edge` 会提示当前删除只移除 Super CDN 元数据，不会清理 Cloudflare Worker versions、custom domains 或 KV entries，并在 `evidence.cloudflare_static` 中带出 Worker/version/domain/assets 证据。
 
 #### gc
 
@@ -723,11 +794,11 @@ HTTP: `POST /api/v1/sites/{id}/gc`
 
 参数：`-site` 必填。
 
-注意：`cloudflare_static` 部署不会允许普通 `promote-deployment` 做元数据级回滚，因为 Cloudflare Worker 的真实资产版本不会因此自动切换。要回滚 Cloudflare Static，请重新发布目标产物，或后续使用专门的 Worker rollback 流程。`delete-deployment` 删除 `cloudflare_static` 时只删除 Super CDN 元数据，会在响应里提示不会删除 Worker versions/custom domains。origin-assisted/IPFS 站点部署可用 `-delete-objects -delete-remote=true` 对齐 bucket 的远端清理语义。
+注意：`cloudflare_static` 和 `hybrid_edge` 部署不会允许普通 `promote-deployment` 做元数据级回滚，因为 Cloudflare Worker 的真实资产版本和/或 active KV manifest 不会因此自动切换。要回滚这类部署，请重新发布目标产物并走对应的 Cloudflare 发布流程。`delete-deployment` 删除 `cloudflare_static` 或 `hybrid_edge` 时只删除 Super CDN 元数据，会在响应里提示不会删除 Worker versions/custom domains/KV entries。origin-assisted/IPFS 站点部署可用 `-delete-objects -delete-remote=true` 对齐 bucket 的远端清理语义。
 
 说明：
 
-- rollback 等价于 `promote-deployment` 一个旧 deployment；preview deployment 也可以被提升为 production。
+- 对 `origin_assisted` 而言，rollback 等价于 `promote-deployment` 一个旧 deployment；preview deployment 也可以被提升为 production。
 - active production deployment 不能删除。
 - pinned deployment 不能删除。
 - `export-edge-manifest` 是只读旁路导出，用于后续 Cloudflare Worker/KV/Pages 边缘路由改造；不会改变当前线上 Go-origin + storage 302 交付链路。
@@ -949,6 +1020,8 @@ GET /api/v1/asset-buckets/{slug}/doctor?path=release/app.zip&country=CN
 ```
 
 不传 `-path` 时只检查 bucket、route profile 和 routing policy 配置；路径不存在会在 JSON 中返回 `object` check error，方便用户直接贴出诊断报告。
+
+`recommendations[]` 会把诊断结果转换成下一步动作：候选资源库健康异常时建议 `health-check`，副本不 ready 时建议 `repair-replicas`，多个候选 ready 时提示可以人工确认后切换策略。这里不会做跨资源库或跨 bucket 的自动切换。
 
 ### create-bucket
 

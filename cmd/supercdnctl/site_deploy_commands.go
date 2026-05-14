@@ -1185,12 +1185,136 @@ func deleteDeployment(c client, args []string) error {
 	deployment := fs.String("deployment", "", "deployment id")
 	deleteObjects := fs.Bool("delete-objects", false, "delete tracked deployment objects before deleting deployment metadata")
 	deleteRemote := fs.Bool("delete-remote", true, "delete remote object replicas when -delete-objects is set")
+	dryRun := fs.Bool("dry-run", false, "plan deletion without modifying metadata or remote objects")
 	_ = fs.Parse(args)
 	if *site == "" || *deployment == "" {
 		return errors.New("-site and -deployment are required")
+	}
+	if *dryRun {
+		return deleteDeploymentDryRun(c, *site, *deployment, *deleteObjects, *deleteRemote)
 	}
 	q := url.Values{}
 	q.Set("delete_objects", fmt.Sprint(*deleteObjects))
 	q.Set("delete_remote", fmt.Sprint(*deleteRemote))
 	return c.do(http.MethodDelete, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment)+"?"+q.Encode(), nil, "")
+}
+
+type deleteDeploymentPlanDeployment struct {
+	ID               string                                `json:"id"`
+	SiteID           string                                `json:"site_id"`
+	Status           string                                `json:"status"`
+	DeploymentTarget string                                `json:"deployment_target"`
+	Active           bool                                  `json:"active"`
+	Pinned           bool                                  `json:"pinned"`
+	FileCount        int                                   `json:"file_count,omitempty"`
+	ArtifactSHA256   string                                `json:"artifact_sha256,omitempty"`
+	ManifestKey      string                                `json:"manifest_key,omitempty"`
+	CloudflareStatic *rollbackPlanCloudflareStaticEvidence `json:"cloudflare_static,omitempty"`
+}
+
+type deleteDeploymentPlanOutput struct {
+	SiteID                 string   `json:"site_id"`
+	DeploymentID           string   `json:"deployment_id"`
+	Status                 string   `json:"status,omitempty"`
+	Target                 string   `json:"deployment_target,omitempty"`
+	Active                 bool     `json:"active"`
+	Pinned                 bool     `json:"pinned"`
+	DeleteObjects          bool     `json:"delete_objects"`
+	DeleteRemote           bool     `json:"delete_remote"`
+	SafeToRun              bool     `json:"safe_to_run"`
+	RemoteCleanupSupported bool     `json:"remote_cleanup_supported"`
+	RemoteCleanupBlockers  []string `json:"remote_cleanup_blockers,omitempty"`
+	Warnings               []string `json:"warnings,omitempty"`
+	NextCommands           []string `json:"next_commands,omitempty"`
+	Evidence               struct {
+		FileCount        int                                   `json:"file_count,omitempty"`
+		ArtifactSHA256   string                                `json:"artifact_sha256,omitempty"`
+		ManifestKey      string                                `json:"manifest_key,omitempty"`
+		CloudflareStatic *rollbackPlanCloudflareStaticEvidence `json:"cloudflare_static,omitempty"`
+	} `json:"evidence"`
+}
+
+func deleteDeploymentDryRun(c client, site, deployment string, deleteObjects, deleteRemote bool) error {
+	raw, err := c.doRaw(http.MethodGet, "/api/v1/sites/"+url.PathEscape(site)+"/deployments/"+url.PathEscape(deployment), nil, "")
+	if err != nil {
+		return err
+	}
+	var dep deleteDeploymentPlanDeployment
+	if err := json.Unmarshal(raw, &dep); err != nil {
+		return fmt.Errorf("parse deployment: %w", err)
+	}
+	if strings.TrimSpace(dep.SiteID) == "" {
+		dep.SiteID = site
+	}
+	if strings.TrimSpace(dep.ID) == "" {
+		dep.ID = deployment
+	}
+	plan := buildDeleteDeploymentPlan(dep, deleteObjects, deleteRemote)
+	return printJSON(mustJSON(plan))
+}
+
+func buildDeleteDeploymentPlan(dep deleteDeploymentPlanDeployment, deleteObjects, deleteRemote bool) deleteDeploymentPlanOutput {
+	target := deploymentTargetAlias(dep.DeploymentTarget)
+	if target == "" {
+		target = dep.DeploymentTarget
+	}
+	out := deleteDeploymentPlanOutput{
+		SiteID:        dep.SiteID,
+		DeploymentID:  dep.ID,
+		Status:        dep.Status,
+		Target:        target,
+		Active:        dep.Active,
+		Pinned:        dep.Pinned,
+		DeleteObjects: deleteObjects,
+		DeleteRemote:  deleteRemote,
+		SafeToRun:     true,
+	}
+	out.Evidence.FileCount = dep.FileCount
+	out.Evidence.ArtifactSHA256 = dep.ArtifactSHA256
+	out.Evidence.ManifestKey = dep.ManifestKey
+	out.Evidence.CloudflareStatic = dep.CloudflareStatic
+	out.RemoteCleanupSupported = deleteObjects && deleteRemote
+	if dep.Active {
+		out.SafeToRun = false
+		out.Warnings = append(out.Warnings, "active production deployment cannot be deleted")
+	}
+	if dep.Pinned {
+		out.SafeToRun = false
+		out.Warnings = append(out.Warnings, "pinned deployment cannot be deleted")
+	}
+	if target == "cloudflare_static" || target == "hybrid_edge" {
+		out.RemoteCleanupSupported = false
+		out.RemoteCleanupBlockers = cloudflareDeleteRemoteCleanupBlockers(target)
+		out.Warnings = append(out.Warnings, "delete-deployment removes Super CDN metadata only; Cloudflare Worker versions, custom domains and KV entries are not deleted")
+	}
+	if out.SafeToRun {
+		out.NextCommands = append(out.NextCommands, deleteDeploymentApplyCommand(dep.SiteID, dep.ID, deleteObjects, deleteRemote))
+	}
+	return out
+}
+
+func cloudflareDeleteRemoteCleanupBlockers(target string) []string {
+	blockers := []string{
+		"delete-deployment does not delete Cloudflare Worker versions, custom domains or KV entries",
+		"remote Cloudflare cleanup requires an operator to verify no active deployment, Worker route, custom domain or KV key still references the resources",
+	}
+	if target == "hybrid_edge" {
+		blockers = append(blockers, "hybrid_edge cleanup must verify both deployment and active KV manifest keys before deleting KV entries")
+	}
+	return blockers
+}
+
+func deleteDeploymentApplyCommand(site, deployment string, deleteObjects, deleteRemote bool) string {
+	parts := []string{
+		"supercdnctl delete-deployment",
+		"-site " + cliHintArg(site),
+		"-deployment " + cliHintArg(deployment),
+	}
+	if deleteObjects {
+		parts = append(parts, "-delete-objects")
+	}
+	if !deleteRemote {
+		parts = append(parts, "-delete-remote=false")
+	}
+	return strings.Join(parts, " ")
 }

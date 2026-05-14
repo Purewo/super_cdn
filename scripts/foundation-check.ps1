@@ -3,7 +3,12 @@ param(
   [string]$ServerUrl = "http://127.0.0.1:8080",
   [switch]$Full,
   [switch]$SkipWorker,
+  [switch]$SkipWorkerAudit,
+  [switch]$SkipOpenAPI,
+  [switch]$SkipActionlint,
+  [switch]$SkipGoVulnCheck,
   [switch]$SkipLinuxBuild,
+  [switch]$Race,
   [string]$LiveSiteUrl = "",
   [string]$SpaPath = ""
 )
@@ -62,6 +67,28 @@ function Read-AdminToken {
   return [string]$cfg.server.admin_token
 }
 
+function Assert-RaceToolchain {
+  $cgo = (& go env CGO_ENABLED).Trim()
+  if ($LASTEXITCODE -ne 0) {
+    throw "go env CGO_ENABLED failed"
+  }
+  if ($cgo -ne "1") {
+    throw "go test -race requires cgo. Set CGO_ENABLED=1 and install a C compiler, or omit -Race and rely on the CI Linux race gate."
+  }
+
+  $cc = (& go env CC).Trim()
+  if ($LASTEXITCODE -ne 0) {
+    throw "go env CC failed"
+  }
+  if ([string]::IsNullOrWhiteSpace($cc)) {
+    $cc = "gcc"
+  }
+  $ccCommand = ($cc -split "\s+")[0]
+  if (-not (Get-Command $ccCommand -ErrorAction SilentlyContinue)) {
+    throw "go test -race requires C compiler '$ccCommand' from go env CC. Install it, or omit -Race and rely on the CI Linux race gate."
+  }
+}
+
 Invoke-Step "gofmt check" {
   Push-Location $RepoRoot
   try {
@@ -75,10 +102,42 @@ Invoke-Step "gofmt check" {
   }
 }
 
+Invoke-Step "PowerShell syntax check" {
+  $errors = @()
+  Get-ChildItem -LiteralPath (Join-Path $RepoRoot "scripts") -Filter "*.ps1" | ForEach-Object {
+    $tokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+    foreach ($parseError in $parseErrors) {
+      $errors += "{0}:{1}:{2}: {3}" -f $_.FullName, $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.Message
+    }
+  }
+  if ($errors.Count -gt 0) {
+    $errors | ForEach-Object { Write-Host $_ }
+    throw "PowerShell syntax check failed"
+  }
+}
+
+if (-not $SkipActionlint) {
+  Invoke-External "GitHub Actions lint" "go" @("run", "github.com/rhysd/actionlint/cmd/actionlint@latest", ".github/workflows/ci.yml")
+}
 Invoke-External "go test ./..." "go" @("test", "./...")
+if ($Race) {
+  Invoke-Step "race toolchain check" {
+    Assert-RaceToolchain
+  }
+  Invoke-External "go test -race ./..." "go" @("test", "-race", "./...")
+}
 Invoke-External "go vet ./..." "go" @("vet", "./...")
+if (-not $SkipGoVulnCheck) {
+  Invoke-External "govulncheck ./..." "go" @("run", "golang.org/x/vuln/cmd/govulncheck@latest", "./...")
+}
 Invoke-External "build Windows server" "go" @("build", "-o", ".\bin\supercdn.exe", ".\cmd\supercdn")
 Invoke-External "build Windows CLI" "go" @("build", "-o", ".\bin\supercdnctl.exe", ".\cmd\supercdnctl")
+
+if (-not $SkipOpenAPI) {
+  Invoke-External "OpenAPI lint" "npx" @("--yes", "@redocly/cli", "lint", "api/openapi.yaml")
+}
 
 if (-not $SkipLinuxBuild) {
   Invoke-Step "build Linux amd64 binaries" {
@@ -103,6 +162,9 @@ if (-not $SkipLinuxBuild) {
 if (-not $SkipWorker) {
   Invoke-External "worker npm test" "npm" @("test") (Join-Path $RepoRoot "worker")
   Invoke-External "worker TypeScript check" "npx" @("tsc", "--noEmit") (Join-Path $RepoRoot "worker")
+  if (-not $SkipWorkerAudit) {
+    Invoke-External "worker npm audit" "npm" @("audit", "--registry=https://registry.npmjs.org", "--audit-level=high") (Join-Path $RepoRoot "worker")
+  }
 }
 
 $serverProcess = $null

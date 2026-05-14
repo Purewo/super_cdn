@@ -242,9 +242,17 @@ func (s *Server) handlePromoteSiteDeployment(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "deployment is not ready")
 		return
 	}
-	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic && !dep.Active {
-		writeError(w, http.StatusConflict, "cloudflare_static deployments cannot be promoted by metadata alone; redeploy the desired assets or use a Cloudflare Worker rollback flow")
-		return
+	if !dep.Active {
+		switch dep.DeploymentTarget {
+		case model.SiteDeploymentTargetCloudflareStatic:
+			s.auditRejectedMutation(r, "site.deployment.promote.rejected", "site:"+siteID+";deployment:"+deploymentID+";target:"+dep.DeploymentTarget+";reason:metadata_only_blocked")
+			writeError(w, http.StatusConflict, "cloudflare_static deployments cannot be promoted by metadata alone; redeploy the desired assets or use a Cloudflare Worker rollback flow")
+			return
+		case model.SiteDeploymentTargetHybridEdge:
+			s.auditRejectedMutation(r, "site.deployment.promote.rejected", "site:"+siteID+";deployment:"+deploymentID+";target:"+dep.DeploymentTarget+";reason:metadata_only_blocked")
+			writeError(w, http.StatusConflict, "hybrid_edge deployments cannot be promoted by metadata alone; rerun deploy-site -target hybrid_edge so Worker assets and the active KV manifest are republished together")
+			return
+		}
 	}
 	activated, err := s.db.ActivateSiteDeployment(r.Context(), siteID, deploymentID)
 	if err != nil {
@@ -268,14 +276,6 @@ func (s *Server) handleDeleteSiteDeployment(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotFound, "deployment not found")
 		return
 	}
-	if dep.Active {
-		writeError(w, http.StatusConflict, "active production deployment cannot be deleted")
-		return
-	}
-	if dep.Pinned {
-		writeError(w, http.StatusConflict, "pinned deployment cannot be deleted")
-		return
-	}
 	deleteObjects, err := queryBool(r, "delete_objects", false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -284,6 +284,24 @@ func (s *Server) handleDeleteSiteDeployment(w http.ResponseWriter, r *http.Reque
 	deleteRemote, err := queryBool(r, "delete_remote", true)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	dryRun, err := queryBool(r, "dry_run", false)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if dryRun {
+		view := s.siteDeploymentView(r.Context(), dep)
+		writeJSON(w, http.StatusOK, buildDeleteSiteDeploymentPlan(&view, deleteObjects, deleteRemote))
+		return
+	}
+	if dep.Active {
+		writeError(w, http.StatusConflict, "active production deployment cannot be deleted")
+		return
+	}
+	if dep.Pinned {
+		writeError(w, http.StatusConflict, "pinned deployment cannot be deleted")
 		return
 	}
 	result := &deleteSiteDeploymentResult{
@@ -316,13 +334,80 @@ func (s *Server) handleDeleteSiteDeployment(w http.ResponseWriter, r *http.Reque
 	}
 	result.DeletedDeployment = true
 	result.Deleted = true
-	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic {
-		result.Warning = "deleted Super CDN metadata only; Cloudflare Worker versions and custom domains are not deleted by this command"
+	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic || dep.DeploymentTarget == model.SiteDeploymentTargetHybridEdge {
+		result.Warning = "deleted Super CDN metadata only; Cloudflare Worker versions, custom domains and KV entries are not deleted by this command"
 	}
 	if !s.auditMutation(w, r, "site.deployment.delete", "site:"+siteID+";deployment:"+deploymentID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+type deleteSiteDeploymentPlanResult struct {
+	SiteID                 string   `json:"site_id"`
+	DeploymentID           string   `json:"deployment_id"`
+	Status                 string   `json:"status,omitempty"`
+	DeploymentTarget       string   `json:"deployment_target,omitempty"`
+	Active                 bool     `json:"active"`
+	Pinned                 bool     `json:"pinned"`
+	DryRun                 bool     `json:"dry_run"`
+	DeleteObjects          bool     `json:"delete_objects"`
+	DeleteRemote           bool     `json:"delete_remote"`
+	SafeToRun              bool     `json:"safe_to_run"`
+	RemoteCleanupSupported bool     `json:"remote_cleanup_supported"`
+	RemoteCleanupBlockers  []string `json:"remote_cleanup_blockers,omitempty"`
+	Warnings               []string `json:"warnings,omitempty"`
+	Evidence               struct {
+		FileCount        int                               `json:"file_count,omitempty"`
+		ArtifactSHA256   string                            `json:"artifact_sha256,omitempty"`
+		ManifestKey      string                            `json:"manifest_key,omitempty"`
+		CloudflareStatic *model.CloudflareStaticDeployment `json:"cloudflare_static,omitempty"`
+	} `json:"evidence"`
+}
+
+func buildDeleteSiteDeploymentPlan(dep *model.SiteDeployment, deleteObjects, deleteRemote bool) deleteSiteDeploymentPlanResult {
+	out := deleteSiteDeploymentPlanResult{
+		SiteID:                 dep.SiteID,
+		DeploymentID:           dep.ID,
+		Status:                 string(dep.Status),
+		DeploymentTarget:       dep.DeploymentTarget,
+		Active:                 dep.Active,
+		Pinned:                 dep.Pinned,
+		DryRun:                 true,
+		DeleteObjects:          deleteObjects,
+		DeleteRemote:           deleteRemote,
+		SafeToRun:              true,
+		RemoteCleanupSupported: deleteObjects && deleteRemote,
+	}
+	out.Evidence.FileCount = dep.FileCount
+	out.Evidence.ArtifactSHA256 = dep.ArtifactSHA256
+	out.Evidence.ManifestKey = dep.ManifestKey
+	out.Evidence.CloudflareStatic = dep.CloudflareStatic
+	if dep.Active {
+		out.SafeToRun = false
+		out.Warnings = append(out.Warnings, "active production deployment cannot be deleted")
+	}
+	if dep.Pinned {
+		out.SafeToRun = false
+		out.Warnings = append(out.Warnings, "pinned deployment cannot be deleted")
+	}
+	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic || dep.DeploymentTarget == model.SiteDeploymentTargetHybridEdge {
+		out.RemoteCleanupSupported = false
+		out.RemoteCleanupBlockers = cloudflareDeleteRemoteCleanupBlockers(dep.DeploymentTarget)
+		out.Warnings = append(out.Warnings, "delete-deployment removes Super CDN metadata only; Cloudflare Worker versions, custom domains and KV entries are not deleted")
+	}
+	return out
+}
+
+func cloudflareDeleteRemoteCleanupBlockers(target string) []string {
+	blockers := []string{
+		"delete-deployment does not delete Cloudflare Worker versions, custom domains or KV entries",
+		"remote Cloudflare cleanup requires an operator to verify no active deployment, Worker route, custom domain or KV key still references the resources",
+	}
+	if target == model.SiteDeploymentTargetHybridEdge {
+		blockers = append(blockers, "hybrid_edge cleanup must verify both deployment and active KV manifest keys before deleting KV entries")
+	}
+	return blockers
 }
 
 func (s *Server) createSiteDeploymentFromRequest(w http.ResponseWriter, r *http.Request, siteID, forcedEnvironment string, forcedPromote bool) (*model.SiteDeployment, deploySitePayload, error) {

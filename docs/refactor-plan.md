@@ -1,6 +1,6 @@
 # Super CDN Refactor Plan
 
-Last updated: 2026-05-14 Asia/Shanghai.
+Last updated: 2026-05-15 Asia/Shanghai.
 
 Baseline: `v0.4.0` is the current staged stable release. It freezes onboarding, diagnostics, cleanup and storage guardrails before the larger refactor.
 
@@ -13,14 +13,27 @@ Completed after `v0.4.0`:
 - Phase 3 API contract: `api/openapi.yaml` added and linked from `docs/cli-reference.md`.
 - Phase 4 versioned migrations: `schema_migrations` added, existing additive columns converted to named migrations, and old-DB upgrade tests added.
 - Phase 5 audit events: representative security and operational mutation paths write `audit_events`, with tests proving writes and secret redaction boundaries.
+- Phase 5 audit query follow-up: `GET /api/v1/audit-events` and `supercdnctl audit-log` expose workspace-scoped mutation audit events with action/resource filters; viewers are blocked and non-root users stay scoped to their workspace.
 - Phase 6 server extraction pass: `internal/server/server.go` is now a 170-line server skeleton containing construction, lifecycle, HTTP entry and route registration. Auth, API access, response helpers, jobs, uploads, resource services, Cloudflare/R2 services, site-domain services, site services and shared helpers live in separate files.
 - Phase 6 CLI extraction pass: `cmd/supercdnctl/main.go` is now a 285-line dispatcher; client/config, core commands, provider/IPFS commands, Cloudflare/R2 ops, Cloudflare Static, resources, object ops, diagnostics, probes, sites, buckets, GC and helper code live in separate files.
+- Phase 6 package-boundary follow-up: deployment target normalization and CLI alias handling now live in `internal/deploymenttarget`, shared by config, server and `supercdnctl`.
+- Operations maturity follow-up: `cdn-doctor` and `site-doctor` now emit `recommendations[]` with explicit next actions for health checks, replica repair, manifest refresh and manual line-switch review, without performing automatic traffic switching.
+- Operations maturity follow-up: `supercdnctl switch-plan` now builds a read-only manual switching plan from `cdn-doctor` or `site-doctor`, reporting `safe_to_switch`, ready candidate counts, risks, recommendations and next commands.
+- Operations maturity follow-up: `supercdnctl switch-apply` now provides an explicit, audited manual switch for a single bucket object or site deployment file by changing `primary_target` to a ready replica. It defaults to dry-run, requires `-confirm switch` for writes, returns a rollback command and refuses routing-policy or Cloudflare Static cases where metadata-only switching would not control real traffic. Rejected switch attempts write `.switch.rejected` audit events for after-action review.
+- Rollback safety follow-up: `promote-deployment` now rejects non-active `hybrid_edge` deployments as well as `cloudflare_static`, because metadata-only promotion does not republish Worker assets or the active KV manifest. Origin-assisted deployments remain metadata-promotable. Rejected Cloudflare-backed metadata promote attempts write `site.deployment.promote.rejected` audit events for after-action review.
+- Rollback planning follow-up: `supercdnctl rollback-plan` is a read-only preflight for a target deployment. It returns `metadata_promote` for ready `origin_assisted` rollbacks, and `redeploy_cloudflare_static` / `redeploy_hybrid_edge` plans when Cloudflare assets or active KV state must be republished instead of metadata-promoted. Plans include evidence such as artifact hash, manifest key, Worker name, version id, assets hash, domains and verification status when those fields are available.
+- API contract follow-up: OpenAPI now models `CDNDoctorReport`, `SiteDoctorReport`, route explanation, edge routes, route candidates and `DoctorRecommendation` instead of leaving the doctor endpoints as unstructured `AnyObject` responses.
+- CI/security follow-up: GitHub Actions and `scripts/foundation-check.ps1` now run `govulncheck`, GitHub Actions workflow linting, Redocly OpenAPI lint and Worker dependency audit as normal release gates. After pushing, `scripts/github-actions-status.ps1 -Wait -IncludeJobs` checks the GitHub Actions run for the current branch/head SHA and includes job/step summaries on failure. GitHub Actions also runs `go test -race ./...` on Ubuntu so race coverage is not blocked by this Windows host's C toolchain. `go.mod` is pinned to Go `1.25.10` so the vulnerability scan uses the patched standard library.
 
 Next refactor entry point:
 
+- Use `docs/maturity-audit.md` as the current evidence checklist before claiming the project is mature.
+- Use `docs/policy-switching-boundary.md` before adding any policy-level switch apply/rollback write path.
+- Use `docs/cloudflare-rollback-boundary.md` before adding any Cloudflare Static or hybrid-edge rollback write path.
 - Phase 6 large-file reduction is substantially complete. Continue only with narrow package-boundary work where a stable boundary is obvious.
 - Do not move behavior again just to reduce line counts; next work should be focused tests, docs alignment, or package extraction with clear ownership.
 - CLI cleanup is mostly complete for now; only revisit it for command-specific tests, help text fixes or smaller ownership tweaks.
+- Manual switching now has a safe first apply path for non-policy, non-resource-failover primary-target cases. `switch-plan` separates candidate readiness from apply support so policy/failover routes do not look directly switchable. Metadata-only rollback is blocked for Cloudflare-backed site targets where it would not move real traffic, and `rollback-plan` now gives operators a read-only plan before they attempt recovery. Further switching work should focus on policy-level apply/rollback or full Cloudflare Worker rollback only when the real traffic boundary can be verified end to end.
 - Do not restart at CI/OpenAPI/migrations/audit unless a regression appears.
 
 ## Goal
@@ -61,9 +74,10 @@ The refactor should preserve the `v0.4.0` behavior while making future feature w
 Do this before moving code.
 
 1. Add GitHub Actions CI:
-   - Go: `gofmt -l cmd internal`, `go test ./...`, `go vet ./...`, `go build ./cmd/...`.
-   - Worker: `npm ci`, `npm test`, `npx tsc --noEmit`.
-   - Optional dependency checks: `npm audit --registry=https://registry.npmjs.org --audit-level=high`; add `govulncheck` if the action can install it reliably.
+   - Go: `gofmt -l cmd internal`, `go test ./...`, Linux `go test -race ./...`, `go vet ./...`, `go build ./cmd/...`.
+   - Go security: `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`.
+   - API contract: `npx --yes @redocly/cli lint api/openapi.yaml`.
+   - Worker: `npm ci`, `npm test`, `npx tsc --noEmit`, `npm audit --registry=https://registry.npmjs.org --audit-level=high`.
 2. Add a short `docs/release-checklist.md` that mirrors the `v0.4.0` release checks.
 3. Keep `scripts/foundation-check.ps1` as the Windows local equivalent.
 4. Run all checks before and after each extraction slice.
@@ -260,24 +274,21 @@ Run after every phase:
 gofmt -l cmd internal
 go test ./...
 go vet ./...
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 go build ./cmd/...
+npx --yes @redocly/cli lint api/openapi.yaml
 cd worker
 npm test
 npx tsc --noEmit
+npm audit --registry=https://registry.npmjs.org --audit-level=high
 cd ..
 git diff --check
-```
-
-Before a release:
-
-```powershell
-npm audit --registry=https://registry.npmjs.org --audit-level=high
 ```
 
 If available:
 
 ```powershell
-govulncheck ./...
+.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race
 ```
 
 ## Stop Conditions

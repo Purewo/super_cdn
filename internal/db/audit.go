@@ -3,9 +3,17 @@ package db
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"supercdn/internal/model"
 )
+
+type AuditEventFilter struct {
+	WorkspaceID      string
+	Action           string
+	ResourceContains string
+	Limit            int
+}
 
 func (d *DB) CreateAuditEvent(ctx context.Context, event model.AuditEvent) (*model.AuditEvent, error) {
 	if event.WorkspaceID == "" {
@@ -37,6 +45,11 @@ func (d *DB) GetAuditEvent(ctx context.Context, id int64) (*model.AuditEvent, er
 }
 
 func (d *DB) AuditEvents(ctx context.Context, workspaceID string, limit int) ([]model.AuditEvent, error) {
+	return d.AuditEventsFiltered(ctx, AuditEventFilter{WorkspaceID: workspaceID, Limit: limit})
+}
+
+func (d *DB) AuditEventsFiltered(ctx context.Context, filter AuditEventFilter) ([]model.AuditEvent, error) {
+	limit := filter.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
@@ -44,9 +57,21 @@ func (d *DB) AuditEvents(ctx context.Context, workspaceID string, limit int) ([]
 		SELECT id, workspace_id, user_id, action, resource, created_at
 		FROM audit_events`
 	args := []any{}
-	if workspaceID != "" {
-		query += ` WHERE workspace_id = ?`
+	var clauses []string
+	if workspaceID := strings.TrimSpace(filter.WorkspaceID); workspaceID != "" {
+		clauses = append(clauses, `workspace_id = ?`)
 		args = append(args, workspaceID)
+	}
+	if action := strings.TrimSpace(filter.Action); action != "" {
+		clauses = append(clauses, `action = ?`)
+		args = append(args, action)
+	}
+	if resource := strings.TrimSpace(filter.ResourceContains); resource != "" {
+		clauses = append(clauses, `resource LIKE ?`)
+		args = append(args, "%"+resource+"%")
+	}
+	if len(clauses) > 0 {
+		query += ` WHERE ` + strings.Join(clauses, ` AND `)
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)

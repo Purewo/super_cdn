@@ -46,6 +46,8 @@ func main() {
 		err = whoami(c, args[1:])
 	case "doctor":
 		err = doctor(c, args[1:])
+	case "audit-log":
+		err = auditLog(c, args[1:])
 	case "invite-user":
 		err = inviteUser(c, args[1:])
 	case "list-users":
@@ -110,6 +112,8 @@ func main() {
 		err = publishEdgeManifest(c, args[1:])
 	case "refresh-edge-manifest":
 		err = refreshEdgeManifest(c, args[1:])
+	case "rollback-plan":
+		err = rollbackPlan(c, args[1:])
 	case "publish-cloudflare-static":
 		err = publishCloudflareStatic(args[1:])
 	case "promote-deployment":
@@ -134,6 +138,10 @@ func main() {
 		err = cdnDoctor(c, args[1:])
 	case "site-doctor":
 		err = siteDoctor(c, args[1:])
+	case "switch-plan":
+		err = switchPlan(c, args[1:])
+	case "switch-apply":
+		err = switchApply(c, args[1:])
 	case "health-check":
 		err = healthCheck(c, args[1:])
 	case "e2e-probe":
@@ -198,6 +206,7 @@ func usage() {
   supercdnctl [global flags] login -invite-token sci_xxx
   supercdnctl [global flags] whoami
   supercdnctl [global flags] doctor
+  supercdnctl [global flags] audit-log -limit 50
   supercdnctl [global flags] invite-user -name alice -role maintainer
   supercdnctl [global flags] list-users
   supercdnctl [global flags] revoke-token -id tok_xxx
@@ -233,8 +242,10 @@ func usage() {
   supercdnctl [global flags] export-edge-manifest -site blog -deployment dpl-abc -out .\edge-manifest.json
   supercdnctl [global flags] publish-edge-manifest -site blog -deployment dpl-abc -kv-namespace supercdn-edge-manifest -dry-run
   supercdnctl [global flags] refresh-edge-manifest -site blog -kv-namespace supercdn-edge-manifest -spa-path /movie/123
+  supercdnctl [global flags] rollback-plan -site blog -deployment dpl-abc
   supercdnctl publish-cloudflare-static -site blog -dir ./dist -domains blog-static-test.example.com -dry-run=false
   supercdnctl [global flags] promote-deployment -site blog -deployment dpl-abc
+  supercdnctl [global flags] delete-deployment -site blog -deployment dpl-abc -dry-run
   supercdnctl [global flags] delete-deployment -site blog -deployment dpl-abc
   supercdnctl [global flags] gc -dry-run -older-than 1h
   supercdnctl [global flags] gc -dry-run=false -older-than 1h
@@ -247,6 +258,10 @@ func usage() {
   supercdnctl [global flags] route-explain -site cyberstream -path /assets/app.js -country CN
   supercdnctl [global flags] cdn-doctor -bucket movie-posters -path posters/poster.jpg
   supercdnctl [global flags] site-doctor -site cyberstream -path /assets/app.js
+  supercdnctl [global flags] switch-plan -bucket movie-posters -path posters/poster.jpg -country CN
+  supercdnctl [global flags] switch-plan -site cyberstream -path /assets/app.js -country CN
+  supercdnctl [global flags] switch-apply -bucket movie-posters -path posters/poster.jpg -target repo_backup -dry-run=false -confirm switch
+  supercdnctl [global flags] switch-apply -site cyberstream -path /assets/app.js -target repo_backup -dry-run=false -confirm switch
   supercdnctl [global flags] health-check -libraries repo_china_all
   supercdnctl [global flags] e2e-probe -profile china_all
   supercdnctl [global flags] create-bucket -slug movie-posters -name 影视海报�?-profile china_all -types image

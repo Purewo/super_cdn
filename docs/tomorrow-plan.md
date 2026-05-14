@@ -1,6 +1,6 @@
 # Super CDN Handoff
 
-Last updated: 2026-05-14 Asia/Shanghai.
+Last updated: 2026-05-15 Asia/Shanghai.
 
 ## Current State
 
@@ -8,9 +8,21 @@ The service is still in development mode. There is no need to preserve compatibi
 
 v0.1 and v0.2.0 are closed as stable internal milestones. The `v0.1.x` line remains feature-frozen, and `v0.2.x` should only receive bug fixes, documentation, operational hardening and regression coverage around IPFS/Web hosting. New product work starts from `docs/v0.3-roadmap.md`, with multi-resource-library scheduling, replica repair, smart routing and explicit static-resource failover as the next major feature surface.
 
-Next-session priority note: continue from the post-`v0.4.0` refactor audit in [docs/refactor-plan.md](refactor-plan.md). Phase 0 through Phase 6 are now done on `main`: CI/release checklist, OpenAPI, versioned migrations, audit-event writes, CLI dispatcher cleanup and server skeleton extraction. Do not restart from Phase 0; only continue with narrow package-boundary cleanup when the boundary and tests are clear.
+Next-session priority note: continue from the post-`v0.4.0` refactor audit in [docs/refactor-plan.md](refactor-plan.md), the evidence checklist in [docs/maturity-audit.md](maturity-audit.md), the policy switching boundary in [docs/policy-switching-boundary.md](policy-switching-boundary.md), and the Cloudflare rollback boundary in [docs/cloudflare-rollback-boundary.md](cloudflare-rollback-boundary.md). Phase 0 through Phase 6 are now done on `main`: CI/release checklist, OpenAPI, versioned migrations, audit-event writes, CLI dispatcher cleanup and server skeleton extraction. The first narrow package-boundary cleanup is also done: deployment target normalization is centralized in `internal/deploymenttarget`. Do not restart from Phase 0; only continue with narrow package-boundary cleanup when the boundary and tests are clear.
 
 Web hosting boundary note: the current product rule is recorded in `docs/web-hosting-boundaries.md`. Go entry delivery is for tests/integration/compatibility; preferred Web hosting is Cloudflare entry plus non-entry resources on AList/OpenList, Cloudflare-native static assets or IPFS/Pinata. R2 remains a CDN/object acceleration line; R2-backed Web hosting is legacy compatibility and not the mainstream path. Static-resource failover must never fall back to Go.
+
+Operator maturity note: `cdn-doctor` and `site-doctor` now include `recommendations[]` so support reports say whether to run health checks, repair replicas, refresh the edge manifest, redeploy Cloudflare Static assets, or manually review line switching. `supercdnctl switch-plan` consumes those reports and produces a read-only manual switching plan with candidate counts, risks and next commands; it separates `candidate_ready` from `apply_supported` so routing-policy/resource-failover routes are not presented as directly switchable. `supercdnctl switch-apply` is the first explicit apply path: it can switch one bucket object or site deployment file to a ready `primary_target`, defaults to dry-run, requires `-confirm switch`, audits writes and rejected attempts, returns a rollback command, and refuses routing-policy/resource-failover/Cloudflare Static cases where metadata-only switching would not control real traffic. Super CDN still does not silently switch cross-line traffic for the user.
+
+Rollback safety note: `promote-deployment` is now intentionally metadata-only and only suitable for targets where metadata actually controls traffic, such as origin-assisted deployments. Non-active `cloudflare_static` and `hybrid_edge` deployments are rejected because rollback must republish Cloudflare Worker assets and/or the active KV manifest together with Super CDN metadata, and those rejected metadata-promote attempts write `site.deployment.promote.rejected` audit events. Use `supercdnctl rollback-plan -site <site> -deployment <deployment>` before recovery; it is read-only and returns either a safe metadata promote plan or a redeploy-required Cloudflare/hybrid plan, plus evidence such as artifact hash, manifest key, Worker name, version id, assets hash, domains and verification status when available.
+
+API contract note: the diagnostic route surface is now explicitly described in OpenAPI. `cdn-doctor`, `site-doctor` and `route-explain` no longer rely on generic `AnyObject` schemas for their primary response bodies.
+
+Current maturity snapshot: local foundation is green, but the overall maturity goal is not complete until the current tree is committed, pushed, and observed with `scripts/github-actions-status.ps1 -Wait -IncludeJobs` on a clean worktree. The existing remote `main` HEAD has a failed CI run in the Go/Test step, so do not treat remote CI as green until a new pushed run succeeds. `rollback-plan` now emits post-redeploy `probe-site` commands for Cloudflare Static and hybrid-edge recovery, and `delete-deployment -dry-run` / API `dry_run=true` expose Cloudflare remote cleanup blockers instead of implying provider resources are removed.
+
+Release gate note: CI and `scripts/foundation-check.ps1` now include PowerShell script syntax validation, `govulncheck`, GitHub Actions workflow linting, Redocly OpenAPI lint and Worker dependency audit as first-class checks. After pushing, run `.\scripts\github-actions-status.ps1 -Wait -IncludeJobs` to verify the GitHub Actions run for the current branch/head SHA and include job/step summaries on failure. CI also runs `go test -race ./...` on Ubuntu; local Windows race coverage is available through `.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race` only when a working C toolchain is installed. The module is pinned to Go `1.25.10` because older `go1.25.1` standard-library scans reported vulnerabilities. On this machine, use the temporary `http://127.0.0.1:10808` proxy for Go/npm downloads if direct access times out; if `proxy.golang.org` returns EOF during `govulncheck`, set `$env:GOPROXY="https://goproxy.cn,direct"` in that shell only.
+
+Audit note: mutation audit events are now queryable through `GET /api/v1/audit-events` and `supercdnctl audit-log`. Root can query all workspaces or filter by workspace; owner/maintainer tokens are scoped to their own workspace; viewer tokens are blocked. Use `-action`, `-resource` and `-limit` to inspect deployment, bucket, switching and auth operations without exposing tokens or signed URLs.
 
 GitHub operation note: for GitHub network operations such as `git push`, `git fetch`, tag push and release API calls, prefer using the local proxy at `http://127.0.0.1:10808` when direct access is slow or reset. Do not configure a permanent global, system or repository Git proxy. Use per-command temporary proxy flags instead, for example `git -c http.proxy=http://127.0.0.1:10808 -c https.proxy=http://127.0.0.1:10808 push origin main`.
 
@@ -24,8 +36,9 @@ Immediate execution order:
 
 1. Start with a completion audit against [docs/refactor-plan.md](refactor-plan.md) and the current tree.
 2. Keep `internal/server/server.go` as the server skeleton and `cmd/supercdnctl/main.go` as the CLI dispatcher.
-3. Further refactor slices should be narrow package-boundary extractions with focused tests, not broad line-count work.
-4. Update `api/openapi.yaml` and audit coverage in the same patch as any API mutation change.
+3. Further refactor slices should be narrow package-boundary extractions with focused tests, not broad line-count work. The deployment-target boundary is already extracted.
+4. Continue improving operator workflows around explicit user-confirmed switching, rollback and health visibility. `switch-plan` and the first safe non-policy/non-failover `switch-apply` path are done; future work should focus on policy-level apply/rollback or Cloudflare/hybrid-edge rollback only when confirmation, audit and real traffic boundaries are clear.
+5. Update `api/openapi.yaml` and audit coverage in the same patch as any API mutation change.
 
 Do not start with UI, routing redesign, or new cleanup semantics.
 
@@ -33,7 +46,7 @@ Refactor success criteria:
 
 - `internal/server/server.go` becomes construction, middleware, route registration and shared server plumbing.
 - `cmd/supercdnctl/main.go` becomes global flag parsing and command dispatch.
-- CI enforces the current local release checks.
+- CI enforces the current local release checks, including Go race testing, Go vulnerability scanning, OpenAPI lint and Worker audit.
 - OpenAPI, versioned migrations and audit-event wiring stay aligned with future code changes.
 
 ## Previous Cycle: Real User Onboarding Hardening
@@ -311,7 +324,7 @@ cloudflare_static cache headers: `/` returns `Cache-Control: public, max-age=0, 
 cyberstream cloudflare_static milestone: deployment dpl-di55wdod7eqh returns https://cyberstream-static-test.qwk.ccwu.cc/ with direct JS/CSS, immutable asset cache, SPA fallback for /movie/123, and browser screenshots in data/cyberstream-static-canary-home.png plus data/cyberstream-static-canary-spa.png
 overseas default cloudflare_static milestone: deployment dpl-di5fkfplv0yg returns https://cyberstream-default-root-canary.qwk.ccwu.cc/ from a `deploy-site -profile overseas` command without `-target` or `-domains`; probe-site passed for HTML, JS/CSS, immutable asset cache, and SPA fallback /movie/123.
 cloudflare_static readiness guard: `deploy-site` now defaults to `-static-verify wait`, probing each custom domain before writing the Super CDN active deployment record. The guard catches TLS/DNS/404/MIME/cache/SPA issues and supports `warn` or `none` for diagnostics. The probe uses `1.1.1.1:53` by default after a live local-DNS cache miss made a newly proxied Cloudflare custom domain look like the old wildcard origin.
-cloudflare_static rollback guard: normal `promote-deployment` now rejects non-active Cloudflare Static deployments instead of doing metadata-only rollback. `delete-deployment` on Cloudflare Static returns a warning that it removes Super CDN metadata only and does not delete Worker versions/custom domains.
+cloudflare_static/hybrid_edge rollback guard: normal `promote-deployment` now rejects non-active Cloudflare Static and hybrid_edge deployments instead of doing metadata-only rollback. `delete-deployment` on Cloudflare Static or hybrid_edge returns a warning that it removes Super CDN metadata only and does not delete Worker versions/custom domains/KV entries.
 hybrid IPFS canary: `cyberstream-ipfs-0501.qwk.ccwu.cc`, deployment `dpl-di6slq3zv3ja`, serves entry HTML and SPA fallback from Cloudflare Static and JS through Worker/KV to Pinata/IPFS gateway. `probe-site -require-edge-static-html -require-edge-manifest-assets` passed.
 smart-routing canary: `cyberstream-smart-single-0501.qwk.ccwu.cc`, deployment `dpl-di6v613q8rne`, serves entry HTML and SPA fallback from Cloudflare Static and routes JS through a smart manifest with `repo_china_mobile` plus `ipfs_pinata` candidates. When AList health is OK, Cloudflare region routing can select the mobile AList candidate; when recent AList health is failed, refreshed manifests skip that candidate and degrade to the healthy IPFS candidate with warnings.
 overseas CDN bucket smoke: `create-cdn-bucket` + `upload-bucket -warmup` created `overseas-r2-smoke-20260430001954`, defaulted to `route_profile=overseas_r2`, stored the object on `overseas_accel`, returned `public_url` https://qwk.ccwu.cc/a/overseas-r2-smoke-20260430001954/docs/readme-20260430001954.md and `cdn_url` https://overseas-accel.r2.qwk.ccwu.cc/assets/buckets/overseas-r2-smoke-20260430001954/documents/2026/04/ed/ed45ae53f5b24487025f6ba2cf106496f9401009a48547e7151499e01520f539.md. Warmup HEAD returned 200; public `/a/...` HEAD returns 302 to R2; direct R2 HEAD returns 200 with `Cache-Control: public, max-age=31536000, immutable`.

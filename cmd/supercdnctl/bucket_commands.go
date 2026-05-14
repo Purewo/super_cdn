@@ -299,12 +299,12 @@ func appendCommandHints(existing []string, additions ...string) []string {
 func cliHintArg(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return `""`
+		return "''"
 	}
-	if strings.ContainsAny(value, " \t\r\n\"") {
-		return strconv.Quote(value)
+	if !strings.ContainsAny(value, " \t\r\n'\"`$&|;()<>[]{}") {
+		return value
 	}
-	return value
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 type bucketDirUploadPlan struct {

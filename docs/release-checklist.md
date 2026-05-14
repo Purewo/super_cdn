@@ -15,9 +15,13 @@ Run from the repository root:
 
 ```powershell
 gofmt -l cmd internal
+powershell -NoProfile -Command "$errors=@(); Get-ChildItem scripts -Filter *.ps1 | ForEach-Object { $tokens=$null; $parseErrors=$null; [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$parseErrors) | Out-Null; $errors += $parseErrors }; if ($errors.Count -gt 0) { $errors; exit 1 }"
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/ci.yml
 go test ./...
 go vet ./...
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 go build ./cmd/...
+npx --yes @redocly/cli lint api/openapi.yaml
 git diff --check
 ```
 
@@ -37,11 +41,19 @@ Run the Windows foundation check where local config permits:
 .\scripts\foundation-check.ps1 -SkipLinuxBuild
 ```
 
-If available in the environment, also run:
+`foundation-check.ps1` includes PowerShell script syntax validation and GitHub Actions workflow linting by default. If module download access is temporarily unavailable and the workflow file was not touched, use `-SkipActionlint` and record that static CI validation was skipped.
+
+To run only the workflow lint:
 
 ```powershell
-govulncheck ./...
-go test -race ./...
+$env:GOPROXY = "https://goproxy.cn,direct"
+go run github.com/rhysd/actionlint/cmd/actionlint@latest .github/workflows/ci.yml
+```
+
+CI runs the Go race suite on Linux. If the local environment has a working C toolchain, run the same race check explicitly:
+
+```powershell
+.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race
 ```
 
 If `go test -race` cannot run because the Windows host lacks a working C toolchain, record it as unverified instead of passed.
@@ -56,8 +68,16 @@ If `go test -race` cannot run because the Windows host lacks a working C toolcha
    ```
 
 3. Push the branch and tag.
-4. Create the GitHub Release with the validated release notes.
-5. Verify the GitHub Release page contains the expected tag, title, body, and commit.
+4. Observe GitHub Actions for the pushed commit:
+
+   ```powershell
+   .\scripts\github-actions-status.ps1 -Wait -IncludeJobs
+   ```
+
+   The script checks the current branch and `HEAD` SHA by default. It exits non-zero if the worktree is dirty, if `HEAD` is not the current remote branch SHA, if no run exists for that commit, if a run is still pending after the timeout, or if any matching run did not conclude with `success`. `-IncludeJobs` adds job/step summaries to the JSON so a failed gate points at the failing job without opening the browser first. Use `-AllowDirty` or `-AllowUnpushed` only for diagnostics when you explicitly know the local changes or local commit are not part of the release candidate being checked.
+
+5. Create the GitHub Release with the validated release notes.
+6. Verify the GitHub Release page contains the expected tag, title, body, and commit.
 
 If GitHub access is unstable on this machine, use the local proxy:
 
@@ -65,7 +85,17 @@ If GitHub access is unstable on this machine, use the local proxy:
 git -c http.proxy=http://127.0.0.1:10808 -c https.proxy=http://127.0.0.1:10808 push origin main --tags
 ```
 
+If Go module downloads fail against `proxy.golang.org` while running `govulncheck`, set a temporary module proxy in the current shell only:
+
+```powershell
+$env:GOPROXY = "https://goproxy.cn,direct"
+```
+
+If `npm audit` fails with a TLS socket disconnect while `HTTP_PROXY` / `HTTPS_PROXY` points at `127.0.0.1:10808`, retry without those npm proxy environment variables; direct access to `registry.npmjs.org` may be more reliable on this machine.
+
 For GitHub REST release creation, use `git credential fill` for the token and send the release body as raw UTF-8 text without BOM.
+
+If the Actions status check hits anonymous API rate limits, set a temporary `GITHUB_TOKEN` in the current shell before rerunning `github-actions-status.ps1`.
 
 ## Post-Release
 

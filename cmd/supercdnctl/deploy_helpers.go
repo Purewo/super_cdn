@@ -1,6 +1,10 @@
 package main
 
-import "strings"
+import (
+	"strings"
+
+	"supercdn/internal/deploymenttarget"
+)
 
 func cleanWorkerName(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
@@ -21,17 +25,7 @@ func cleanWorkerName(value string) string {
 }
 
 func deploymentTargetAlias(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "cloudflare", "cloudflare_static", "workers_static", "workers_assets", "pages":
-		return "cloudflare_static"
-	case "hybrid", "hybrid_edge", "edge":
-		return "hybrid_edge"
-	case "origin", "go_origin", "origin_assisted":
-		return "origin_assisted"
-	default:
-		return value
-	}
+	return deploymenttarget.Alias(value)
 }
 
 func extractCloudflareVersionID(output string) string {

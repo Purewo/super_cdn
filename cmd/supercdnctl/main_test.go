@@ -101,6 +101,38 @@ func TestDoctorCallsAPI(t *testing.T) {
 	}
 }
 
+func TestAuditLogCallsAPI(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/audit-events" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if got := r.URL.Query().Get("limit"); got != "25" {
+			t.Fatalf("limit = %q", got)
+		}
+		if got := r.URL.Query().Get("action"); got != "site.create" {
+			t.Fatalf("action = %q", got)
+		}
+		if got := r.URL.Query().Get("resource"); got != "site:demo" {
+			t.Fatalf("resource = %q", got)
+		}
+		if got := r.URL.Query().Get("workspace_id"); got != "default" {
+			t.Fatalf("workspace_id = %q", got)
+		}
+		_, _ = w.Write([]byte(`{"events":[{"id":1,"workspace_id":"default","action":"site.create","resource":"site:demo"}],"limit":25}`))
+	}))
+	defer srv.Close()
+
+	err := auditLog(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-limit", "25", "-workspace", "default", "-action", "site.create", "-resource", "site:demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("audit-log API was not called")
+	}
+}
+
 func TestCDNDoctorCallsAPI(t *testing.T) {
 	var saw bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,6 +191,490 @@ func TestSiteDoctorCallsAPI(t *testing.T) {
 	}
 	if !saw {
 		t.Fatal("site-doctor API was not called")
+	}
+}
+
+func TestSwitchPlanBuildsBucketPlanFromCDNDoctor(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/asset-buckets/downloads/doctor" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if got := r.URL.Query().Get("path"); got != "release/app.zip" {
+			t.Fatalf("path = %q", got)
+		}
+		if got := r.URL.Query().Get("country"); got != "CN" {
+			t.Fatalf("country = %q", got)
+		}
+		_, _ = w.Write([]byte(`{
+			"status":"ok",
+			"path":"release/app.zip",
+			"checks":[{"name":"selection","status":"ok"}],
+			"selection":{"target":"backup","reason":"region_fallback:china"},
+			"candidates":[
+				{"target":"edge","status":"ready"},
+				{"target":"backup","status":"ready","selected":true}
+			],
+			"recommendations":[{"action":"manual_switch_available","level":"info","summary":"review candidates"}],
+			"next_commands":["supercdnctl routing-policy-status -policy global_smart"]
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan switchPlanOutput
+	out := captureStdout(t, func() {
+		if err := switchPlan(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-bucket", "downloads", "-path", "release/app.zip", "-country", "CN"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("switch-plan did not call cdn doctor")
+	}
+	if !plan.SafeToSwitch || plan.Mode != "bucket" || plan.ReadyCandidates != 2 || plan.SelectedTarget != "backup" {
+		t.Fatalf("unexpected switch plan: %+v", plan)
+	}
+	if !plan.CandidateReady || !plan.ApplySupported || plan.ApplyReason != "" {
+		t.Fatalf("unexpected apply support: %+v", plan)
+	}
+}
+
+func TestSwitchPlanSeparatesPolicyReadinessFromApplySupport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/asset-buckets/downloads/doctor" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{
+			"status":"ok",
+			"path":"release/app.zip",
+			"route_profile":{"name":"smart","routing_policy":"global_smart"},
+			"checks":[{"name":"selection","status":"ok"}],
+			"selection":{"target":"backup","reason":"region_balance:CN"},
+			"candidates":[
+				{"target":"edge","status":"ready"},
+				{"target":"backup","status":"ready","selected":true}
+			]
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan switchPlanOutput
+	out := captureStdout(t, func() {
+		if err := switchPlan(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-bucket", "downloads", "-path", "release/app.zip"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.CandidateReady || plan.ApplySupported || plan.SafeToSwitch {
+		t.Fatalf("expected ready candidates but unsupported apply: %+v", plan)
+	}
+	if !strings.Contains(plan.ApplyReason, "routing_policy") || len(plan.Risks) == 0 {
+		t.Fatalf("missing apply reason/risk: %+v", plan)
+	}
+	if len(plan.NextCommands) != 1 || !strings.Contains(plan.NextCommands[0], "routing-policy-status -policy global_smart") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+}
+
+func TestSwitchPlanRejectsResourceFailoverApplySupport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/cyberstream/doctor" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{
+			"status":"ok",
+			"path":"/assets/app.js",
+			"checks":[{"name":"route","status":"ok"}],
+			"route":{
+				"resource_failover":true,
+				"selection":{"target":"edge","reason":"failover"},
+				"candidates":[
+					{"target":"edge","status":"ready"},
+					{"target":"backup","status":"ready"}
+				]
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan switchPlanOutput
+	out := captureStdout(t, func() {
+		if err := switchPlan(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "cyberstream", "-path", "/assets/app.js"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.CandidateReady || plan.ApplySupported || plan.SafeToSwitch {
+		t.Fatalf("expected ready candidates but unsupported resource_failover apply: %+v", plan)
+	}
+	if !strings.Contains(plan.ApplyReason, "resource_failover") {
+		t.Fatalf("apply_reason = %q", plan.ApplyReason)
+	}
+	if len(plan.NextCommands) != 1 || !strings.Contains(plan.NextCommands[0], "route-explain -site cyberstream -path /assets/app.js") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+}
+
+func TestSwitchPlanReportsSiteRisksFromSiteDoctor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/cyberstream/doctor" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if got := r.URL.Query().Get("deployment"); got != "dpl-abc" {
+			t.Fatalf("deployment = %q", got)
+		}
+		_, _ = w.Write([]byte(`{
+			"status":"warning",
+			"path":"/assets/app.js",
+			"checks":[{"name":"route","status":"warning"}],
+			"route":{
+				"selection":{"target":"edge","reason":"fallback_order"},
+				"candidates":[
+					{"target":"edge","status":"ready"},
+					{"target":"backup","status":"skipped","reason":"skipped by health: failed"}
+				]
+			},
+			"recommendations":[{"action":"manual_switch_not_ready","level":"warning","summary":"backup candidates are not ready"}]
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan switchPlanOutput
+	out := captureStdout(t, func() {
+		if err := switchPlan(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "cyberstream", "-path", "/assets/app.js", "-deployment", "dpl-abc"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.SafeToSwitch || plan.ReadyCandidates != 1 || len(plan.Risks) == 0 {
+		t.Fatalf("expected risky switch plan: %+v", plan)
+	}
+}
+
+func TestSwitchApplyCallsBucketPrimaryTargetAPI(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/asset-buckets/downloads/objects/primary-target" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		var body map[string]any
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["path"] != "release/app.zip" || body["target"] != "backup" || body["expected_current_target"] != "edge" || body["confirm"] != "switch" {
+			t.Fatalf("unexpected body: %+v", body)
+		}
+		if body["dry_run"] != false {
+			t.Fatalf("dry_run = %#v", body["dry_run"])
+		}
+		_, _ = w.Write([]byte(`{"status":"switched","mode":"bucket","resource":"downloads","path":"release/app.zip","previous_target":"edge","target":"backup"}`))
+	}))
+	defer srv.Close()
+
+	if err := switchApply(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-bucket", "downloads", "-path", "release/app.zip", "-target", "backup", "-expected-current", "edge", "-dry-run=false", "-confirm", "switch"}); err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("switch-apply did not call bucket API")
+	}
+}
+
+func TestSwitchApplyCallsSiteDeploymentPrimaryTargetAPI(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sites/cyberstream/deployments/dpl-abc/files/primary-target" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		var body map[string]any
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["path"] != "/assets/app.js" || body["target"] != "backup" || body["dry_run"] != true {
+			t.Fatalf("unexpected body: %+v", body)
+		}
+		_, _ = w.Write([]byte(`{"status":"planned","mode":"site","resource":"cyberstream","deployment_id":"dpl-abc","path":"/assets/app.js","target":"backup","dry_run":true}`))
+	}))
+	defer srv.Close()
+
+	if err := switchApply(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "cyberstream", "-deployment", "dpl-abc", "-path", "/assets/app.js", "-target", "backup"}); err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("switch-apply did not call site API")
+	}
+}
+
+func TestRollbackPlanOriginAssistedUsesMetadataPromote(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-old" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{"id":"dpl-old","site_id":"blog","status":"ready","environment":"production","deployment_target":"origin_assisted","active":false}`))
+	}))
+	defer srv.Close()
+
+	var plan rollbackPlanOutput
+	out := captureStdout(t, func() {
+		if err := rollbackPlan(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "blog", "-deployment", "dpl-old"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("rollback-plan did not fetch deployment")
+	}
+	if plan.Action != "metadata_promote" || !plan.MetadataPromoteSupported || !plan.SafeToRun || plan.RedeployRequired {
+		t.Fatalf("unexpected rollback plan: %+v", plan)
+	}
+	if !plan.RollbackWriteReady || len(plan.WriteBlockers) != 0 || len(plan.MissingEvidence) != 0 {
+		t.Fatalf("unexpected rollback write readiness: %+v", plan)
+	}
+	if len(plan.NextCommands) != 1 || !strings.Contains(plan.NextCommands[0], "promote-deployment -site blog -deployment dpl-old") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+}
+
+func TestRollbackPlanCloudflareStaticRequiresRedeploy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-static" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{
+			"id":"dpl-static",
+			"site_id":"blog",
+			"status":"ready",
+			"environment":"production",
+			"route_profile":"overseas",
+			"deployment_target":"cloudflare_static",
+			"artifact_sha256":"artifact-sha",
+			"manifest_key":"sites/blog/manifests/dpl-static.json",
+			"file_count":12,
+			"total_size":3456,
+			"production_urls":["https://blog.example.com/"],
+			"cloudflare_static":{
+				"worker_name":"supercdn-blog-static",
+				"version_id":"ver-123",
+				"domains":["blog.example.com"],
+				"urls":["https://blog.example.com/"],
+				"assets_sha256":"assets-sha",
+				"verification_status":"ok",
+				"verified_at":"2026-05-15T00:00:00Z",
+				"published_at":"2026-05-15T00:01:00Z"
+			},
+			"active":false
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan rollbackPlanOutput
+	out := captureStdout(t, func() {
+		if err := rollbackPlan(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "blog", "-deployment", "dpl-static", "-dir", "dist old"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.Action != "redeploy_cloudflare_static" || !plan.RedeployRequired || plan.MetadataPromoteSupported || plan.SafeToRun {
+		t.Fatalf("unexpected rollback plan: %+v", plan)
+	}
+	if plan.RollbackWriteReady || len(plan.WriteBlockers) != 3 || len(plan.MissingEvidence) != 0 {
+		t.Fatalf("unexpected rollback write readiness: %+v", plan)
+	}
+	if len(plan.NextCommands) != 2 || !strings.Contains(plan.NextCommands[0], "deploy-site -site blog -dir 'dist old' -target cloudflare_static -profile overseas") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+	if !strings.Contains(plan.NextCommands[1], "probe-site -site blog -production -require-edge-static-html -require-html-revalidate -require-immutable-assets") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+	if len(plan.Warnings) == 0 || !strings.Contains(plan.Warnings[0], "promote-deployment") {
+		t.Fatalf("warnings = %#v", plan.Warnings)
+	}
+	if plan.Evidence.ArtifactSHA256 != "artifact-sha" || plan.Evidence.FileCount != 12 || len(plan.Evidence.ProductionURLs) != 1 {
+		t.Fatalf("evidence = %+v", plan.Evidence)
+	}
+	if plan.Evidence.CloudflareStatic == nil || plan.Evidence.CloudflareStatic.WorkerName != "supercdn-blog-static" || plan.Evidence.CloudflareStatic.VersionID != "ver-123" || plan.Evidence.CloudflareStatic.AssetsSHA256 != "assets-sha" {
+		t.Fatalf("cloudflare evidence = %+v", plan.Evidence.CloudflareStatic)
+	}
+}
+
+func TestRollbackPlanHybridReportsMissingWriteEvidence(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-hybrid" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{
+			"id":"dpl-hybrid",
+			"site_id":"blog",
+			"status":"ready",
+			"environment":"production",
+			"deployment_target":"hybrid_edge",
+			"active":false
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan rollbackPlanOutput
+	out := captureStdout(t, func() {
+		if err := rollbackPlan(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "blog", "-deployment", "dpl-hybrid"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.Action != "redeploy_hybrid_edge" || plan.RollbackWriteReady || len(plan.WriteBlockers) != 4 {
+		t.Fatalf("unexpected rollback plan: %+v", plan)
+	}
+	if len(plan.NextCommands) != 2 || !strings.Contains(plan.NextCommands[1], "probe-site -site blog -production -require-edge-static-html -require-edge-manifest-assets") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+	for _, want := range []string{"source_dist_dir", "route_profile", "artifact_sha256", "file_count", "cloudflare_static", "edge_manifest_key"} {
+		if !stringSliceContains(plan.MissingEvidence, want) {
+			t.Fatalf("missing_evidence %#v does not contain %q", plan.MissingEvidence, want)
+		}
+	}
+}
+
+func TestDeleteDeploymentDryRunPlansSafeOriginDelete(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-old" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{
+			"id":"dpl-old",
+			"site_id":"blog",
+			"status":"ready",
+			"deployment_target":"origin_assisted",
+			"active":false,
+			"pinned":false,
+			"file_count":2,
+			"artifact_sha256":"artifact-sha",
+			"manifest_key":"sites/blog/manifests/dpl-old.json"
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan deleteDeploymentPlanOutput
+	out := captureStdout(t, func() {
+		if err := deleteDeployment(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "blog", "-deployment", "dpl-old", "-dry-run", "-delete-objects", "-delete-remote=false"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !saw {
+		t.Fatal("delete-deployment dry-run did not fetch deployment")
+	}
+	if !plan.SafeToRun || plan.DeleteObjects != true || plan.DeleteRemote != false || plan.Target != "origin_assisted" || plan.RemoteCleanupSupported {
+		t.Fatalf("unexpected delete plan: %+v", plan)
+	}
+	if plan.Evidence.FileCount != 2 || plan.Evidence.ArtifactSHA256 != "artifact-sha" || plan.Evidence.ManifestKey != "sites/blog/manifests/dpl-old.json" {
+		t.Fatalf("evidence = %+v", plan.Evidence)
+	}
+	if len(plan.Warnings) != 0 {
+		t.Fatalf("warnings = %#v", plan.Warnings)
+	}
+	if len(plan.NextCommands) != 1 || !strings.Contains(plan.NextCommands[0], "delete-deployment -site blog -deployment dpl-old -delete-objects -delete-remote=false") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+}
+
+func TestDeleteDeploymentDryRunWarnsForCloudflareMetadataOnlyDelete(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-static" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{
+			"id":"dpl-static",
+			"site_id":"blog",
+			"status":"ready",
+			"deployment_target":"cloudflare_static",
+			"active":false,
+			"pinned":false,
+			"cloudflare_static":{
+				"worker_name":"supercdn-blog-static",
+				"version_id":"ver-123",
+				"domains":["blog.example.com"],
+				"assets_sha256":"assets-sha"
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan deleteDeploymentPlanOutput
+	out := captureStdout(t, func() {
+		if err := deleteDeployment(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "blog", "-deployment", "dpl-static", "-dry-run"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.SafeToRun || plan.Target != "cloudflare_static" || len(plan.NextCommands) != 1 || plan.RemoteCleanupSupported {
+		t.Fatalf("unexpected delete plan: %+v", plan)
+	}
+	if len(plan.RemoteCleanupBlockers) != 2 || !strings.Contains(plan.RemoteCleanupBlockers[0], "Cloudflare Worker versions") {
+		t.Fatalf("remote_cleanup_blockers = %#v", plan.RemoteCleanupBlockers)
+	}
+	if plan.Evidence.CloudflareStatic == nil || plan.Evidence.CloudflareStatic.WorkerName != "supercdn-blog-static" || plan.Evidence.CloudflareStatic.VersionID != "ver-123" {
+		t.Fatalf("cloudflare evidence = %+v", plan.Evidence.CloudflareStatic)
+	}
+	if len(plan.Warnings) != 1 || !strings.Contains(plan.Warnings[0], "Cloudflare Worker versions") {
+		t.Fatalf("warnings = %#v", plan.Warnings)
+	}
+}
+
+func TestDeleteDeploymentDryRunBlocksActiveOrPinnedDeployment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-active" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{
+			"id":"dpl-active",
+			"site_id":"blog",
+			"status":"ready",
+			"deployment_target":"origin_assisted",
+			"active":true,
+			"pinned":true
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan deleteDeploymentPlanOutput
+	out := captureStdout(t, func() {
+		if err := deleteDeployment(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "blog", "-deployment", "dpl-active", "-dry-run"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.SafeToRun || len(plan.NextCommands) != 0 {
+		t.Fatalf("unsafe deployment should not produce apply command: %+v", plan)
+	}
+	if len(plan.Warnings) != 2 || !strings.Contains(plan.Warnings[0], "active production") || !strings.Contains(plan.Warnings[1], "pinned") {
+		t.Fatalf("warnings = %#v", plan.Warnings)
 	}
 }
 
@@ -1388,6 +1904,18 @@ func TestUploadBucketFailureSuggestsCDNDoctor(t *testing.T) {
 	}
 }
 
+func TestCLIHintArgQuotesPowerShellArgs(t *testing.T) {
+	got := makeCDNDoctorCommand("poster bucket", "images/O'Brien one.png")
+	for _, want := range []string{
+		"-bucket 'poster bucket'",
+		"-path 'images/O''Brien one.png'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("command %q missing %q", got, want)
+		}
+	}
+}
+
 func TestUploadBucketDirUploadsFilesWithConcurrencyLimit(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "one.txt"), "one")
@@ -1748,4 +2276,13 @@ func writeTestFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

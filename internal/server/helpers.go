@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"supercdn/internal/config"
+	"supercdn/internal/deploymenttarget"
 	"supercdn/internal/model"
 )
 
@@ -194,20 +195,11 @@ func normalizeSiteMode(v string) string {
 }
 
 func normalizeDeploymentTarget(v string) (string, error) {
-	v = strings.ToLower(strings.TrimSpace(v))
-	if v == "" {
-		return "", nil
+	target, err := deploymenttarget.Normalize(v)
+	if err != nil {
+		return "", fmt.Errorf("deployment_target %w", err)
 	}
-	switch v {
-	case "origin", "go_origin", model.SiteDeploymentTargetOriginAssisted:
-		return model.SiteDeploymentTargetOriginAssisted, nil
-	case "cloudflare", "cloudflare_static", "workers_static", "workers_assets", "pages":
-		return model.SiteDeploymentTargetCloudflareStatic, nil
-	case "hybrid", "hybrid_edge", "edge":
-		return model.SiteDeploymentTargetHybridEdge, nil
-	default:
-		return "", fmt.Errorf("deployment_target must be origin_assisted, cloudflare_static or hybrid_edge")
-	}
+	return target, nil
 }
 
 func defaultDeploymentTarget(profile config.RouteProfile) string {

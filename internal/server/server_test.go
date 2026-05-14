@@ -532,6 +532,9 @@ func TestCDNDoctorReportsBucketObjectAndRedactedCandidates(t *testing.T) {
 	if len(resp.Replicas) != 2 || len(resp.Candidates) != 2 || resp.Selection == nil || resp.Selection.Target == "" {
 		t.Fatalf("missing replica/candidate selection details: %+v", resp)
 	}
+	if !hasDoctorRecommendation(resp.Recommendations, "manual_switch_available") {
+		t.Fatalf("missing manual switch recommendation: %+v", resp.Recommendations)
+	}
 }
 
 func TestCDNDoctorReportsMissingObjectAsDiagnostic(t *testing.T) {
@@ -551,6 +554,244 @@ func TestCDNDoctorReportsMissingObjectAsDiagnostic(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"status":"error"`) || !strings.Contains(rec.Body.String(), "bucket object not found") {
 		t.Fatalf("missing object should be a diagnostic error: %s", rec.Body.String())
+	}
+}
+
+func TestSwitchAssetBucketObjectPrimaryTargetAppliesAndAudits(t *testing.T) {
+	app := newPrimarySwitchTestServer(t)
+	ctx := context.Background()
+	if _, err := app.db.CreateProjectInWorkspace(ctx, "bucket:downloads", model.DefaultWorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.CreateAssetBucket(ctx, model.AssetBucket{
+		Slug:                "downloads",
+		WorkspaceID:         model.DefaultWorkspaceID,
+		Name:                "Downloads",
+		RouteProfile:        "dual",
+		AllowedTypes:        []string{model.AssetTypeArchive},
+		DefaultCacheControl: "public, max-age=60",
+		Status:              model.AssetBucketActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := app.db.SaveObject(ctx, model.Object{
+		ProjectID:     "bucket:downloads",
+		Path:          "release/app.zip",
+		Key:           "assets/buckets/downloads/archives/app.zip",
+		RouteProfile:  "dual",
+		Size:          12,
+		SHA256:        strings.Repeat("a", 64),
+		ContentType:   "application/zip",
+		CacheControl:  "public, max-age=60",
+		PrimaryTarget: "edge",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SaveAssetBucketObject(ctx, model.AssetBucketObject{
+		BucketSlug:  "downloads",
+		LogicalPath: "release/app.zip",
+		ObjectID:    obj.ID,
+		AssetType:   model.AssetTypeArchive,
+		PhysicalKey: obj.Key,
+		Size:        obj.Size,
+		SHA256:      obj.SHA256,
+		ContentType: obj.ContentType,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "edge", model.ReplicaReady, "https://edge.example/app.zip?sig=edge", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "backup", model.ReplicaReady, "https://backup.example/app.zip?sig=backup", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets/downloads/objects/primary-target", "test-token", map[string]any{
+		"path":                    "release/app.zip",
+		"target":                  "backup",
+		"expected_current_target": "edge",
+	})
+	if plan.Code != http.StatusOK {
+		t.Fatalf("dry-run switch status = %d body=%s", plan.Code, plan.Body.String())
+	}
+	if !strings.Contains(plan.Body.String(), `"status":"planned"`) || !strings.Contains(plan.Body.String(), `"dry_run":true`) {
+		t.Fatalf("dry-run switch response = %s", plan.Body.String())
+	}
+	current, err := app.db.GetObject(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.PrimaryTarget != "edge" {
+		t.Fatalf("dry-run changed primary target to %q", current.PrimaryTarget)
+	}
+
+	blocked := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets/downloads/objects/primary-target", "test-token", map[string]any{
+		"path":    "release/app.zip",
+		"target":  "backup",
+		"dry_run": false,
+	})
+	if blocked.Code != http.StatusBadRequest || !strings.Contains(blocked.Body.String(), "confirm") {
+		t.Fatalf("switch without confirm should be rejected, status=%d body=%s", blocked.Code, blocked.Body.String())
+	}
+
+	apply := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets/downloads/objects/primary-target", "test-token", map[string]any{
+		"path":                    "release/app.zip",
+		"target":                  "backup",
+		"expected_current_target": "edge",
+		"dry_run":                 false,
+		"confirm":                 "switch",
+	})
+	if apply.Code != http.StatusOK {
+		t.Fatalf("apply switch status = %d body=%s", apply.Code, apply.Body.String())
+	}
+	var resp primaryTargetSwitchResponse
+	if err := json.Unmarshal(apply.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "switched" || resp.PreviousTarget != "edge" || resp.Target != "backup" || resp.RollbackCommand == "" {
+		t.Fatalf("unexpected apply response: %+v", resp)
+	}
+	current, err = app.db.GetObject(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.PrimaryTarget != "backup" {
+		t.Fatalf("primary target = %q", current.PrimaryTarget)
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "asset_bucket.object.primary_target.switch", "asset_bucket:downloads")
+}
+
+func TestSwitchSiteFilePrimaryTargetUsesActiveDeployment(t *testing.T) {
+	app := newPrimarySwitchTestServer(t)
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/sites", "test-token", map[string]any{
+		"id":            "demo",
+		"route_profile": "dual",
+		"mode":          "standard",
+		"domains":       []string{"demo.local"},
+	})
+	if create.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", create.Code, create.Body.String())
+	}
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":     "home",
+		"assets/app.js":  "console.log('app')",
+		"assets/app.css": "body{}",
+	}, map[string]string{"environment": "production", "promote": "true", "route_profile": "dual"})
+	ctx := context.Background()
+	obj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "backup", model.ReplicaReady, "https://backup.example/app.js?sig=backup", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/files/primary-target", "test-token", map[string]any{
+		"path":                    "/assets/app.js",
+		"target":                  "backup",
+		"expected_current_target": "edge",
+		"dry_run":                 false,
+		"confirm":                 "switch",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("site switch status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp primaryTargetSwitchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "switched" || resp.DeploymentID != deploymentID || resp.File != "assets/app.js" || !resp.EffectiveNow {
+		t.Fatalf("unexpected site switch response: %+v", resp)
+	}
+	current, err := app.db.GetObject(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.PrimaryTarget != "backup" {
+		t.Fatalf("primary target = %q", current.PrimaryTarget)
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.file.primary_target.switch", "site:demo")
+}
+
+func TestSwitchRejectsRoutingPolicyBucket(t *testing.T) {
+	app := newSmartRoutingTestServer(t)
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets", "test-token", map[string]any{
+		"slug":           "downloads",
+		"route_profile":  "smart",
+		"routing_policy": "global_smart",
+		"allowed_types":  []string{"archive"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create bucket status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets/downloads/objects/primary-target", "test-token", map[string]any{
+		"path":   "release/app.zip",
+		"target": "overseas",
+	})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "routing_policy") {
+		t.Fatalf("routing policy bucket should be rejected, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "asset_bucket.object.primary_target.switch.rejected", "asset_bucket:downloads")
+}
+
+func TestSwitchRejectsResourceFailoverSiteDeployment(t *testing.T) {
+	app := newSmartRoutingTestServer(t)
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites", "test-token", map[string]any{
+		"id":            "demo",
+		"route_profile": "smart",
+		"mode":          "standard",
+		"domains":       []string{"demo.local"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html":    "home",
+		"assets/app.js": "console.log('ok')",
+	}, map[string]string{"environment": "production", "promote": "true", "route_profile": "smart", "resource_failover": "true"})
+	ctx := context.Background()
+	obj, err := app.db.SiteDeploymentFileObject(ctx, deploymentID, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.UpsertReplica(ctx, obj.ID, "overseas", model.ReplicaReady, "https://overseas.example/assets/app.js?sig=global", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/files/primary-target", "test-token", map[string]any{
+		"path":    "/assets/app.js",
+		"target":  "overseas",
+		"dry_run": false,
+		"confirm": "switch",
+	})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "resource_failover") {
+		t.Fatalf("resource_failover site switch should be rejected, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.file.primary_target.switch.rejected", "site:demo")
+	current, err := app.db.GetObject(ctx, obj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.PrimaryTarget != "china" {
+		t.Fatalf("primary target changed to %q", current.PrimaryTarget)
+	}
+}
+
+func TestSwitchApplyCommandQuotesPowerShellArgs(t *testing.T) {
+	got := switchApplyCommand("site", "demo site", "dpl one", "/assets/O'Brien app.js", "repo backup", "repo primary", false)
+	for _, want := range []string{
+		"-site 'demo site'",
+		"-deployment 'dpl one'",
+		"-path '/assets/O''Brien app.js'",
+		"-target 'repo backup'",
+		"-expected-current 'repo primary'",
+		"-dry-run=false",
+		"-confirm switch",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("command %q missing %q", got, want)
+		}
 	}
 }
 
@@ -616,6 +857,9 @@ func TestSiteDoctorReportsRouteAndRedactsCandidates(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "%3Credacted%3E") {
 		t.Fatalf("site doctor did not redact signed query values: %s", rec.Body.String())
+	}
+	if !hasDoctorRecommendation(resp.Recommendations, "manual_switch_available") {
+		t.Fatalf("missing manual switch recommendation: %+v", resp.Recommendations)
 	}
 }
 
@@ -1666,7 +1910,49 @@ func TestPromoteCloudflareStaticDeploymentRejectsMetadataOnlyRollback(t *testing
 	if !strings.Contains(rec.Body.String(), "metadata alone") {
 		t.Fatalf("promote response missing safety message: %s", rec.Body.String())
 	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.promote.rejected", "site:demo;deployment:"+readyID)
 
+	dep, err := app.db.GetSiteDeployment(context.Background(), activeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dep.Active {
+		t.Fatalf("active deployment was changed: %+v", dep)
+	}
+}
+
+func TestPromoteHybridEdgeDeploymentRejectsMetadataOnlyRollback(t *testing.T) {
+	app := newTestServer(t)
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/sites", "test-token", map[string]any{
+		"id":                "demo",
+		"route_profile":     "overseas",
+		"deployment_target": "hybrid_edge",
+		"mode":              "standard",
+	})
+	if create.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", create.Code, create.Body.String())
+	}
+	activeID := createDeployment(t, app, "demo", map[string]string{
+		"index.html": "active",
+	}, map[string]string{"environment": "production", "promote": "true", "deployment_target": "hybrid_edge"})
+	readyID := createDeployment(t, app, "demo", map[string]string{
+		"index.html": "rollback",
+	}, map[string]string{"environment": "production", "promote": "false", "deployment_target": "hybrid_edge"})
+	if activeID == readyID {
+		t.Fatal("expected distinct deployment ids")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sites/demo/deployments/"+readyID+"/promote", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("promote status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "hybrid_edge") || !strings.Contains(rec.Body.String(), "metadata alone") {
+		t.Fatalf("promote response missing hybrid safety message: %s", rec.Body.String())
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.promote.rejected", "site:demo;deployment:"+readyID)
 	dep, err := app.db.GetSiteDeployment(context.Background(), activeID)
 	if err != nil {
 		t.Fatal(err)
@@ -1689,6 +1975,96 @@ func TestDeleteCloudflareStaticDeploymentWarnsMetadataOnly(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"deleted":true`) || !strings.Contains(rec.Body.String(), "metadata only") {
 		t.Fatalf("delete response missing warning: %s", rec.Body.String())
+	}
+}
+
+func TestDeleteSiteDeploymentDryRunReportsUnsafeActiveDeployment(t *testing.T) {
+	app := newTestServer(t)
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html": "active",
+	}, map[string]string{"environment": "production", "promote": "true"})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sites/demo/deployments/"+deploymentID+"?dry_run=true&delete_objects=true", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete dry-run status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var plan deleteSiteDeploymentPlanResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.DryRun || plan.SafeToRun || !plan.Active || !plan.DeleteObjects || !plan.DeleteRemote {
+		t.Fatalf("unexpected dry-run plan: %+v", plan)
+	}
+	if len(plan.Warnings) != 1 || !strings.Contains(plan.Warnings[0], "active production") {
+		t.Fatalf("warnings = %#v", plan.Warnings)
+	}
+	if _, err := app.db.GetSiteDeployment(context.Background(), deploymentID); err != nil {
+		t.Fatalf("dry-run deleted deployment: %v", err)
+	}
+}
+
+func TestDeleteSiteDeploymentDryRunWarnsForCloudflareMetadataOnly(t *testing.T) {
+	app := newTestServer(t)
+	deploymentID := recordCloudflareStaticDeploymentForTest(t, app, "demo", false)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sites/demo/deployments/"+deploymentID+"?dry_run=true&delete_objects=true&delete_remote=false", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete dry-run status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var plan deleteSiteDeploymentPlanResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.DryRun || !plan.SafeToRun || plan.DeploymentTarget != model.SiteDeploymentTargetCloudflareStatic || !plan.DeleteObjects || plan.DeleteRemote || plan.RemoteCleanupSupported {
+		t.Fatalf("unexpected dry-run plan: %+v", plan)
+	}
+	if plan.Evidence.FileCount != 2 {
+		t.Fatalf("evidence = %+v", plan.Evidence)
+	}
+	if plan.Evidence.CloudflareStatic == nil || plan.Evidence.CloudflareStatic.WorkerName == "" || plan.Evidence.CloudflareStatic.VersionID == "" {
+		t.Fatalf("cloudflare evidence = %+v", plan.Evidence.CloudflareStatic)
+	}
+	if len(plan.RemoteCleanupBlockers) != 2 || !strings.Contains(plan.RemoteCleanupBlockers[0], "Cloudflare Worker versions") {
+		t.Fatalf("remote cleanup blockers = %#v", plan.RemoteCleanupBlockers)
+	}
+	if len(plan.Warnings) != 1 || !strings.Contains(plan.Warnings[0], "Cloudflare Worker versions") || !strings.Contains(plan.Warnings[0], "KV entries") {
+		t.Fatalf("warnings = %#v", plan.Warnings)
+	}
+	if _, err := app.db.GetSiteDeployment(context.Background(), deploymentID); err != nil {
+		t.Fatalf("dry-run deleted deployment: %v", err)
+	}
+}
+
+func TestDeleteHybridEdgeDeploymentWarnsMetadataOnly(t *testing.T) {
+	app := newTestServer(t)
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/sites", "test-token", map[string]any{
+		"id":                "demo",
+		"route_profile":     "overseas",
+		"deployment_target": "hybrid_edge",
+		"mode":              "standard",
+	})
+	if create.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", create.Code, create.Body.String())
+	}
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html": "rollback",
+	}, map[string]string{"environment": "production", "promote": "false", "deployment_target": "hybrid_edge"})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sites/demo/deployments/"+deploymentID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"deleted":true`) || !strings.Contains(rec.Body.String(), "metadata only") || !strings.Contains(rec.Body.String(), "KV entries") {
+		t.Fatalf("delete response missing hybrid metadata warning: %s", rec.Body.String())
 	}
 }
 
@@ -4342,6 +4718,48 @@ func TestAuditEventsForRepresentativeMutations(t *testing.T) {
 	assertAuditEvent(t, events, "gc.dry_run", "gc:manual")
 }
 
+func TestAuditEventsAPIListsAndScopesEvents(t *testing.T) {
+	app := newTestServer(t)
+	ctx := context.Background()
+	if _, err := app.db.CreateAuditEvent(ctx, model.AuditEvent{
+		WorkspaceID: model.DefaultWorkspaceID,
+		Action:      "site.create",
+		Resource:    "site:demo",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.CreateAuditEvent(ctx, model.AuditEvent{
+		WorkspaceID: "other-workspace",
+		Action:      "site.create",
+		Resource:    "site:other",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := apiJSON(t, app, http.MethodGet, "/api/v1/audit-events?action=site.create&resource=demo&limit=10", "test-token", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("audit events status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp auditEventsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Events) != 1 || resp.Events[0].Resource != "site:demo" {
+		t.Fatalf("unexpected audit events response: %+v", resp)
+	}
+
+	maintainerToken := acceptInviteForTest(t, app, createInviteForTest(t, app, "maintainer-audit", model.RoleMaintainer))
+	forbidden := apiJSON(t, app, http.MethodGet, "/api/v1/audit-events?workspace_id=other-workspace", maintainerToken, nil)
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("cross-workspace audit query status = %d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+	viewerToken := acceptInviteForTest(t, app, createInviteForTest(t, app, "viewer-audit", model.RoleViewer))
+	viewer := apiJSON(t, app, http.MethodGet, "/api/v1/audit-events", viewerToken, nil)
+	if viewer.Code != http.StatusForbidden {
+		t.Fatalf("viewer audit query status = %d body=%s", viewer.Code, viewer.Body.String())
+	}
+}
+
 func TestAuditEventsDoNotStoreInviteOrAPITokenSecrets(t *testing.T) {
 	app := newTestServer(t)
 	inviteRec := apiJSON(t, app, http.MethodPost, "/api/v1/auth/invites", "test-token", map[string]any{
@@ -4419,6 +4837,23 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = app.Close() })
+	return app
+}
+
+func newPrimarySwitchTestServer(t *testing.T) *Server {
+	t.Helper()
+	app := newTestServer(t)
+	app.cfg.RouteProfiles = []config.RouteProfile{{
+		Name:                "dual",
+		Primary:             "edge",
+		Backups:             []string{"backup"},
+		AllowRedirect:       true,
+		DefaultCacheControl: "public, max-age=60",
+	}}
+	app.stores = storage.NewManager([]storage.Store{
+		&signedLocatorStore{name: "edge", statLocator: "https://edge.example/object?sig=edge"},
+		&signedLocatorStore{name: "backup", statLocator: "https://backup.example/object?sig=backup"},
+	})
 	return app
 }
 
@@ -4678,6 +5113,15 @@ func assertAuditEvent(t *testing.T, events []model.AuditEvent, action, resource 
 		}
 	}
 	t.Fatalf("missing audit event action=%q resource containing %q in %+v", action, resource, events)
+}
+
+func hasDoctorRecommendation(recommendations []doctorRecommendation, action string) bool {
+	for _, recommendation := range recommendations {
+		if recommendation.Action == action {
+			return true
+		}
+	}
+	return false
 }
 
 func createInviteForTest(t *testing.T, app *Server, name, role string) string {

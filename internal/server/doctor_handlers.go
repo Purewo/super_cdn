@@ -279,6 +279,7 @@ type cdnDoctorResponse struct {
 	Candidates         []edgeRouteCandidateEvaluation `json:"candidates,omitempty"`
 	Checks             []doctorCheck                  `json:"checks"`
 	Warnings           []string                       `json:"warnings,omitempty"`
+	Recommendations    []doctorRecommendation         `json:"recommendations,omitempty"`
 	NextCommands       []string                       `json:"next_commands,omitempty"`
 }
 
@@ -319,19 +320,28 @@ type cdnDoctorReplica struct {
 }
 
 type siteDoctorResponse struct {
-	Status              string                `json:"status"`
-	CheckedAtUTC        string                `json:"checked_at_utc"`
-	Site                model.Site            `json:"site"`
-	Deployment          *model.SiteDeployment `json:"deployment,omitempty"`
-	Path                string                `json:"path,omitempty"`
-	ProductionURL       string                `json:"production_url,omitempty"`
-	ProductionURLs      []string              `json:"production_urls,omitempty"`
-	PreviewURL          string                `json:"preview_url,omitempty"`
-	Route               *routeExplainResponse `json:"route,omitempty"`
-	ExpectedEdgeHeaders map[string]string     `json:"expected_edge_headers,omitempty"`
-	Checks              []doctorCheck         `json:"checks"`
-	Warnings            []string              `json:"warnings,omitempty"`
-	NextCommands        []string              `json:"next_commands,omitempty"`
+	Status              string                 `json:"status"`
+	CheckedAtUTC        string                 `json:"checked_at_utc"`
+	Site                model.Site             `json:"site"`
+	Deployment          *model.SiteDeployment  `json:"deployment,omitempty"`
+	Path                string                 `json:"path,omitempty"`
+	ProductionURL       string                 `json:"production_url,omitempty"`
+	ProductionURLs      []string               `json:"production_urls,omitempty"`
+	PreviewURL          string                 `json:"preview_url,omitempty"`
+	Route               *routeExplainResponse  `json:"route,omitempty"`
+	ExpectedEdgeHeaders map[string]string      `json:"expected_edge_headers,omitempty"`
+	Checks              []doctorCheck          `json:"checks"`
+	Warnings            []string               `json:"warnings,omitempty"`
+	Recommendations     []doctorRecommendation `json:"recommendations,omitempty"`
+	NextCommands        []string               `json:"next_commands,omitempty"`
+}
+
+type doctorRecommendation struct {
+	Action  string `json:"action"`
+	Level   string `json:"level"`
+	Summary string `json:"summary"`
+	Reason  string `json:"reason,omitempty"`
+	Command string `json:"command,omitempty"`
 }
 
 func (s *Server) handleCDNDoctor(w http.ResponseWriter, r *http.Request) {
@@ -413,6 +423,7 @@ func (s *Server) cdnDoctorReport(ctx context.Context, bucket *model.AssetBucket,
 	s.addCDNDoctorRouteProfileChecks(&resp, bucket, profile)
 	if resp.Path == "" {
 		resp.addCheck("object", "skipped", "-path was not provided; object, replica and selected-route checks were skipped", "")
+		resp.addRecommendation("inspect_object_route", "info", "Run cdn-doctor with a concrete object path before changing CDN lines.", "", "supercdnctl cdn-doctor -bucket "+bucket.Slug+" -path <path>")
 		return resp, nil
 	}
 	item, err := s.db.GetAssetBucketObject(ctx, bucket.Slug, resp.Path)
@@ -420,6 +431,7 @@ func (s *Server) cdnDoctorReport(ctx context.Context, bucket *model.AssetBucket,
 		if db.IsNotFound(err) || errors.Is(err, sql.ErrNoRows) {
 			resp.addCheck("object", "error", "bucket object not found", resp.Path)
 			resp.NextCommands = append(resp.NextCommands, "supercdnctl upload-bucket -bucket "+bucket.Slug+" -file <file> -path "+resp.Path)
+			resp.addRecommendation("upload_missing_object", "error", "Upload or restore this object before attempting any CDN line switch.", "The bucket path is not tracked in Super CDN.", "supercdnctl upload-bucket -bucket "+bucket.Slug+" -file <file> -path "+resp.Path)
 			return resp, nil
 		}
 		return resp, err
@@ -466,6 +478,7 @@ func (s *Server) addCDNDoctorRouteProfileChecks(resp *cdnDoctorResponse, bucket 
 	sort.Strings(missing)
 	if len(missing) > 0 {
 		resp.addCheck("route_profile", "error", "route profile references missing storage target(s)", strings.Join(missing, ", "))
+		resp.addRecommendation("fix_route_profile", "error", "Fix the route profile before switching traffic.", "Missing storage targets: "+strings.Join(missing, ", "), "supercdnctl doctor")
 		return
 	}
 	resp.addCheck("route_profile", "ok", "route profile storage targets are configured", "")
@@ -490,6 +503,7 @@ func (s *Server) addCDNDoctorReplicaChecks(ctx context.Context, resp *cdnDoctorR
 	if len(replicas) == 0 {
 		resp.addCheck("replicas", "error", "object has no replicas", "")
 		resp.NextCommands = append(resp.NextCommands, "supercdnctl repair-replicas -object-id "+strconv.FormatInt(obj.ID, 10))
+		resp.addRecommendation("repair_replicas", "error", "Repair replicas before changing the active CDN line.", "The object has no recorded replicas.", "supercdnctl repair-replicas -object-id "+strconv.FormatInt(obj.ID, 10))
 		return
 	}
 	ready := 0
@@ -521,6 +535,7 @@ func (s *Server) addCDNDoctorReplicaChecks(ctx context.Context, resp *cdnDoctorR
 	if ready == 0 {
 		resp.addCheck("replicas", "error", "object has no ready replicas", "")
 		resp.NextCommands = append(resp.NextCommands, "supercdnctl repair-replicas -object-id "+strconv.FormatInt(obj.ID, 10))
+		resp.addRecommendation("repair_replicas", "error", "Repair replicas before changing the active CDN line.", "No replica is ready for delivery.", "supercdnctl repair-replicas -object-id "+strconv.FormatInt(obj.ID, 10))
 		return
 	}
 	resp.addCheck("replicas", "ok", fmt.Sprintf("%d/%d replica(s) are ready", ready, len(replicas)), "")
@@ -545,6 +560,7 @@ func (s *Server) addCDNDoctorSelection(ctx context.Context, resp *cdnDoctorRespo
 			resp.addCheck("selection", "warning", "routing policy has no ready candidate", "")
 		}
 		resp.Candidates = redactRouteCandidateEvaluations(evaluations)
+		resp.addCDNDoctorCandidateRecommendations(evaluations, policy.Name, obj.ID)
 		resp.NextCommands = append(resp.NextCommands, "supercdnctl routing-policy-status -policy "+policy.Name)
 		return
 	}
@@ -559,6 +575,7 @@ func (s *Server) addCDNDoctorSelection(ctx context.Context, resp *cdnDoctorRespo
 		resp.addCheck("selection", "warning", "route profile has no ready direct candidate", "")
 	}
 	resp.Candidates = redactRouteCandidateEvaluations(evaluations)
+	resp.addCDNDoctorCandidateRecommendations(evaluations, "", obj.ID)
 }
 
 func ipfsPinToEdgeManifest(pin *model.IPFSPin) *edgeManifestIPFS {
@@ -606,6 +623,39 @@ func (r *cdnDoctorResponse) addCheck(name, status, message, errMessage string) {
 	r.Status = worseDoctorStatus(r.Status, status)
 }
 
+func (r *cdnDoctorResponse) addRecommendation(action, level, summary, reason, command string) {
+	r.Recommendations = append(r.Recommendations, doctorRecommendation{
+		Action:  action,
+		Level:   level,
+		Summary: summary,
+		Reason:  reason,
+		Command: command,
+	})
+}
+
+func (r *cdnDoctorResponse) addCDNDoctorCandidateRecommendations(evaluations []edgeRouteCandidateEvaluation, policyName string, objectID int64) {
+	ready := readyEvaluationCount(evaluations)
+	healthTargets := unhealthyEvaluationTargets(evaluations)
+	if len(healthTargets) > 0 {
+		r.addRecommendation("check_resource_health", "warning", "Run a health check before manually switching traffic.", "Candidate target(s) are skipped by recent health failures: "+strings.Join(healthTargets, ", "), "supercdnctl health-check -libraries "+strings.Join(healthTargets, ",")+" -force")
+	}
+	if ready == 0 {
+		r.addRecommendation("repair_replicas", "error", "Do not switch CDN lines until at least one candidate is ready.", "No ready delivery candidate is available.", "supercdnctl repair-replicas -object-id "+strconv.FormatInt(objectID, 10))
+		return
+	}
+	if len(evaluations) > 1 && ready == 1 {
+		r.addRecommendation("manual_switch_not_ready", "warning", "Keep this as a manual recovery decision; backup candidates are not fully ready.", "Only one candidate can currently serve the object.", "supercdnctl repair-replicas -object-id "+strconv.FormatInt(objectID, 10))
+		return
+	}
+	if ready > 1 {
+		command := "supercdnctl resource-status"
+		if policyName != "" {
+			command = "supercdnctl routing-policy-status -policy " + policyName
+		}
+		r.addRecommendation("manual_switch_available", "info", "Multiple ready candidates exist; review them and switch explicitly if needed.", "Super CDN reports candidates, but cross-line changes should stay user-confirmed.", command)
+	}
+}
+
 func (s *Server) siteDoctorReport(ctx context.Context, site *model.Site, deploymentID string, opts routeExplainOptions) (siteDoctorResponse, error) {
 	siteView := s.siteView(site)
 	resp := siteDoctorResponse{
@@ -639,6 +689,7 @@ func (s *Server) siteDoctorReport(ctx context.Context, site *model.Site, deploym
 	}
 	if dep.Status != model.SiteDeploymentReady && dep.Status != model.SiteDeploymentActive {
 		resp.addCheck("deployment", "error", "deployment is not ready", dep.Status)
+		resp.addRecommendation("wait_or_redeploy", "error", "Do not switch routing until the selected deployment is ready.", "Deployment status is "+dep.Status+".", "supercdnctl list-deployments -site "+site.ID)
 		return resp, nil
 	}
 	if !dep.Active && deploymentID == "" {
@@ -649,12 +700,14 @@ func (s *Server) siteDoctorReport(ctx context.Context, site *model.Site, deploym
 	if resp.Path == "" {
 		resp.addCheck("route", "skipped", "-path was not provided; route, candidate and expected-header checks were skipped", "")
 		resp.ExpectedEdgeHeaders = siteDoctorExpectedHeaders(dep, nil)
+		resp.addRecommendation("inspect_site_route", "info", "Run site-doctor with a concrete asset path before changing site routing.", "", "supercdnctl site-doctor -site "+site.ID+" -path /assets/<file>")
 		return resp, nil
 	}
 	route, err := s.explainSiteRoute(ctx, site, dep, opts)
 	if err != nil {
 		resp.addCheck("route", "error", "route explanation failed", err.Error())
 		resp.NextCommands = append(resp.NextCommands, "supercdnctl route-explain -site "+site.ID+" -path "+resp.Path)
+		resp.addRecommendation("inspect_route_error", "error", "Fix route explanation errors before changing site traffic.", err.Error(), "supercdnctl route-explain -site "+site.ID+" -path "+resp.Path)
 		return resp, nil
 	}
 	route = redactRouteExplainResponse(route)
@@ -674,6 +727,7 @@ func (s *Server) siteDoctorReport(ctx context.Context, site *model.Site, deploym
 	}
 	resp.NextCommands = append(resp.NextCommands, "supercdnctl route-explain -site "+site.ID+" -path "+resp.Path)
 	resp.NextCommands = append(resp.NextCommands, "supercdnctl probe-site -site "+site.ID)
+	resp.addSiteDoctorRouteRecommendations(dep, &route)
 	return resp, nil
 }
 
@@ -790,4 +844,70 @@ func (r *siteDoctorResponse) addCheck(name, status, message, errMessage string) 
 		Error:   errMessage,
 	})
 	r.Status = worseDoctorStatus(r.Status, status)
+}
+
+func (r *siteDoctorResponse) addRecommendation(action, level, summary, reason, command string) {
+	r.Recommendations = append(r.Recommendations, doctorRecommendation{
+		Action:  action,
+		Level:   level,
+		Summary: summary,
+		Reason:  reason,
+		Command: command,
+	})
+}
+
+func (r *siteDoctorResponse) addSiteDoctorRouteRecommendations(dep *model.SiteDeployment, route *routeExplainResponse) {
+	if dep == nil || route == nil {
+		return
+	}
+	switch dep.DeploymentTarget {
+	case model.SiteDeploymentTargetOriginAssisted:
+		r.addRecommendation("prefer_edge_entry", "info", "Origin-assisted delivery is a compatibility path; prefer Cloudflare Static or hybrid_edge for mature production traffic.", "", "supercdnctl update-site -site "+dep.SiteID+" -dir <dist> -target cloudflare_static")
+	case model.SiteDeploymentTargetCloudflareStatic:
+		r.addRecommendation("rollback_boundary", "info", "Cloudflare Static rollback must republish the desired assets instead of metadata-only promotion.", "", "supercdnctl update-site -site "+dep.SiteID+" -dir <dist> -target cloudflare_static")
+	case model.SiteDeploymentTargetHybridEdge:
+		if route.RoutingPolicy != "" || route.ResourceFailover {
+			r.addRecommendation("refresh_manifest_after_review", "info", "If health or signed locators changed, refresh the active edge manifest after reviewing candidates.", "", "supercdnctl refresh-edge-manifest -site "+dep.SiteID)
+		}
+	}
+	if len(route.Candidates) == 0 {
+		return
+	}
+	ready := readyEvaluationCount(route.Candidates)
+	healthTargets := unhealthyEvaluationTargets(route.Candidates)
+	if len(healthTargets) > 0 {
+		r.addRecommendation("check_resource_health", "warning", "Run a health check before manually switching this site route.", "Candidate target(s) are skipped by recent health failures: "+strings.Join(healthTargets, ", "), "supercdnctl health-check -libraries "+strings.Join(healthTargets, ",")+" -force")
+	}
+	if ready == 0 {
+		r.addRecommendation("repair_route_replicas", "error", "Do not switch site traffic until at least one route candidate is ready.", "No ready candidate is available for this path.", "supercdnctl route-explain -site "+dep.SiteID+" -path "+route.Path)
+		return
+	}
+	if len(route.Candidates) > 1 && ready == 1 {
+		r.addRecommendation("manual_switch_not_ready", "warning", "Keep this as a manual recovery decision; backup candidates are not fully ready.", "Only one candidate can currently serve this path.", "supercdnctl route-explain -site "+dep.SiteID+" -path "+route.Path)
+		return
+	}
+	if ready > 1 {
+		r.addRecommendation("manual_switch_available", "info", "Multiple ready candidates exist; review route-explain and confirm before switching policy.", "Super CDN exposes candidate state but does not silently change cross-line policy for the user.", "supercdnctl route-explain -site "+dep.SiteID+" -path "+route.Path)
+	}
+}
+
+func readyEvaluationCount(evaluations []edgeRouteCandidateEvaluation) int {
+	ready := 0
+	for _, item := range evaluations {
+		if item.Status == model.ReplicaReady && item.URL != "" {
+			ready++
+		}
+	}
+	return ready
+}
+
+func unhealthyEvaluationTargets(evaluations []edgeRouteCandidateEvaluation) []string {
+	var out []string
+	for _, item := range evaluations {
+		if strings.Contains(strings.ToLower(item.Reason), "skipped by health") {
+			out = append(out, item.Target)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

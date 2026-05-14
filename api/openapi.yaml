@@ -2,6 +2,9 @@ openapi: 3.1.0
 info:
   title: Super CDN Control Plane API
   version: 0.4.0
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
   description: |
     First formal contract for the stable Super CDN operator API.
     This file describes the current v0.4.0-era behavior for the CLI-facing
@@ -18,12 +21,21 @@ security:
   - bearerAuth: []
 tags:
   - name: Auth
+    description: Invite, login, user and token management.
   - name: Diagnostics
+    description: Operator support reports, route checks and provider status.
+  - name: Audit
+    description: Workspace-scoped mutation audit events.
   - name: Asset Buckets
+    description: Static asset bucket creation, object upload, warmup, purge and diagnostics.
   - name: Sites
+    description: Site metadata, domains, DNS, deployment target resolution and site diagnostics.
   - name: Deployments
+    description: Site deployment records, promotion, deletion and deployment-scoped cache operations.
   - name: Edge Manifest
+    description: Edge manifest export, route explanation and Workers KV publication.
   - name: Garbage Collection
+    description: Conservative cleanup entry points for staging and tracked deployment metadata.
 paths:
   "/api/v1/auth/accept-invite":
     post:
@@ -188,6 +200,46 @@ paths:
                 $ref: "#/components/schemas/DoctorReport"
         "400":
           $ref: "#/components/responses/BadRequest"
+  "/api/v1/audit-events":
+    get:
+      tags: [Audit]
+      operationId: listAuditEvents
+      summary: List mutation audit events
+      description: Root can query all workspaces or a selected workspace; owner and maintainer tokens are scoped to their own workspace.
+      parameters:
+        - name: workspace_id
+          in: query
+          schema:
+            type: string
+          description: Root-only workspace filter.
+        - name: action
+          in: query
+          schema:
+            type: string
+          description: Exact action filter.
+        - name: resource
+          in: query
+          schema:
+            type: string
+          description: Resource substring filter.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        "200":
+          description: Audit events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditEventsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   "/api/v1/asset-buckets":
     get:
       tags: [Asset Buckets]
@@ -206,6 +258,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/AssetBucket"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     post:
       tags: [Asset Buckets]
       operationId: createAssetBucket
@@ -300,7 +354,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AnyObject"
+                $ref: "#/components/schemas/CDNDoctorReport"
         "404":
           $ref: "#/components/responses/NotFound"
   "/api/v1/asset-buckets/{slug}/init":
@@ -358,6 +412,10 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/BucketObject"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
     post:
       tags: [Asset Buckets]
       operationId: uploadAssetBucketObject
@@ -435,6 +493,33 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+  "/api/v1/asset-buckets/{slug}/objects/primary-target":
+    post:
+      tags: [Asset Buckets]
+      operationId: switchAssetBucketObjectPrimaryTarget
+      summary: Switch one bucket object's primary delivery target after explicit confirmation
+      description: Refuses buckets that use routing_policy, because primary_target metadata would not control policy-based live routing.
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrimaryTargetSwitchRequest"
+      responses:
+        "200":
+          description: Switch plan or applied result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrimaryTargetSwitchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   "/api/v1/asset-buckets/{slug}/purge":
     post:
       tags: [Asset Buckets]
@@ -455,6 +540,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/URLActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/asset-buckets/{slug}/warmup":
     post:
       tags: [Asset Buckets]
@@ -475,6 +564,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/URLActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/asset-buckets/{slug}/replicas/refresh":
     post:
       tags: [Asset Buckets]
@@ -515,6 +608,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Site"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     post:
       tags: [Sites]
       operationId: createSite
@@ -578,6 +673,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Site"
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/sites/{id}/online":
     post:
       tags: [Sites]
@@ -592,6 +689,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Site"
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/sites/{id}/domains":
     post:
       tags: [Sites]
@@ -632,6 +731,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SiteDeploymentTarget"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/sites/{id}/doctor":
     get:
       tags: [Diagnostics]
@@ -640,6 +743,10 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SiteID"
         - name: path
+          in: query
+          schema:
+            type: string
+        - name: deployment
           in: query
           schema:
             type: string
@@ -657,7 +764,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AnyObject"
+                $ref: "#/components/schemas/SiteDoctorReport"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/sites/{id}/purge":
     post:
       tags: [Sites]
@@ -678,6 +789,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/URLActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/sites/{id}/route-explain":
     get:
       tags: [Edge Manifest]
@@ -707,9 +822,36 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AnyObject"
+                $ref: "#/components/schemas/RouteExplainResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+  "/api/v1/sites/{id}/files/primary-target":
+    post:
+      tags: [Deployments]
+      operationId: switchActiveSiteFilePrimaryTarget
+      summary: Switch one file in the active site deployment to a ready primary target
+      description: Refuses deployments that use routing_policy, resource_failover or Cloudflare Static when primary_target metadata would not control live traffic.
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrimaryTargetSwitchRequest"
+      responses:
+        "200":
+          description: Switch plan or applied result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrimaryTargetSwitchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   "/api/v1/sites/{id}/deployments":
     get:
       tags: [Deployments]
@@ -841,13 +983,47 @@ paths:
           schema:
             type: boolean
             default: true
+        - name: dry_run
+          in: query
+          description: Return a deletion safety plan without deleting metadata or remote objects.
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
-          description: Deletion result.
+          description: Deletion result, or a dry-run safety plan when dry_run=true.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AnyObject"
+                $ref: "#/components/schemas/SiteDeploymentDeleteResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/api/v1/sites/{id}/deployments/{deployment}/files/primary-target":
+    post:
+      tags: [Deployments]
+      operationId: switchSiteDeploymentFilePrimaryTarget
+      summary: Switch one file in a specific site deployment to a ready primary target
+      description: Refuses deployments that use routing_policy, resource_failover or Cloudflare Static when primary_target metadata would not control live traffic.
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - $ref: "#/components/parameters/DeploymentID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrimaryTargetSwitchRequest"
+      responses:
+        "200":
+          description: Switch plan or applied result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrimaryTargetSwitchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -857,6 +1033,7 @@ paths:
       tags: [Deployments]
       operationId: promoteSiteDeployment
       summary: Promote a ready deployment to active
+      description: Metadata-only promotion is allowed for origin-assisted deployments. Non-active cloudflare_static and hybrid_edge deployments are rejected because their real traffic state also depends on Cloudflare Worker assets and/or active KV manifests.
       parameters:
         - $ref: "#/components/parameters/SiteID"
         - $ref: "#/components/parameters/DeploymentID"
@@ -892,6 +1069,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/URLActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/sites/{id}/deployments/{deployment}/edge-manifest":
     get:
       tags: [Edge Manifest]
@@ -955,6 +1136,8 @@ paths:
                     example: noop
                   message:
                     type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/gc":
     post:
       tags: [Garbage Collection]
@@ -1162,6 +1345,37 @@ components:
           type: string
           format: date-time
       additionalProperties: true
+    AuditEvent:
+      type: object
+      required: [id, workspace_id, action, resource, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        workspace_id:
+          type: string
+        user_id:
+          type: integer
+          format: int64
+        action:
+          type: string
+        resource:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    AuditEventsResponse:
+      type: object
+      required: [events, limit]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEvent"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 1000
     DoctorReport:
       type: object
       required: [status, checked_at_utc, auth, server, checks]
@@ -1206,6 +1420,460 @@ components:
           type: array
           items:
             type: string
+    DoctorCheck:
+      type: object
+      required: [name, status]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [ok, warning, error, skipped]
+        message:
+          type: string
+        error:
+          type: string
+    DoctorRecommendation:
+      type: object
+      required: [action, level, summary]
+      properties:
+        action:
+          type: string
+        level:
+          type: string
+          enum: [info, warning, error]
+        summary:
+          type: string
+        reason:
+          type: string
+        command:
+          type: string
+    PrimaryTargetSwitchRequest:
+      type: object
+      required: [path, target]
+      properties:
+        path:
+          type: string
+          description: Bucket logical path or site request path.
+        target:
+          type: string
+          description: Ready replica target to make primary.
+        expected_current_target:
+          type: string
+          description: Optional guard that must match the current primary target.
+        dry_run:
+          type: boolean
+          default: true
+          description: Defaults to true; set false only with confirm=switch.
+        confirm:
+          type: string
+          description: Must be switch when dry_run is false.
+    PrimaryTargetSwitchResponse:
+      type: object
+      required: [status, mode, resource, path, object_id, previous_target, target, dry_run, effective_now]
+      properties:
+        status:
+          type: string
+          enum: [planned, switched, noop]
+        mode:
+          type: string
+          enum: [bucket, site]
+        resource:
+          type: string
+        deployment_id:
+          type: string
+        path:
+          type: string
+        file:
+          type: string
+        object_id:
+          type: integer
+          format: int64
+        previous_target:
+          type: string
+        target:
+          type: string
+        dry_run:
+          type: boolean
+        effective_now:
+          type: boolean
+        target_url:
+          type: string
+        target_url_redacted:
+          type: boolean
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/DoctorCheck"
+        warnings:
+          type: array
+          items:
+            type: string
+        next_commands:
+          type: array
+          items:
+            type: string
+        rollback_command:
+          type: string
+    CDNDoctorReport:
+      type: object
+      required: [status, checked_at_utc, bucket, route_profile, checks]
+      properties:
+        status:
+          type: string
+        checked_at_utc:
+          type: string
+          format: date-time
+        bucket:
+          $ref: "#/components/schemas/AssetBucket"
+        route_profile:
+          $ref: "#/components/schemas/CDNDoctorRouteProfile"
+        path:
+          type: string
+        public_url:
+          type: string
+        storage_url:
+          type: string
+        storage_url_redacted:
+          type: boolean
+        object:
+          $ref: "#/components/schemas/CDNDoctorObject"
+        replicas:
+          type: array
+          items:
+            $ref: "#/components/schemas/CDNDoctorReplica"
+        ipfs:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeManifestIPFS"
+        selection:
+          $ref: "#/components/schemas/RouteExplainSelection"
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteCandidateEvaluation"
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/DoctorCheck"
+        warnings:
+          type: array
+          items:
+            type: string
+        recommendations:
+          type: array
+          items:
+            $ref: "#/components/schemas/DoctorRecommendation"
+        next_commands:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    CDNDoctorRouteProfile:
+      type: object
+      properties:
+        name:
+          type: string
+        primary:
+          type: string
+        backups:
+          type: array
+          items:
+            type: string
+        allow_redirect:
+          type: boolean
+        default_cache_control:
+          type: string
+        routing_policy:
+          type: string
+        targets:
+          type: array
+          items:
+            type: string
+    CDNDoctorObject:
+      type: object
+      properties:
+        logical_path:
+          type: string
+        object_id:
+          type: integer
+          format: int64
+        asset_type:
+          type: string
+        physical_key:
+          type: string
+        size:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+        content_type:
+          type: string
+        cache_control:
+          type: string
+        route_profile:
+          type: string
+        primary_target:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CDNDoctorReplica:
+      type: object
+      properties:
+        target:
+          type: string
+        target_type:
+          type: string
+        status:
+          type: string
+        direct_url:
+          type: string
+        url_redacted:
+          type: boolean
+        last_error:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        ipfs:
+          $ref: "#/components/schemas/EdgeManifestIPFS"
+    SiteDoctorReport:
+      type: object
+      required: [status, checked_at_utc, site, checks]
+      properties:
+        status:
+          type: string
+        checked_at_utc:
+          type: string
+          format: date-time
+        site:
+          $ref: "#/components/schemas/Site"
+        deployment:
+          $ref: "#/components/schemas/SiteDeployment"
+        path:
+          type: string
+        production_url:
+          type: string
+        production_urls:
+          type: array
+          items:
+            type: string
+        preview_url:
+          type: string
+        route:
+          $ref: "#/components/schemas/RouteExplainResponse"
+        expected_edge_headers:
+          type: object
+          additionalProperties:
+            type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/DoctorCheck"
+        warnings:
+          type: array
+          items:
+            type: string
+        recommendations:
+          type: array
+          items:
+            $ref: "#/components/schemas/DoctorRecommendation"
+        next_commands:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    RouteExplainResponse:
+      type: object
+      required: [site_id, deployment_id, path, route_profile, deployment_target, resource_failover, route]
+      properties:
+        site_id:
+          type: string
+        deployment_id:
+          type: string
+        path:
+          type: string
+        matched_path:
+          type: string
+        match_type:
+          type: string
+        route_profile:
+          type: string
+        deployment_target:
+          type: string
+        routing_policy:
+          type: string
+        resource_failover:
+          type: boolean
+        region_group:
+          type: string
+        hash_key:
+          type: string
+        route:
+          $ref: "#/components/schemas/EdgeManifestRoute"
+        selection:
+          $ref: "#/components/schemas/RouteExplainSelection"
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteCandidateEvaluation"
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    RouteExplainSelection:
+      type: object
+      properties:
+        target:
+          type: string
+        target_type:
+          type: string
+        type:
+          type: string
+        region_group:
+          type: string
+        url:
+          type: string
+        reason:
+          type: string
+    RouteCandidateEvaluation:
+      type: object
+      required: [target, status]
+      properties:
+        target:
+          type: string
+        target_type:
+          type: string
+        type:
+          type: string
+        region_group:
+          type: string
+        weight:
+          type: integer
+        priority:
+          type: integer
+        fallback_only:
+          type: boolean
+        url:
+          type: string
+        status:
+          type: string
+        replica_status:
+          type: string
+        reason:
+          type: string
+        selected:
+          type: boolean
+        ipfs:
+          $ref: "#/components/schemas/EdgeManifestIPFS"
+    EdgeManifestRoute:
+      type: object
+      required: [type, delivery, file, status, size, object_id]
+      properties:
+        type:
+          type: string
+        delivery:
+          type: string
+        file:
+          type: string
+        status:
+          type: integer
+        location:
+          type: string
+        content_type:
+          type: string
+        cache_control:
+          type: string
+        object_cache_control:
+          type: string
+        size:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+        object_id:
+          type: integer
+          format: int64
+        object_key:
+          type: string
+        ipfs:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeManifestIPFS"
+        gateway_fallbacks:
+          type: array
+          items:
+            type: string
+        routing_policy:
+          $ref: "#/components/schemas/EdgeRoutingPolicy"
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeRouteCandidate"
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+      additionalProperties: true
+    EdgeRoutingPolicy:
+      type: object
+      properties:
+        name:
+          type: string
+        mode:
+          type: string
+        default_region_group:
+          type: string
+        sources:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    EdgeRouteCandidate:
+      type: object
+      required: [target, type, region_group, url, status]
+      properties:
+        target:
+          type: string
+        target_type:
+          type: string
+        type:
+          type: string
+        region_group:
+          type: string
+        weight:
+          type: integer
+        priority:
+          type: integer
+        fallback_only:
+          type: boolean
+        url:
+          type: string
+        status:
+          type: string
+        ipfs:
+          $ref: "#/components/schemas/EdgeManifestIPFS"
+    EdgeManifestIPFS:
+      type: object
+      required: [target, provider, cid]
+      properties:
+        target:
+          type: string
+        provider:
+          type: string
+        cid:
+          type: string
+        gateway_url:
+          type: string
+        pin_status:
+          type: string
+        provider_pin_id:
+          type: string
     CreateAssetBucketRequest:
       type: object
       required: [slug]
@@ -1627,6 +2295,105 @@ components:
           type: string
           format: date-time
       additionalProperties: true
+    SiteDeploymentDeleteResult:
+      type: object
+      properties:
+        site_id:
+          type: string
+        deployment_id:
+          type: string
+        status:
+          type: string
+          description: Present on dry-run plans.
+        deployment_target:
+          type: string
+          description: Present on dry-run plans.
+        active:
+          type: boolean
+          description: Present on dry-run plans.
+        pinned:
+          type: boolean
+          description: Present on dry-run plans.
+        dry_run:
+          type: boolean
+        delete_objects:
+          type: boolean
+        delete_remote:
+          type: boolean
+        safe_to_run:
+          type: boolean
+          description: Present on dry-run plans; false for active or pinned deployments.
+        remote_cleanup_supported:
+          type: boolean
+          description: Whether the requested delete flags can clean remote resources without an external provider-specific cleanup flow.
+        remote_cleanup_blockers:
+          type: array
+          items:
+            type: string
+          description: Reasons remote cleanup is not supported by this metadata delete path.
+        deleted:
+          type: boolean
+        deleted_deployment:
+          type: boolean
+        object_count:
+          type: integer
+        objects:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        evidence:
+          type: object
+          properties:
+            file_count:
+              type: integer
+            artifact_sha256:
+              type: string
+            manifest_key:
+              type: string
+            cloudflare_static:
+              $ref: "#/components/schemas/CloudflareStaticDeploymentEvidence"
+        warning:
+          type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        errors:
+          type: array
+          items:
+            type: string
+    CloudflareStaticDeploymentEvidence:
+      type: object
+      properties:
+        worker_name:
+          type: string
+        version_id:
+          type: string
+        domains:
+          type: array
+          items:
+            type: string
+        urls:
+          type: array
+          items:
+            type: string
+        compatibility_date:
+          type: string
+        assets_sha256:
+          type: string
+        cache_policy:
+          type: string
+        headers_generated:
+          type: boolean
+        not_found_handling:
+          type: string
+        verification_status:
+          type: string
+        verified_at:
+          type: string
+        published_at:
+          type: string
     EdgeManifest:
       type: object
       required: [version, kind, site_id, deployment_id, environment, status, route_profile, deployment_target, mode, generated_at_utc, routes]
@@ -1659,14 +2426,11 @@ components:
         routes:
           type: object
           additionalProperties:
-            type: object
-            additionalProperties: true
+            $ref: "#/components/schemas/EdgeManifestRoute"
         fallback:
-          type: object
-          additionalProperties: true
+          $ref: "#/components/schemas/EdgeManifestRoute"
         not_found:
-          type: object
-          additionalProperties: true
+          $ref: "#/components/schemas/EdgeManifestRoute"
         warnings:
           type: array
           items:

@@ -61,6 +61,9 @@ func (s *Server) authorizeAPI(r *http.Request, principal authPrincipal) bool {
 	if apiPath == "/auth/invites" || apiPath == "/users" || strings.HasPrefix(apiPath, "/users/") {
 		return principal.Role == model.RoleOwner
 	}
+	if apiPath == "/audit-events" {
+		return r.Method == http.MethodGet && (principal.Role == model.RoleOwner || principal.Role == model.RoleMaintainer)
+	}
 	if strings.HasPrefix(apiPath, "/tokens/") {
 		return r.Method == http.MethodDelete
 	}

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"supercdn/internal/deploymenttarget"
 )
 
 type Config struct {
@@ -376,7 +378,7 @@ func (c *Config) ApplyDefaults(baseDir string) error {
 			return fmt.Errorf("route profile %q replication_policy require_backups requires at least one backup storage", p.Name)
 		}
 		p.ReplicationPolicy = policy
-		target, err := normalizeDeploymentTarget(p.DeploymentTarget)
+		target, err := deploymenttarget.Normalize(p.DeploymentTarget)
 		if err != nil {
 			return fmt.Errorf("route profile %q deployment_target: %w", p.Name, err)
 		}
@@ -478,23 +480,6 @@ func normalizeRoutingRegionGroup(value string) string {
 		return "archive"
 	default:
 		return strings.TrimSpace(value)
-	}
-}
-
-func normalizeDeploymentTarget(value string) (string, error) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" {
-		return "", nil
-	}
-	switch value {
-	case "origin", "go_origin", "origin_assisted":
-		return "origin_assisted", nil
-	case "cloudflare", "cloudflare_static", "workers_static", "workers_assets", "pages":
-		return "cloudflare_static", nil
-	case "hybrid", "hybrid_edge", "edge":
-		return "hybrid_edge", nil
-	default:
-		return "", fmt.Errorf("must be origin_assisted, cloudflare_static or hybrid_edge")
 	}
 }
 
