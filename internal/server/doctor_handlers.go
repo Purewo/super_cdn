@@ -39,13 +39,14 @@ type doctorAuthStatus struct {
 }
 
 type doctorServerStatus struct {
-	StorageTargetCount    int  `json:"storage_target_count"`
-	RouteProfileCount     int  `json:"route_profile_count"`
-	ResourceLibraryCount  int  `json:"resource_library_count"`
-	RoutingPolicyCount    int  `json:"routing_policy_count"`
-	MaxActiveTransfers    int  `json:"max_active_transfers"`
-	OverclockMode         bool `json:"overclock_mode,omitempty"`
-	StagingDirInitialized bool `json:"staging_dir_initialized"`
+	StorageTargetCount    int    `json:"storage_target_count"`
+	RouteProfileCount     int    `json:"route_profile_count"`
+	ResourceLibraryCount  int    `json:"resource_library_count"`
+	RoutingPolicyCount    int    `json:"routing_policy_count"`
+	MaxActiveTransfers    int    `json:"max_active_transfers"`
+	OverclockMode         bool   `json:"overclock_mode,omitempty"`
+	StagingDirInitialized bool   `json:"staging_dir_initialized"`
+	SchemaVersion         string `json:"schema_version,omitempty"`
 }
 
 type doctorCheck struct {
@@ -93,6 +94,7 @@ func (s *Server) doctorReport(ctx context.Context, includeResources, includeRout
 			MaxActiveTransfers:    cap(s.transferSem),
 			OverclockMode:         s.overclockMode(),
 			StagingDirInitialized: stagingInitialized,
+			SchemaVersion:         s.db.SchemaVersion(),
 		},
 	}
 	resp.addCheck("auth", "ok", "token accepted", "")

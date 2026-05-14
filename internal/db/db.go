@@ -16,7 +16,8 @@ import (
 )
 
 type DB struct {
-	sql *sql.DB
+	sql           *sql.DB
+	schemaVersion string
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {
@@ -39,6 +40,8 @@ func Open(ctx context.Context, path string) (*DB, error) {
 func (d *DB) Close() error { return d.sql.Close() }
 
 func (d *DB) SQL() *sql.DB { return d.sql }
+
+func (d *DB) SchemaVersion() string { return d.schemaVersion }
 
 func (d *DB) migrate(ctx context.Context) error {
 	stmts := []string{
@@ -90,6 +93,10 @@ func (d *DB) migrate(ctx context.Context) error {
 			action TEXT NOT NULL,
 			resource TEXT NOT NULL,
 			created_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS schema_migrations (
+			version TEXT PRIMARY KEY,
+			applied_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS projects (
 			id TEXT PRIMARY KEY,
@@ -258,47 +265,28 @@ func (d *DB) migrate(ctx context.Context) error {
 	if _, err := d.sql.ExecContext(ctx, `INSERT INTO workspaces(id, name, created_at) VALUES(?, ?, ?) ON CONFLICT(id) DO NOTHING`, model.DefaultWorkspaceID, "Default", nowString()); err != nil {
 		return err
 	}
-	if err := d.ensureColumn(ctx, "projects", "workspace_id", "TEXT NOT NULL DEFAULT 'default'"); err != nil {
+	if err := d.applySchemaMigrations(ctx); err != nil {
 		return err
 	}
-	if err := d.ensureColumn(ctx, "sites", "workspace_id", "TEXT NOT NULL DEFAULT 'default'"); err != nil {
+	version, err := d.currentSchemaVersion(ctx)
+	if err != nil {
 		return err
 	}
-	if err := d.ensureColumn(ctx, "asset_buckets", "workspace_id", "TEXT NOT NULL DEFAULT 'default'"); err != nil {
-		return err
-	}
-	if err := d.ensureColumn(ctx, "jobs", "result", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := d.ensureColumn(ctx, "sites", "name", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := d.ensureColumn(ctx, "sites", "deployment_target", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := d.ensureColumn(ctx, "sites", "routing_policy", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := d.ensureColumn(ctx, "sites", "status", "TEXT NOT NULL DEFAULT 'active'"); err != nil {
-		return err
-	}
-	if err := d.ensureColumn(ctx, "site_deployments", "deployment_target", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := d.ensureColumn(ctx, "site_deployments", "routing_policy", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := d.ensureColumn(ctx, "site_deployments", "resource_failover", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return err
-	}
-	if err := d.ensureColumn(ctx, "asset_buckets", "routing_policy", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
+	d.schemaVersion = version
 	return nil
 }
 
+type sqlReadWriter interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 func (d *DB) ensureColumn(ctx context.Context, table, column, definition string) error {
-	rows, err := d.sql.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	return ensureColumn(ctx, d.sql, table, column, definition)
+}
+
+func ensureColumn(ctx context.Context, conn sqlReadWriter, table, column, definition string) error {
+	rows, err := conn.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {
 		return err
 	}
@@ -318,7 +306,7 @@ func (d *DB) ensureColumn(ctx context.Context, table, column, definition string)
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = d.sql.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
+	_, err = conn.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
 	return err
 }
 
