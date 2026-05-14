@@ -1,6 +1,6 @@
 # Super CDN Handoff
 
-Last updated: 2026-05-06 Asia/Shanghai.
+Last updated: 2026-05-14 Asia/Shanghai.
 
 ## Current State
 
@@ -8,13 +8,36 @@ The service is still in development mode. There is no need to preserve compatibi
 
 v0.1 and v0.2.0 are closed as stable internal milestones. The `v0.1.x` line remains feature-frozen, and `v0.2.x` should only receive bug fixes, documentation, operational hardening and regression coverage around IPFS/Web hosting. New product work starts from `docs/v0.3-roadmap.md`, with multi-resource-library scheduling, replica repair, smart routing and explicit static-resource failover as the next major feature surface.
 
-Next-session priority note: start with the resource capability model, then replica state/repair, then route explanation and explicit failover hardening. Do not start with UI work; the scheduling and replica core should settle first.
+Next-session priority note: start the post-`v0.4.0` refactor from [docs/refactor-plan.md](refactor-plan.md). Do not start new product features first. The first step is Phase 0 safety net work: CI and release checklist, then extract diagnostics and GC from `internal/server/server.go`.
 
 Web hosting boundary note: the current product rule is recorded in `docs/web-hosting-boundaries.md`. Go entry delivery is for tests/integration/compatibility; preferred Web hosting is Cloudflare entry plus non-entry resources on AList/OpenList, Cloudflare-native static assets or IPFS/Pinata. R2 remains a CDN/object acceleration line; R2-backed Web hosting is legacy compatibility and not the mainstream path. Static-resource failover must never fall back to Go.
 
 GitHub operation note: for GitHub network operations such as `git push`, `git fetch`, tag push and release API calls, prefer using the local proxy at `http://127.0.0.1:10808` when direct access is slow or reset. Do not configure a permanent global, system or repository Git proxy. Use per-command temporary proxy flags instead, for example `git -c http.proxy=http://127.0.0.1:10808 -c https.proxy=http://127.0.0.1:10808 push origin main`.
 
-## Next Session Plan: Real User Onboarding Hardening
+## Next Session Plan: Post-v0.4.0 Refactor
+
+The real-user onboarding hardening cycle is frozen in `v0.4.0`.
+
+The next session should directly follow [docs/refactor-plan.md](refactor-plan.md).
+
+Immediate execution order:
+
+1. Add repository CI that runs Go format/test/vet/build and Worker test/typecheck.
+2. Add `docs/release-checklist.md` from the `v0.4.0` release verification commands.
+3. Extract diagnostics and manual GC from `internal/server/server.go` into focused files.
+4. Extract the matching CLI diagnostic and bucket command groups from `cmd/supercdnctl/main.go`.
+5. Keep behavior unchanged; run the full validation set after each slice.
+
+Do not start with UI, routing redesign, or new cleanup semantics.
+
+Refactor success criteria:
+
+- `internal/server/server.go` becomes construction, middleware, route registration and shared server plumbing.
+- `cmd/supercdnctl/main.go` becomes global flag parsing and command dispatch.
+- CI enforces the current local release checks.
+- OpenAPI, versioned migrations and audit-event wiring are planned follow-up phases after the file split is safe.
+
+## Previous Cycle: Real User Onboarding Hardening
 
 Baseline:
 
