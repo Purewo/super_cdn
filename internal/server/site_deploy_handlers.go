@@ -62,6 +62,30 @@ type siteDeployManifestFile struct {
 	ObjectID     int64  `json:"object_id"`
 }
 
+type recordCloudflareStaticDeploymentRequest struct {
+	Environment        string   `json:"environment"`
+	RouteProfile       string   `json:"route_profile"`
+	DeploymentTarget   string   `json:"deployment_target"`
+	RoutingPolicy      string   `json:"routing_policy"`
+	ResourceFailover   bool     `json:"resource_failover"`
+	Mode               string   `json:"mode"`
+	WorkerName         string   `json:"worker_name"`
+	VersionID          string   `json:"version_id"`
+	Domains            []string `json:"domains"`
+	CompatibilityDate  string   `json:"compatibility_date"`
+	AssetsSHA256       string   `json:"assets_sha256"`
+	CachePolicy        string   `json:"cache_policy"`
+	HeadersGenerated   bool     `json:"headers_generated"`
+	NotFoundHandling   string   `json:"not_found_handling"`
+	VerificationStatus string   `json:"verification_status"`
+	VerifiedAtUTC      string   `json:"verified_at_utc"`
+	FileCount          int      `json:"file_count"`
+	TotalSize          int64    `json:"total_size"`
+	PublishedAtUTC     string   `json:"published_at_utc"`
+	Promote            bool     `json:"promote"`
+	Pinned             bool     `json:"pinned"`
+}
+
 func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	if siteID == "" {
