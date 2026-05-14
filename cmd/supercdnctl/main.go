@@ -7,11 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -1249,89 +1247,6 @@ func setR2Credentials(args []string) error {
 		return err
 	}
 	return printJSON(out)
-}
-
-func runCommand(name string, args, env []string) (string, int, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Env = env
-	raw, err := cmd.CombinedOutput()
-	if err == nil {
-		return string(raw), 0, nil
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		return string(raw), exitErr.ExitCode(), err
-	}
-	return string(raw), -1, err
-}
-
-func httpClientWithDNSResolver(resolverAddress string) (*http.Client, error) {
-	resolverAddress = strings.TrimSpace(resolverAddress)
-	if resolverAddress == "" {
-		return nil, nil
-	}
-	if !strings.Contains(resolverAddress, ":") {
-		resolverAddress += ":53"
-	}
-	if _, _, err := net.SplitHostPort(resolverAddress); err != nil {
-		return nil, fmt.Errorf("invalid resolver %q: %w", resolverAddress, err)
-	}
-	resolverDialer := &net.Dialer{Timeout: 5 * time.Second}
-	resolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return resolverDialer.DialContext(ctx, network, resolverAddress)
-		},
-	}
-	dialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-		Resolver:  resolver,
-	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = dialer.DialContext
-	return &http.Client{Transport: transport}, nil
-}
-
-func cleanWorkerName(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var b strings.Builder
-	lastDash := false
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-			lastDash = false
-			continue
-		}
-		if !lastDash {
-			b.WriteByte('-')
-			lastDash = true
-		}
-	}
-	return strings.Trim(b.String(), "-")
-}
-
-func deploymentTargetAlias(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "cloudflare", "cloudflare_static", "workers_static", "workers_assets", "pages":
-		return "cloudflare_static"
-	case "hybrid", "hybrid_edge", "edge":
-		return "hybrid_edge"
-	case "origin", "go_origin", "origin_assisted":
-		return "origin_assisted"
-	default:
-		return value
-	}
-}
-
-func extractCloudflareVersionID(output string) string {
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if value, ok := strings.CutPrefix(line, "Current Version ID:"); ok {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }
 
 func writeR2CredentialsToConfig(configPath string, resp r2CredentialsCLIResponse) ([]string, error) {
