@@ -245,7 +245,7 @@ func writeCloudflareStaticWranglerConfig(workerName, assetsDir, compatDate, notF
 	b.WriteString("name = " + strconv.Quote(workerName) + "\n")
 	b.WriteString("compatibility_date = " + strconv.Quote(strings.TrimSpace(compatDate)) + "\n\n")
 	b.WriteString("[assets]\n")
-	b.WriteString("directory = " + strconv.Quote(filepath.ToSlash(assetsDir)) + "\n")
+	b.WriteString("directory = " + tomlPathString(assetsDir) + "\n")
 	b.WriteString("not_found_handling = " + strconv.Quote(notFoundHandling) + "\n")
 	if err := os.WriteFile(configPath, []byte(b.String()), 0644); err != nil {
 		cleanup()

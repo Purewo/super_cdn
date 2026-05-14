@@ -81,5 +81,5 @@ func tomlString(value string) string {
 }
 
 func tomlPathString(value string) string {
-	return tomlString(filepath.ToSlash(value))
+	return tomlString(strings.ReplaceAll(filepath.ToSlash(value), `\`, `/`))
 }
