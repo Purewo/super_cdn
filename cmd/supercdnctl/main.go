@@ -357,17 +357,6 @@ func whoami(c client, args []string) error {
 	return c.do(http.MethodGet, "/api/v1/auth/me", nil, "")
 }
 
-func doctor(c client, args []string) error {
-	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
-	resources := fs.Bool("resources", true, "include resource library status; root token required for details")
-	routing := fs.Bool("routing", true, "include routing policy status")
-	_ = fs.Parse(args)
-	q := url.Values{}
-	q.Set("resources", strconv.FormatBool(*resources))
-	q.Set("routing", strconv.FormatBool(*routing))
-	return c.do(http.MethodGet, "/api/v1/doctor?"+q.Encode(), nil, "")
-}
-
 func inviteUser(c client, args []string) error {
 	fs := flag.NewFlagSet("invite-user", flag.ExitOnError)
 	name := fs.String("name", "", "user name")
@@ -3682,41 +3671,6 @@ func deleteDeployment(c client, args []string) error {
 	return c.do(http.MethodDelete, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment)+"?"+q.Encode(), nil, "")
 }
 
-func gc(c client, args []string) error {
-	fs := flag.NewFlagSet("gc", flag.ExitOnError)
-	dryRun := fs.Bool("dry-run", true, "plan cleanup without deleting; pass -dry-run=false to delete")
-	bucket := fs.String("bucket", "", "bucket slug scope for future remote cleanup")
-	site := fs.String("site", "", "site id scope for future remote cleanup")
-	olderThan := fs.Duration("older-than", time.Hour, "only clean local staging files older than this duration")
-	deleteRemote := fs.Bool("delete-remote", false, "allow future remote cleanup; current implementation only cleans local staging")
-	force := fs.Bool("force", false, "required for very small -older-than values")
-	_ = fs.Parse(args)
-	if strings.TrimSpace(*bucket) != "" && strings.TrimSpace(*site) != "" {
-		return errors.New("choose only one of -bucket or -site")
-	}
-	if *olderThan <= 0 {
-		return errors.New("-older-than must be greater than 0")
-	}
-	return c.doJSON(http.MethodPost, "/api/v1/gc", map[string]any{
-		"dry_run":            *dryRun,
-		"bucket":             strings.TrimSpace(*bucket),
-		"site":               strings.TrimSpace(*site),
-		"older_than_seconds": int64(olderThan.Seconds()),
-		"delete_remote":      *deleteRemote,
-		"force":              *force,
-	})
-}
-
-func gcSite(c client, args []string) error {
-	fs := flag.NewFlagSet("gc-site", flag.ExitOnError)
-	site := fs.String("site", "", "site id")
-	_ = fs.Parse(args)
-	if *site == "" {
-		return errors.New("-site is required")
-	}
-	return c.doJSON(http.MethodPost, "/api/v1/sites/"+url.PathEscape(*site)+"/gc", map[string]any{})
-}
-
 func initLibraries(c client, args []string) error {
 	fs := flag.NewFlagSet("init-libraries", flag.ExitOnError)
 	libraries := fs.String("libraries", "", "comma-separated resource library names; empty means all")
@@ -3761,89 +3715,6 @@ func routingPolicyStatus(c client, args []string) error {
 		path += "?policy=" + url.QueryEscape(strings.TrimSpace(*policy))
 	}
 	return c.do(http.MethodGet, path, nil, "")
-}
-
-func routeExplain(c client, args []string) error {
-	fs := flag.NewFlagSet("route-explain", flag.ExitOnError)
-	site := fs.String("site", "", "site id")
-	routePath := fs.String("path", "", "site request path, for example /assets/app.js")
-	deployment := fs.String("deployment", "", "deployment id; empty uses active production deployment")
-	country := fs.String("country", "", "simulated Cloudflare country code, for example CN")
-	clientIP := fs.String("client-ip", "", "simulated client IP for deterministic load-balance hashing")
-	_ = fs.Parse(args)
-	if strings.TrimSpace(*site) == "" || strings.TrimSpace(*routePath) == "" {
-		return errors.New("-site and -path are required")
-	}
-	q := url.Values{}
-	q.Set("path", strings.TrimSpace(*routePath))
-	if strings.TrimSpace(*deployment) != "" {
-		q.Set("deployment", strings.TrimSpace(*deployment))
-	}
-	if strings.TrimSpace(*country) != "" {
-		q.Set("country", strings.TrimSpace(*country))
-	}
-	if strings.TrimSpace(*clientIP) != "" {
-		q.Set("client_ip", strings.TrimSpace(*clientIP))
-	}
-	return c.do(http.MethodGet, "/api/v1/sites/"+url.PathEscape(strings.TrimSpace(*site))+"/route-explain?"+q.Encode(), nil, "")
-}
-
-func cdnDoctor(c client, args []string) error {
-	fs := flag.NewFlagSet("cdn-doctor", flag.ExitOnError)
-	bucket := fs.String("bucket", "", "asset bucket slug")
-	objectPath := fs.String("path", "", "optional bucket logical path")
-	country := fs.String("country", "", "simulated Cloudflare country code for routing selection, for example CN")
-	clientIP := fs.String("client-ip", "", "simulated client IP for deterministic load-balance hashing")
-	_ = fs.Parse(args)
-	if strings.TrimSpace(*bucket) == "" {
-		return errors.New("-bucket is required")
-	}
-	q := url.Values{}
-	if strings.TrimSpace(*objectPath) != "" {
-		q.Set("path", strings.TrimSpace(*objectPath))
-	}
-	if strings.TrimSpace(*country) != "" {
-		q.Set("country", strings.TrimSpace(*country))
-	}
-	if strings.TrimSpace(*clientIP) != "" {
-		q.Set("client_ip", strings.TrimSpace(*clientIP))
-	}
-	apiPath := "/api/v1/asset-buckets/" + url.PathEscape(strings.TrimSpace(*bucket)) + "/doctor"
-	if encoded := q.Encode(); encoded != "" {
-		apiPath += "?" + encoded
-	}
-	return c.do(http.MethodGet, apiPath, nil, "")
-}
-
-func siteDoctor(c client, args []string) error {
-	fs := flag.NewFlagSet("site-doctor", flag.ExitOnError)
-	site := fs.String("site", "", "site id")
-	routePath := fs.String("path", "", "optional site request path, for example /assets/app.js")
-	deployment := fs.String("deployment", "", "deployment id; empty uses active production deployment")
-	country := fs.String("country", "", "simulated Cloudflare country code for routing selection, for example CN")
-	clientIP := fs.String("client-ip", "", "simulated client IP for deterministic load-balance hashing")
-	_ = fs.Parse(args)
-	if strings.TrimSpace(*site) == "" {
-		return errors.New("-site is required")
-	}
-	q := url.Values{}
-	if strings.TrimSpace(*routePath) != "" {
-		q.Set("path", strings.TrimSpace(*routePath))
-	}
-	if strings.TrimSpace(*deployment) != "" {
-		q.Set("deployment", strings.TrimSpace(*deployment))
-	}
-	if strings.TrimSpace(*country) != "" {
-		q.Set("country", strings.TrimSpace(*country))
-	}
-	if strings.TrimSpace(*clientIP) != "" {
-		q.Set("client_ip", strings.TrimSpace(*clientIP))
-	}
-	apiPath := "/api/v1/sites/" + url.PathEscape(strings.TrimSpace(*site)) + "/doctor"
-	if encoded := q.Encode(); encoded != "" {
-		apiPath += "?" + encoded
-	}
-	return c.do(http.MethodGet, apiPath, nil, "")
 }
 
 func healthCheck(c client, args []string) error {
