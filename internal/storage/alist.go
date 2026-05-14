@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,7 +96,7 @@ func (s *AListStore) Put(ctx context.Context, opts PutOptions) (string, error) {
 }
 
 func (s *AListStore) Get(ctx context.Context, key string, opts GetOptions) (*ObjectStream, error) {
-	info, err := s.getInfo(ctx, key)
+	info, err := s.getInfoWithRefresh(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +138,7 @@ func (s *AListStore) Get(ctx context.Context, key string, opts GetOptions) (*Obj
 }
 
 func (s *AListStore) Stat(ctx context.Context, key string) (*Stat, error) {
-	info, err := s.getInfo(ctx, key)
+	info, err := s.getInfoWithRefresh(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -270,6 +271,23 @@ func (s *AListStore) InitDirs(ctx context.Context, opts InitOptions) (*InitResul
 	return result, firstErr
 }
 
+func (s *AListStore) getInfoWithRefresh(ctx context.Context, key string) (aListFileInfo, error) {
+	info, err := s.getInfo(ctx, key)
+	if err == nil || !errors.Is(err, ErrNotFound) {
+		return info, err
+	}
+	remote := path.Clean(s.remotePath(key))
+	parent := path.Dir(remote)
+	if refreshErr := s.refreshDir(ctx, parent); refreshErr != nil {
+		return aListFileInfo{}, fmt.Errorf("%w; alist refresh parent %q failed: %v", err, parent, refreshErr)
+	}
+	retry, retryErr := s.getInfo(ctx, key)
+	if retryErr != nil {
+		return aListFileInfo{}, retryErr
+	}
+	return retry, nil
+}
+
 func (s *AListStore) getInfo(ctx context.Context, key string) (aListFileInfo, error) {
 	payload := map[string]any{"path": s.remotePath(key), "password": ""}
 	raw, _ := json.Marshal(payload)
@@ -284,8 +302,8 @@ func (s *AListStore) getInfo(ctx context.Context, key string) (aListFileInfo, er
 	}, &resp); err != nil {
 		return aListFileInfo{}, err
 	}
-	if resp.Code == 404 {
-		return aListFileInfo{}, ErrNotFound
+	if resp.Code == 404 || isMissingMessage(resp.Message) {
+		return aListFileInfo{}, fmt.Errorf("alist get missing: code=%d message=%s: %w", resp.Code, resp.Message, ErrNotFound)
 	}
 	if resp.Code != 200 {
 		return aListFileInfo{}, fmt.Errorf("alist get failed: code=%d message=%s", resp.Code, resp.Message)
@@ -389,6 +407,39 @@ func (s *AListStore) ensureParentDir(ctx context.Context, key string) error {
 		}
 	}
 	return nil
+}
+
+func (s *AListStore) refreshDir(ctx context.Context, remote string) error {
+	remote = path.Clean(remote)
+	if remote == "." || remote == "" {
+		remote = "/"
+	}
+	payload := map[string]any{
+		"path":     remote,
+		"password": "",
+		"page":     1,
+		"per_page": 1,
+		"refresh":  true,
+	}
+	raw, _ := json.Marshal(payload)
+	var resp aListEnvelope[json.RawMessage]
+	if err := s.doAuthorizedJSON(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/fs/list", bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, &resp); err != nil {
+		return err
+	}
+	if resp.Code == 200 {
+		return nil
+	}
+	if resp.Code == 404 || isMissingMessage(resp.Message) {
+		return fmt.Errorf("alist refresh path %q not found: code=%d message=%s", remote, resp.Code, resp.Message)
+	}
+	return fmt.Errorf("alist refresh failed: code=%d message=%s", resp.Code, resp.Message)
 }
 
 func (s *AListStore) dirExists(ctx context.Context, remote string) (bool, error) {

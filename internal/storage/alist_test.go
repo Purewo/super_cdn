@@ -185,6 +185,75 @@ func TestAListStatPrefersSignedProxyURLWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestAListStatRefreshesParentDirOnCachedMissing(t *testing.T) {
+	var getCalls int
+	var refreshed bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/fs/get":
+			getCalls++
+			var req struct {
+				Path string `json:"path"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req.Path != "/repo/sites/demo/artifacts/app.zip" {
+				t.Fatalf("stat path = %q", req.Path)
+			}
+			if !refreshed {
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 500, "message": "object not found"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code":    200,
+				"message": "success",
+				"data": map[string]any{
+					"name":    "app.zip",
+					"size":    1024,
+					"raw_url": "http://raw.example/app.zip",
+				},
+			})
+		case "/api/fs/list":
+			var req struct {
+				Path    string `json:"path"`
+				Refresh bool   `json:"refresh"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req.Path != "/repo/sites/demo/artifacts" || !req.Refresh {
+				t.Fatalf("refresh request path=%q refresh=%v", req.Path, req.Refresh)
+			}
+			refreshed = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "message": "success", "data": map[string]any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	store, err := NewAListStore(AListOptions{
+		Name:    "alist",
+		BaseURL: server.URL,
+		Token:   "token",
+		Root:    "/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, err := store.Stat(context.Background(), "sites/demo/artifacts/app.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat.Size != 1024 || stat.Locator != "http://raw.example/app.zip" {
+		t.Fatalf("unexpected stat: %+v", stat)
+	}
+	if getCalls != 2 || !refreshed {
+		t.Fatalf("get calls=%d refreshed=%v", getCalls, refreshed)
+	}
+}
+
 func TestAListRefreshesExpiredTokenAndRetriesStat(t *testing.T) {
 	var getCalls int
 	var loginCalls int
