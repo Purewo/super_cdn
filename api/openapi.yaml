@@ -1,0 +1,1804 @@
+openapi: 3.1.0
+info:
+  title: Super CDN Control Plane API
+  version: 0.4.0
+  description: |
+    First formal contract for the stable Super CDN operator API.
+    This file describes the current v0.4.0-era behavior for the CLI-facing
+    control plane: auth, diagnostics, asset buckets, site deployments, edge
+    manifests, and conservative garbage collection.
+
+    Root-only provider provisioning, legacy low-level object repair, and init
+    endpoints remain documented in docs/cli-reference.md until their contracts
+    are frozen.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local development server
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Diagnostics
+  - name: Asset Buckets
+  - name: Sites
+  - name: Deployments
+  - name: Edge Manifest
+  - name: Garbage Collection
+paths:
+  "/api/v1/auth/accept-invite":
+    post:
+      tags: [Auth]
+      operationId: acceptInvite
+      summary: Accept an invite and issue a user API token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptInviteRequest"
+      responses:
+        "201":
+          description: User and API token were created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptInviteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/api/v1/auth/me":
+    get:
+      tags: [Auth]
+      operationId: getCurrentPrincipal
+      summary: Read the current token identity
+      responses:
+        "200":
+          description: Current principal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthPrincipal"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  "/api/v1/auth/invites":
+    post:
+      tags: [Auth]
+      operationId: createInvite
+      summary: Create a one-time invite token
+      description: Owner-only for user tokens; root tokens can also call it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInviteRequest"
+      responses:
+        "201":
+          description: Invite was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateInviteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/api/v1/users":
+    get:
+      tags: [Auth]
+      operationId: listUsers
+      summary: List users in the current workspace
+      description: Owner-only for user tokens; root tokens can also call it.
+      responses:
+        "200":
+          description: Workspace users.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/User"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/api/v1/users/{id}/tokens":
+    post:
+      tags: [Auth]
+      operationId: createUserToken
+      summary: Create an API token for a workspace user
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  default: manual
+      responses:
+        "201":
+          description: API token was created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [api_token, token]
+                properties:
+                  api_token:
+                    type: string
+                  token:
+                    $ref: "#/components/schemas/APIToken"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/tokens/{id}":
+    delete:
+      tags: [Auth]
+      operationId: revokeToken
+      summary: Revoke an API token
+      parameters:
+        - $ref: "#/components/parameters/TokenID"
+      responses:
+        "200":
+          description: Token was revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, token_id]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  token_id:
+                    type: string
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/doctor":
+    get:
+      tags: [Diagnostics]
+      operationId: getDoctorReport
+      summary: Run the control-plane support report
+      parameters:
+        - name: resources
+          in: query
+          schema:
+            type: boolean
+            default: true
+        - name: routing
+          in: query
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: Diagnostic report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DoctorReport"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/api/v1/asset-buckets":
+    get:
+      tags: [Asset Buckets]
+      operationId: listAssetBuckets
+      summary: List asset buckets visible to the current principal
+      responses:
+        "200":
+          description: Asset buckets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [buckets]
+                properties:
+                  buckets:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AssetBucket"
+    post:
+      tags: [Asset Buckets]
+      operationId: createAssetBucket
+      summary: Create an asset bucket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAssetBucketRequest"
+      responses:
+        "201":
+          description: Asset bucket was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetBucket"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/api/v1/asset-buckets/{slug}":
+    get:
+      tags: [Asset Buckets]
+      operationId: getAssetBucket
+      summary: Read an asset bucket
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+      responses:
+        "200":
+          description: Asset bucket.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetBucket"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Asset Buckets]
+      operationId: deleteAssetBucket
+      summary: Delete an asset bucket
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+        - name: force
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: delete_objects
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: delete_remote
+          in: query
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: Bucket deletion result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteAssetBucketResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/api/v1/asset-buckets/{slug}/doctor":
+    get:
+      tags: [Diagnostics]
+      operationId: getAssetBucketDoctor
+      summary: Diagnose an asset-bucket path and delivery route
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+        - name: path
+          in: query
+          schema:
+            type: string
+        - name: country
+          in: query
+          schema:
+            type: string
+        - name: client_ip
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Diagnostic report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnyObject"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/asset-buckets/{slug}/init":
+    post:
+      tags: [Asset Buckets]
+      operationId: initAssetBucket
+      summary: Create remote bucket directories where supported
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dry_run:
+                  type: boolean
+                  default: false
+      responses:
+        "200":
+          description: Init result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/api/v1/asset-buckets/{slug}/objects":
+    get:
+      tags: [Asset Buckets]
+      operationId: listAssetBucketObjects
+      summary: List objects in an asset bucket
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+        - name: prefix
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: Bucket objects.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [objects]
+                properties:
+                  objects:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/BucketObject"
+    post:
+      tags: [Asset Buckets]
+      operationId: uploadAssetBucketObject
+      summary: Upload one file into an asset bucket
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, path]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                path:
+                  type: string
+                asset_type:
+                  type: string
+                cache_control:
+                  type: string
+      responses:
+        "201":
+          description: Uploaded object and replication jobs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BucketUploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+    delete:
+      tags: [Asset Buckets]
+      operationId: deleteAssetBucketObjects
+      summary: Delete one or more objects from an asset bucket
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+        - name: path
+          in: query
+          schema:
+            type: string
+        - name: paths
+          in: query
+          schema:
+            type: string
+          description: Comma-separated object paths.
+        - name: prefix
+          in: query
+          schema:
+            type: string
+        - name: all
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: force
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: delete_remote
+          in: query
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: Object deletion result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteBucketObjectsResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/asset-buckets/{slug}/purge":
+    post:
+      tags: [Asset Buckets]
+      operationId: purgeAssetBucketCache
+      summary: Purge CDN cache for bucket URLs
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/URLSelectionRequest"
+      responses:
+        "200":
+          description: Purge result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/URLActionResponse"
+  "/api/v1/asset-buckets/{slug}/warmup":
+    post:
+      tags: [Asset Buckets]
+      operationId: warmupAssetBucket
+      summary: Warm CDN cache for bucket URLs
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/URLSelectionRequest"
+      responses:
+        "200":
+          description: Warmup result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/URLActionResponse"
+  "/api/v1/asset-buckets/{slug}/replicas/refresh":
+    post:
+      tags: [Asset Buckets]
+      operationId: refreshAssetBucketReplicas
+      summary: Refresh storage replicas for selected bucket objects
+      parameters:
+        - $ref: "#/components/parameters/BucketSlug"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplicaRefreshRequest"
+      responses:
+        "200":
+          description: Refresh result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplicaRefreshResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/api/v1/sites":
+    get:
+      tags: [Sites]
+      operationId: listSites
+      summary: List sites visible to the current principal
+      responses:
+        "200":
+          description: Sites.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sites]
+                properties:
+                  sites:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Site"
+    post:
+      tags: [Sites]
+      operationId: createSite
+      summary: Create a site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSiteRequest"
+      responses:
+        "200":
+          description: Site was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/api/v1/sites/{id}":
+    delete:
+      tags: [Sites]
+      operationId: deleteSite
+      summary: Delete a site and tracked resources
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - name: force
+          in: query
+          required: true
+          schema:
+            type: boolean
+        - name: delete_remote
+          in: query
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: Site deletion result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnyObject"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/sites/{id}/offline":
+    post:
+      tags: [Sites]
+      operationId: offlineSite
+      summary: Mark a site offline
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+      responses:
+        "200":
+          description: Updated site.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+  "/api/v1/sites/{id}/online":
+    post:
+      tags: [Sites]
+      operationId: onlineSite
+      summary: Mark a site active
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+      responses:
+        "200":
+          description: Updated site.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+  "/api/v1/sites/{id}/domains":
+    post:
+      tags: [Sites]
+      operationId: bindSiteDomains
+      summary: Bind domains to a site
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BindSiteDomainsRequest"
+      responses:
+        "200":
+          description: Updated site.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/api/v1/sites/{id}/deployment-target":
+    get:
+      tags: [Sites]
+      operationId: resolveSiteDeploymentTarget
+      summary: Resolve the effective deployment target for a site
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - name: route_profile
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deployment target decision.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteDeploymentTarget"
+  "/api/v1/sites/{id}/doctor":
+    get:
+      tags: [Diagnostics]
+      operationId: getSiteDoctor
+      summary: Diagnose a site path and delivery route
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - name: path
+          in: query
+          schema:
+            type: string
+        - name: country
+          in: query
+          schema:
+            type: string
+        - name: client_ip
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Diagnostic report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnyObject"
+  "/api/v1/sites/{id}/purge":
+    post:
+      tags: [Sites]
+      operationId: purgeSiteCache
+      summary: Purge cache for the active site deployment
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/URLSelectionRequest"
+      responses:
+        "200":
+          description: Purge result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/URLActionResponse"
+  "/api/v1/sites/{id}/route-explain":
+    get:
+      tags: [Edge Manifest]
+      operationId: explainSiteRoute
+      summary: Explain how a site path is routed
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - name: deployment
+          in: query
+          schema:
+            type: string
+        - name: path
+          in: query
+          schema:
+            type: string
+        - name: country
+          in: query
+          schema:
+            type: string
+        - name: client_ip
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Route explanation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnyObject"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/sites/{id}/deployments":
+    get:
+      tags: [Deployments]
+      operationId: listSiteDeployments
+      summary: List deployments for a site
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: Deployments.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deployments]
+                properties:
+                  deployments:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SiteDeployment"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [Deployments]
+      operationId: createSiteDeployment
+      summary: Upload a zip artifact and queue a site deployment
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [artifact]
+              properties:
+                artifact:
+                  type: string
+                  format: binary
+                environment:
+                  type: string
+                  enum: [production, preview]
+                  default: preview
+                promote:
+                  type: boolean
+                  default: false
+                pinned:
+                  type: boolean
+                  default: false
+                route_profile:
+                  type: string
+                deployment_target:
+                  type: string
+                target:
+                  type: string
+                  description: Alias for deployment_target.
+                routing_policy:
+                  type: string
+                resource_failover:
+                  type: boolean
+                  default: false
+      responses:
+        "202":
+          description: Deployment was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedDeploymentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/api/v1/sites/{id}/cloudflare-static/deployments":
+    post:
+      tags: [Deployments]
+      operationId: recordCloudflareStaticDeployment
+      summary: Record a Cloudflare Static deployment created by the CLI
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordCloudflareStaticDeploymentRequest"
+      responses:
+        "201":
+          description: Recorded deployment.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteDeployment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/api/v1/sites/{id}/deployments/{deployment}":
+    get:
+      tags: [Deployments]
+      operationId: getSiteDeployment
+      summary: Read a site deployment
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - $ref: "#/components/parameters/DeploymentID"
+      responses:
+        "200":
+          description: Deployment.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteDeployment"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Deployments]
+      operationId: deleteSiteDeployment
+      summary: Delete a non-active, unpinned deployment
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - $ref: "#/components/parameters/DeploymentID"
+        - name: delete_objects
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - name: delete_remote
+          in: query
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: Deletion result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnyObject"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/api/v1/sites/{id}/deployments/{deployment}/promote":
+    post:
+      tags: [Deployments]
+      operationId: promoteSiteDeployment
+      summary: Promote a ready deployment to active
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - $ref: "#/components/parameters/DeploymentID"
+      responses:
+        "200":
+          description: Active deployment.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteDeployment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/api/v1/sites/{id}/deployments/{deployment}/purge":
+    post:
+      tags: [Deployments]
+      operationId: purgeSiteDeploymentCache
+      summary: Purge cache for one site deployment
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - $ref: "#/components/parameters/DeploymentID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/URLSelectionRequest"
+      responses:
+        "200":
+          description: Purge result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/URLActionResponse"
+  "/api/v1/sites/{id}/deployments/{deployment}/edge-manifest":
+    get:
+      tags: [Edge Manifest]
+      operationId: exportSiteEdgeManifest
+      summary: Export a deployment edge manifest
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - $ref: "#/components/parameters/DeploymentID"
+      responses:
+        "200":
+          description: Edge manifest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeManifest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish":
+    post:
+      tags: [Edge Manifest]
+      operationId: publishSiteEdgeManifest
+      summary: Publish an edge manifest to Cloudflare KV
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - $ref: "#/components/parameters/DeploymentID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishEdgeManifestRequest"
+      responses:
+        "200":
+          description: Publish result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishEdgeManifestResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  "/api/v1/sites/{id}/gc":
+    post:
+      tags: [Garbage Collection]
+      operationId: runSiteGC
+      summary: Report site GC status for the current version
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+      responses:
+        "200":
+          description: No-op site GC status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [site_id, status, message]
+                properties:
+                  site_id:
+                    type: string
+                  status:
+                    type: string
+                    example: noop
+                  message:
+                    type: string
+  "/api/v1/gc":
+    post:
+      tags: [Garbage Collection]
+      operationId: runManualGC
+      summary: Run conservative local staging garbage collection
+      description: Root-only endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GCRequest"
+      responses:
+        "200":
+          description: GC result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GCResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: SuperCDN token
+  parameters:
+    BucketSlug:
+      name: slug
+      in: path
+      required: true
+      schema:
+        type: string
+    DeploymentID:
+      name: deployment
+      in: path
+      required: true
+      schema:
+        type: string
+    SiteID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    TokenID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    UserID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+  responses:
+    BadRequest:
+      description: Request validation failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Token is missing or invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Token is valid but does not have permission.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource was not found or is not visible to the token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Resource state prevents the requested operation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    AnyObject:
+      type: object
+      additionalProperties: true
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    AcceptInviteRequest:
+      type: object
+      required: [invite_token]
+      properties:
+        invite_token:
+          type: string
+        token_name:
+          type: string
+    AcceptInviteResponse:
+      type: object
+      required: [user, api_token, token]
+      properties:
+        user:
+          $ref: "#/components/schemas/User"
+        api_token:
+          type: string
+        token:
+          $ref: "#/components/schemas/APIToken"
+    CreateInviteRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        role:
+          type: string
+          enum: [owner, maintainer, viewer]
+          default: viewer
+        expires_in_seconds:
+          type: integer
+          format: int64
+          default: 604800
+    CreateInviteResponse:
+      type: object
+      required: [invite, invite_token]
+      properties:
+        invite:
+          $ref: "#/components/schemas/Invite"
+        invite_token:
+          type: string
+    AuthPrincipal:
+      type: object
+      properties:
+        root:
+          type: boolean
+        user_id:
+          type: integer
+          format: int64
+        user_name:
+          type: string
+        workspace_id:
+          type: string
+        role:
+          type: string
+          enum: [owner, maintainer, viewer]
+        token_id:
+          type: string
+      additionalProperties: true
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        workspace_id:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+      additionalProperties: true
+    Invite:
+      type: object
+      properties:
+        id:
+          type: string
+        workspace_id:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    APIToken:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: integer
+          format: int64
+        workspace_id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    DoctorReport:
+      type: object
+      required: [status, checked_at_utc, auth, server, checks]
+      properties:
+        status:
+          type: string
+        checked_at_utc:
+          type: string
+          format: date-time
+        auth:
+          $ref: "#/components/schemas/AuthPrincipal"
+        server:
+          type: object
+          additionalProperties: true
+        checks:
+          type: array
+          items:
+            type: object
+            required: [name, status]
+            properties:
+              name:
+                type: string
+              status:
+                type: string
+              message:
+                type: string
+              error:
+                type: string
+        resource_libraries:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnyObject"
+        routing_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnyObject"
+        warnings:
+          type: array
+          items:
+            type: string
+        next_commands:
+          type: array
+          items:
+            type: string
+    CreateAssetBucketRequest:
+      type: object
+      required: [slug]
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        route_profile:
+          type: string
+          default: china_all
+        routing_policy:
+          type: string
+        allowed_types:
+          type: array
+          items:
+            type: string
+        max_capacity_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        max_file_size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        default_cache_control:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+          default: active
+    AssetBucket:
+      type: object
+      properties:
+        slug:
+          type: string
+        workspace_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        route_profile:
+          type: string
+        routing_policy:
+          type: string
+        allowed_types:
+          type: array
+          items:
+            type: string
+        max_capacity_bytes:
+          type: integer
+          format: int64
+        max_file_size_bytes:
+          type: integer
+          format: int64
+        status:
+          type: string
+      additionalProperties: true
+    BucketObject:
+      type: object
+      properties:
+        bucket_slug:
+          type: string
+        logical_path:
+          type: string
+        object_id:
+          type: integer
+          format: int64
+        url:
+          type: string
+        size:
+          type: integer
+          format: int64
+        content_type:
+          type: string
+      additionalProperties: true
+    BucketUploadResponse:
+      type: object
+      required: [bucket, object, bucket_object, jobs, url, public_url]
+      properties:
+        bucket:
+          type: string
+        object:
+          $ref: "#/components/schemas/AnyObject"
+        bucket_object:
+          $ref: "#/components/schemas/BucketObject"
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnyObject"
+        url:
+          type: string
+        public_url:
+          type: string
+        cdn_url:
+          type: string
+        storage_url:
+          type: string
+        urls:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DeleteBucketObjectsResult:
+      type: object
+      properties:
+        bucket:
+          type: string
+        delete_remote:
+          type: boolean
+        paths:
+          type: array
+          items:
+            type: string
+        prefix:
+          type: string
+        all:
+          type: boolean
+        object_count:
+          type: integer
+        objects:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnyObject"
+        errors:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DeleteAssetBucketResult:
+      allOf:
+        - $ref: "#/components/schemas/DeleteBucketObjectsResult"
+        - type: object
+          properties:
+            delete_objects:
+              type: boolean
+            deleted_bucket:
+              type: boolean
+            deleted_project:
+              type: boolean
+    URLSelectionRequest:
+      type: object
+      properties:
+        path:
+          type: string
+        paths:
+          type: array
+          items:
+            type: string
+        prefix:
+          type: string
+        all:
+          type: boolean
+        limit:
+          type: integer
+        base_url:
+          type: string
+        cloudflare_account:
+          type: string
+        cloudflare_library:
+          type: string
+        dry_run:
+          type: boolean
+        method:
+          type: string
+    URLActionResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        dry_run:
+          type: boolean
+        url_count:
+          type: integer
+        urls:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        errors:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    ReplicaRefreshRequest:
+      type: object
+      properties:
+        target:
+          type: string
+        path:
+          type: string
+        paths:
+          type: array
+          items:
+            type: string
+        prefix:
+          type: string
+        all:
+          type: boolean
+        limit:
+          type: integer
+    ReplicaRefreshResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        bucket:
+          type: string
+        target:
+          type: string
+        object_count:
+          type: integer
+        objects:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnyObject"
+        warnings:
+          type: array
+          items:
+            type: string
+        errors:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    CreateSiteRequest:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        mode:
+          type: string
+          enum: [standard, spa]
+          default: standard
+        route_profile:
+          type: string
+          default: overseas
+        deployment_target:
+          type: string
+        routing_policy:
+          type: string
+        domains:
+          type: array
+          items:
+            type: string
+        default_domain_id:
+          type: string
+        random_default_domain:
+          type: boolean
+        skip_default_domain:
+          type: boolean
+        allocate_default_domain:
+          type: boolean
+    BindSiteDomainsRequest:
+      type: object
+      properties:
+        domains:
+          type: array
+          items:
+            type: string
+        append:
+          type: boolean
+          default: false
+        default_domain_id:
+          type: string
+        random_default_domain:
+          type: boolean
+        skip_default_domain:
+          type: boolean
+        allocate_default_domain:
+          type: boolean
+    Site:
+      type: object
+      properties:
+        id:
+          type: string
+        workspace_id:
+          type: string
+        name:
+          type: string
+        mode:
+          type: string
+        route_profile:
+          type: string
+        deployment_target:
+          type: string
+        routing_policy:
+          type: string
+        domains:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+      additionalProperties: true
+    SiteDeploymentTarget:
+      type: object
+      required: [site_id, site_exists, route_profile, deployment_target, source]
+      properties:
+        site_id:
+          type: string
+        site_exists:
+          type: boolean
+        route_profile:
+          type: string
+        deployment_target:
+          type: string
+        source:
+          type: string
+        domains:
+          type: array
+          items:
+            type: string
+        default_domain:
+          type: string
+    QueuedDeploymentResponse:
+      type: object
+      required: [deployment, deployment_id, job_id]
+      properties:
+        deployment:
+          $ref: "#/components/schemas/SiteDeployment"
+        deployment_id:
+          type: string
+        job_id:
+          type: string
+        preview_url:
+          type: string
+      additionalProperties: true
+    RecordCloudflareStaticDeploymentRequest:
+      type: object
+      required: [worker_name, version_id]
+      properties:
+        environment:
+          type: string
+          enum: [production, preview]
+        route_profile:
+          type: string
+        deployment_target:
+          type: string
+        routing_policy:
+          type: string
+        resource_failover:
+          type: boolean
+        mode:
+          type: string
+          enum: [standard, spa]
+        worker_name:
+          type: string
+        version_id:
+          type: string
+        domains:
+          type: array
+          items:
+            type: string
+        compatibility_date:
+          type: string
+        assets_sha256:
+          type: string
+        cache_policy:
+          type: string
+        headers_generated:
+          type: boolean
+        not_found_handling:
+          type: string
+        verification_status:
+          type: string
+        verified_at_utc:
+          type: string
+        file_count:
+          type: integer
+        total_size:
+          type: integer
+          format: int64
+        published_at_utc:
+          type: string
+        promote:
+          type: boolean
+        pinned:
+          type: boolean
+    SiteDeployment:
+      type: object
+      properties:
+        id:
+          type: string
+        site_id:
+          type: string
+        environment:
+          type: string
+        status:
+          type: string
+        active:
+          type: boolean
+        route_profile:
+          type: string
+        deployment_target:
+          type: string
+        routing_policy:
+          type: string
+        resource_failover:
+          type: boolean
+        version:
+          type: string
+        preview_url:
+          type: string
+        production_url:
+          type: string
+        pinned:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    EdgeManifest:
+      type: object
+      required: [version, kind, site_id, deployment_id, environment, status, route_profile, deployment_target, mode, generated_at_utc, routes]
+      properties:
+        version:
+          type: integer
+        kind:
+          type: string
+          example: supercdn-edge-manifest
+        site_id:
+          type: string
+        deployment_id:
+          type: string
+        environment:
+          type: string
+        status:
+          type: string
+        route_profile:
+          type: string
+        deployment_target:
+          type: string
+        routing_policy:
+          type: string
+        resource_failover:
+          type: boolean
+        mode:
+          type: string
+        generated_at_utc:
+          type: string
+        routes:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: true
+        fallback:
+          type: object
+          additionalProperties: true
+        not_found:
+          type: object
+          additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    PublishEdgeManifestRequest:
+      type: object
+      properties:
+        domains:
+          type: array
+          items:
+            type: string
+        cloudflare_account:
+          type: string
+        cloudflare_library:
+          type: string
+        kv_namespace_id:
+          type: string
+        kv_namespace:
+          type: string
+        key_prefix:
+          type: string
+        active_key:
+          type: boolean
+        deployment_key:
+          type: boolean
+        dry_run:
+          type: boolean
+    PublishEdgeManifestResponse:
+      type: object
+      properties:
+        site_id:
+          type: string
+        deployment_id:
+          type: string
+        active:
+          type: boolean
+        cloudflare_account:
+          type: string
+        cloudflare_library:
+          type: string
+        kv_namespace_id:
+          type: string
+        kv_namespace:
+          type: string
+        key_prefix:
+          type: string
+        domains:
+          type: array
+          items:
+            type: string
+        dry_run:
+          type: boolean
+        status:
+          type: string
+        manifest_size:
+          type: integer
+        manifest_sha256:
+          type: string
+        writes:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        manifest_warnings:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        errors:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    GCRequest:
+      type: object
+      properties:
+        dry_run:
+          type: boolean
+        delete_remote:
+          type: boolean
+        older_than_seconds:
+          type: integer
+          format: int64
+          default: 3600
+        bucket:
+          type: string
+        site:
+          type: string
+        force:
+          type: boolean
+    GCResponse:
+      type: object
+      required: [status, dry_run, delete_remote, older_than_seconds, cutoff, planned, deleted, kept, error_count]
+      properties:
+        status:
+          type: string
+        dry_run:
+          type: boolean
+        delete_remote:
+          type: boolean
+        older_than_seconds:
+          type: integer
+          format: int64
+        cutoff:
+          type: string
+          format: date-time
+        bucket:
+          type: string
+        site:
+          type: string
+        planned:
+          type: integer
+        deleted:
+          type: integer
+        kept:
+          type: integer
+        error_count:
+          type: integer
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: string
+        errors:
+          type: array
+          items:
+            type: string
