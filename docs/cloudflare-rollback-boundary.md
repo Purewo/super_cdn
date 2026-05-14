@@ -16,6 +16,18 @@ Current supported behavior:
 - `delete-deployment` warns that Cloudflare Worker versions, custom domains and KV entries are not deleted.
 - `refresh-edge-manifest` can republish the active hybrid edge manifest after repair or signature recovery, but it is not a deployment rollback command.
 
+## Live Validation
+
+Validated on 2026-05-15 Asia/Shanghai with real custom domains:
+
+- `cloudflare_static`: `supercdn-maturity-static-0515.qwk.ccwu.cc` was deployed as A, updated to a B artifact containing a visible marker, planned back to A with `rollback-plan -site supercdn-maturity-static-0515 -deployment dpl-diirv63ptmqj -dir .\test_file\path2agi`, then restored by rerunning `deploy-site` with the A artifact. `probe-site -require-edge-static-html -require-html-revalidate -require-immutable-assets` passed after restore, and the B marker was absent.
+- `hybrid_edge`: `supercdn-maturity-hybrid-ipfs-0515.qwk.ccwu.cc` was deployed as A, updated to B, planned back to A with `rollback-plan -site supercdn-maturity-hybrid-ipfs-0515 -deployment dpl-diirzx0ukg5r -dir .\test_file\cyberstream\dist`, then restored by rerunning `deploy-site -target hybrid_edge`. The active Workers KV key was rewritten during restore, and `probe-site -require-edge-static-html -require-edge-manifest-assets -spa-path /movie/123` passed with entry HTML from `cloudflare_static` and the JS route from `ipfs_gateway`.
+
+The live run also exposed two operator risks:
+
+- Cloudflare custom-domain propagation can outlast the CLI readiness timeout even when the provider write later succeeds.
+- `repo_china_mobile` AList upload visibility failed for a new hybrid deployment path and correctly blocked active deployment.
+
 ## Why A Metadata Rollback Is Unsafe
 
 `cloudflare_static` traffic is controlled by the published Worker/Static Assets version and its custom domains. Changing the Super CDN deployment row does not republish those assets or change the Worker version serving the domain.

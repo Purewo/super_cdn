@@ -39,6 +39,7 @@ func TestPrepareCloudflareStaticAssetsDirGeneratesHeaders(t *testing.T) {
 	}
 	headers := string(raw)
 	for _, want := range []string{
+		"/*\n  X-SuperCDN-Edge-Source: cloudflare_static",
 		"/\n  Cache-Control: public, max-age=0, must-revalidate",
 		"/index.html\n  Cache-Control: public, max-age=0, must-revalidate",
 		"/path2agi-data.js\n  Cache-Control: public, max-age=31536000, immutable",
@@ -678,7 +679,7 @@ func TestDeleteDeploymentDryRunBlocksActiveOrPinnedDeployment(t *testing.T) {
 	}
 }
 
-func TestPrepareCloudflareStaticAssetsDirRespectsExistingHeaders(t *testing.T) {
+func TestPrepareCloudflareStaticAssetsDirAugmentsExistingHeaders(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "index.html"), "ok")
 	writeTestFile(t, filepath.Join(dir, "_headers"), "/*\n  X-Test: yes\n")
@@ -687,11 +688,25 @@ func TestPrepareCloudflareStaticAssetsDirRespectsExistingHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cleanup != nil {
-		t.Fatalf("existing _headers should not need a temporary directory")
+	if cleanup == nil || prepared == dir {
+		t.Fatalf("existing _headers without edge evidence should be copied to a temporary directory")
 	}
-	if prepared != dir || meta.Generated || meta.Source != "existing" {
+	defer cleanup()
+	if !meta.Generated || meta.Source != "existing_with_edge_header" {
 		t.Fatalf("unexpected headers meta: prepared=%s meta=%+v", prepared, meta)
+	}
+	raw, err := os.ReadFile(filepath.Join(prepared, "_headers"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := string(raw)
+	for _, want := range []string{
+		"X-Test: yes",
+		"/*\n  X-SuperCDN-Edge-Source: cloudflare_static",
+	} {
+		if !strings.Contains(headers, want) {
+			t.Fatalf("augmented headers missing %q:\n%s", want, headers)
+		}
 	}
 
 	summary, err := summarizeCloudflareStaticDirectory(dir)
@@ -700,6 +715,23 @@ func TestPrepareCloudflareStaticAssetsDirRespectsExistingHeaders(t *testing.T) {
 	}
 	if summary.FileCount != 1 {
 		t.Fatalf("cloudflare static summary should ignore _headers, got %d files", summary.FileCount)
+	}
+}
+
+func TestPrepareCloudflareStaticAssetsDirKeepsExistingEdgeHeaders(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), "ok")
+	writeTestFile(t, filepath.Join(dir, "_headers"), "/*\n  X-SuperCDN-Edge-Source: cloudflare_static\n")
+
+	prepared, cleanup, meta, err := prepareCloudflareStaticAssetsDir(dir, "auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup != nil {
+		t.Fatalf("existing edge-aware _headers should not need a temporary directory")
+	}
+	if prepared != dir || meta.Generated || meta.Source != "existing" {
+		t.Fatalf("unexpected headers meta: prepared=%s meta=%+v", prepared, meta)
 	}
 }
 
