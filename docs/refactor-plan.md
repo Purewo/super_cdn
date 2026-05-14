@@ -13,13 +13,13 @@ Completed after `v0.4.0`:
 - Phase 3 API contract: `api/openapi.yaml` added and linked from `docs/cli-reference.md`.
 - Phase 4 versioned migrations: `schema_migrations` added, existing additive columns converted to named migrations, and old-DB upgrade tests added.
 - Phase 5 audit events: representative security and operational mutation paths write `audit_events`, with tests proving writes and secret redaction boundaries.
-- Phase 6 server extraction pass: object operations, object replication, routing selection, public serving and site deletion helpers moved out of `internal/server/server.go`.
-- Phase 6 CLI extraction pass: `cmd/supercdnctl/main.go` is now a small dispatcher; client/config, core commands, provider/IPFS commands, Cloudflare/R2 ops, Cloudflare Static, resources, object ops, diagnostics, probes, sites, buckets, GC and helper code live in separate files. Current line counts are about `internal/server/server.go` 3318 and `cmd/supercdnctl/main.go` 285.
+- Phase 6 server extraction pass: `internal/server/server.go` is now a 170-line server skeleton containing construction, lifecycle, HTTP entry and route registration. Auth, API access, response helpers, jobs, uploads, resource services, Cloudflare/R2 services, site-domain services, site services and shared helpers live in separate files.
+- Phase 6 CLI extraction pass: `cmd/supercdnctl/main.go` is now a 285-line dispatcher; client/config, core commands, provider/IPFS commands, Cloudflare/R2 ops, Cloudflare Static, resources, object ops, diagnostics, probes, sites, buckets, GC and helper code live in separate files.
 
 Next refactor entry point:
 
-- Continue Phase 6 package-boundary work only where the boundary is now obvious.
-- Highest-value remaining cleanup is server-side: reduce `internal/server/server.go` by moving resource-library operations, Cloudflare/R2 orchestration, site/domain helpers and shared response/validation helpers without changing route paths or output JSON.
+- Phase 6 large-file reduction is substantially complete. Continue only with narrow package-boundary work where a stable boundary is obvious.
+- Do not move behavior again just to reduce line counts; next work should be focused tests, docs alignment, or package extraction with clear ownership.
 - CLI cleanup is mostly complete for now; only revisit it for command-specific tests, help text fixes or smaller ownership tweaks.
 - Do not restart at CI/OpenAPI/migrations/audit unless a regression appears.
 
@@ -292,4 +292,4 @@ Pause and reassess if:
 
 ## Next Session Entry Point
 
-Start from Phase 6. Do not repeat the stable-release, CI, OpenAPI, migration or audit phases unless a regression appears. The next best slice is server-side extraction from `internal/server/server.go`, starting with resource-library operations or Cloudflare/R2 orchestration because their boundaries are now visible and already have CLI/API coverage.
+Start from a completion audit of the post-`v0.4.0` refactor. Do not repeat the stable-release, CI, OpenAPI, migration, audit or large-file extraction phases unless a regression appears. Further refactor work should be narrow package-boundary extraction with clear tests, not another broad line-count pass.
