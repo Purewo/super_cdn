@@ -735,6 +735,21 @@ func TestPrepareCloudflareStaticAssetsDirKeepsExistingEdgeHeaders(t *testing.T) 
 	}
 }
 
+func TestCloudflareVerifyFailureNextCommands(t *testing.T) {
+	staticCommands := cloudflareVerifyFailureNextCommands("blog", `dist old`, "cloudflare_static", "overseas", []string{"blog.example.com"}, false)
+	if len(staticCommands) != 2 ||
+		!strings.Contains(staticCommands[0], "deploy-site -site blog -dir 'dist old' -target cloudflare_static -profile overseas -domains blog.example.com") ||
+		!strings.Contains(staticCommands[1], "probe-site -url https://blog.example.com/ -require-edge-static-html -require-html-revalidate -require-immutable-assets") {
+		t.Fatalf("static commands = %#v", staticCommands)
+	}
+	hybridCommands := cloudflareVerifyFailureNextCommands("blog", `dist`, "hybrid_edge", "ipfs_archive", []string{"blog.example.com"}, true)
+	if len(hybridCommands) != 2 ||
+		!strings.Contains(hybridCommands[0], "deploy-site -site blog -dir dist -target hybrid_edge -profile ipfs_archive -domains blog.example.com") ||
+		!strings.Contains(hybridCommands[1], "probe-site -url https://blog.example.com/ -require-edge-static-html -require-edge-manifest-assets") {
+		t.Fatalf("hybrid commands = %#v", hybridCommands)
+	}
+}
+
 func TestWranglerDeployArgsUsesConfigForSPA(t *testing.T) {
 	args := wranglerDeployArgs(
 		"npx",

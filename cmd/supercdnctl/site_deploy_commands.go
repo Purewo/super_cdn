@@ -343,7 +343,17 @@ func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions
 		RequireImmutableAssetCache:  publish.HeadersGenerated,
 	})
 	if err != nil {
-		raw, _ := json.Marshal(verify)
+		raw, _ := json.Marshal(cloudflareStaticProviderWriteFailure{
+			Status: "verify_failed_after_provider_write",
+			SiteID: opts.Site,
+			Warnings: []string{
+				"Cloudflare Worker/custom-domain write may have succeeded, but readiness verification timed out before Super CDN recorded the deployment.",
+				"Rerun deploy-site after DNS/custom-domain propagation settles, or run the probe command below to verify the live domain.",
+			},
+			Worker:       publish,
+			Verify:       verify,
+			NextCommands: cloudflareVerifyFailureNextCommands(opts.Site, opts.Dir, "cloudflare_static", opts.RouteProfile, opts.Domains, false),
+		})
 		_ = printJSON(raw)
 		return err
 	}
@@ -458,6 +468,48 @@ type hybridEdgeDeployResponse struct {
 	EdgeManifest edgeManifestPublishResponse     `json:"edge_manifest"`
 	Worker       cloudflareStaticPublishResponse `json:"worker"`
 	Verify       cloudflareStaticVerifyReport    `json:"verify"`
+	Warnings     []string                        `json:"warnings,omitempty"`
+	NextCommands []string                        `json:"next_commands,omitempty"`
+}
+
+type cloudflareStaticProviderWriteFailure struct {
+	Status       string                          `json:"status"`
+	SiteID       string                          `json:"site_id"`
+	Warnings     []string                        `json:"warnings,omitempty"`
+	Worker       cloudflareStaticPublishResponse `json:"worker"`
+	Verify       cloudflareStaticVerifyReport    `json:"verify"`
+	NextCommands []string                        `json:"next_commands,omitempty"`
+}
+
+func cloudflareVerifyFailureNextCommands(site, dir, target, profile string, domains []string, hybrid bool) []string {
+	parts := []string{
+		"supercdnctl deploy-site",
+		"-site " + cliHintArg(site),
+		"-dir " + cliHintArg(dir),
+		"-target " + cliHintArg(target),
+	}
+	if strings.TrimSpace(profile) != "" {
+		parts = append(parts, "-profile "+cliHintArg(profile))
+	}
+	cleanedDomains := cleanDomains(domains)
+	if len(cleanedDomains) > 0 {
+		parts = append(parts, "-domains "+cliHintArg(strings.Join(cleanedDomains, ",")))
+	}
+	commands := []string{strings.Join(parts, " ")}
+	if len(cleanedDomains) > 0 {
+		probe := []string{
+			"supercdnctl probe-site",
+			"-url " + cliHintArg("https://"+cleanedDomains[0]+"/"),
+			"-require-edge-static-html",
+		}
+		if hybrid {
+			probe = append(probe, "-require-edge-manifest-assets")
+		} else {
+			probe = append(probe, "-require-html-revalidate", "-require-immutable-assets")
+		}
+		commands = append(commands, strings.Join(probe, " "))
+	}
+	return commands
 }
 
 func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
@@ -556,7 +608,22 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 		RequireImmutableAssetCache:  false,
 	})
 	if err != nil {
-		raw, _ := json.Marshal(verify)
+		raw, _ := json.Marshal(hybridEdgeDeployResponse{
+			Status:       "verify_failed_after_provider_write",
+			SiteID:       opts.Site,
+			DeploymentID: dep.ID,
+			URL:          firstNonEmpty(dep.ProductionURL, firstString(dep.ProductionURLs)),
+			URLs:         dep.ProductionURLs,
+			Deployment:   dep,
+			EdgeManifest: edgeManifest,
+			Worker:       publish,
+			Verify:       verify,
+			Warnings: []string{
+				"Super CDN deployment metadata, active Workers KV manifest or Worker/custom-domain state may already point at this deployment, but readiness verification timed out.",
+				"Rerun deploy-site after DNS/custom-domain propagation settles, or run the probe command below to verify the live domain before treating the deployment as healthy.",
+			},
+			NextCommands: cloudflareVerifyFailureNextCommands(opts.Site, opts.Dir, "hybrid_edge", opts.RouteProfile, opts.Domains, true),
+		})
 		_ = printJSON(raw)
 		return err
 	}

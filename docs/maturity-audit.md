@@ -25,7 +25,7 @@ Concrete success criteria:
 | Requirement | Current artifact | Verification |
 | --- | --- | --- |
 | Local release gate | `scripts/foundation-check.ps1` | Includes gofmt, PowerShell script syntax validation, actionlint, Go tests/vet/vuln/build, OpenAPI lint, Worker test/typecheck/audit and service healthz. Passed with `-SkipLinuxBuild` using temporary `GOPROXY=https://goproxy.cn,direct` after `proxy.golang.org` EOF. For this run, npm audit passed direct; routing npm audit through `127.0.0.1:10808` produced TLS socket disconnects. |
-| CI release gate | `.github/workflows/ci.yml`, `scripts/github-actions-status.ps1` | Defines Go format/test/race/vet/vuln/build, OpenAPI lint, Worker test/typecheck/audit. Workflow static lint is part of the local foundation gate, GitHub action majors are on Node 24-compatible versions, and the status script checks pushed branch/head SHA runs through the GitHub Actions API with optional job/step summaries, dirty-worktree protection and remote branch SHA verification. Observed green on GitHub run `25891316908` for `main` HEAD `d6cecf07e65cba6bd2babfa033b9656d38444e9c`: Go test, race, vet, vulnerability scan, build, API contract and Worker jobs all succeeded. |
+| CI release gate | `.github/workflows/ci.yml`, `scripts/github-actions-status.ps1` | Defines Go format/test/race/vet/vuln/build, OpenAPI lint, Worker test/typecheck/audit. Workflow static lint is part of the local foundation gate, GitHub action majors are on Node 24-compatible versions, and the status script checks pushed branch/head SHA runs through the GitHub Actions API with optional job/step summaries, dirty-worktree protection and remote branch SHA verification. Recent pushed runs, including `25891378394`, were green for Go test, race, vet, vulnerability scan, build, API contract and Worker jobs; rerun the status script after every new push. |
 | Race coverage | `.github/workflows/ci.yml` | CI runs `go test -race ./...` on Ubuntu. Local Windows race remains environment-blocked: `go env` reports `CGO_ENABLED=0`, `CC=gcc`, and no `gcc`, `clang`, `zig` or `cc` command is currently available in PATH. |
 | API contract | `api/openapi.yaml` | Redocly lint passed locally through foundation check. |
 | Versioned migrations | `internal/db` migration code and tests | Covered by existing DB tests in `go test ./...`. |
@@ -56,12 +56,12 @@ These are not solved yet and must not be described as mature:
 
 - Local Windows `go test -race ./...` is still unverified until a working C toolchain is installed; CI is the current race gate. Checked PATH on 2026-05-15 and found no `gcc`, `clang`, `zig` or `cc`.
 - Full Cloudflare Static / hybrid-edge rollback is still not implemented as a write operation. Current behavior is read-only `rollback-plan` plus redeploy guidance; the future write-command boundary is recorded in `docs/cloudflare-rollback-boundary.md`.
-- Cloudflare provider writes are not transactional with Super CDN metadata. A custom-domain propagation delay can make `deploy-site` verification time out after the Worker/domain write has already succeeded; the safe operator path is to rerun `deploy-site` or run the emitted `probe-site` once the domain settles, but a future reconciler should make this state explicit.
+- Cloudflare provider writes are not fully transactional with Super CDN metadata. A custom-domain propagation delay can make `deploy-site` verification time out after the Worker/domain write has already succeeded; the CLI now prints provider write evidence plus retry/probe commands, but a future reconciler should still be able to inspect and settle this state explicitly.
 - The `repo_china_mobile` AList line can still fail write-after-read visibility for a new hybrid deployment path. The failure is visible and blocks active deployment, but the domestic line is not mature enough to use as the rollback canary until the provider visibility/retry behavior is isolated.
 
 ## Next Concrete Work
 
 1. Use `docs/cloudflare-rollback-boundary.md` before designing any Cloudflare/hybrid rollback write command; do not add a write path until Worker, KV, domain and live-probe requirements are met.
-2. Add a reconciliation/reporting path for Cloudflare writes that succeed at the provider while the CLI readiness wait times out.
+2. Add a provider-state reconciler for Cloudflare writes that succeed at the provider while the CLI readiness wait times out.
 3. Reproduce the `repo_china_mobile` AList visibility failure with a narrow upload probe before trusting it for hybrid rollback canaries.
 4. If local Windows race coverage is needed, install a working C toolchain and rerun `.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race`; until then, Ubuntu CI is the race gate.
