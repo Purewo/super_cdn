@@ -83,6 +83,9 @@ func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	depView := s.siteDeploymentView(r.Context(), dep)
+	if !s.auditMutation(w, r, "site.deployment.create", "site:"+siteID+";deployment:"+depView.ID) {
+		return
+	}
 	writeJSON(w, http.StatusAccepted, s.withOverclockWarning(map[string]any{
 		"deployment":    depView,
 		"deployment_id": depView.ID,
@@ -107,6 +110,9 @@ func (s *Server) handleRecordCloudflareStaticDeployment(w http.ResponseWriter, r
 	resp, err := s.recordCloudflareStaticDeployment(r.Context(), siteID, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.auditMutation(w, r, "site.deployment.cloudflare_static.record", "site:"+siteID+";deployment:"+resp.ID) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, resp)
@@ -167,7 +173,11 @@ func (s *Server) handlePurgeSiteCache(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.purgeSiteDeploymentCache(r.Context(), site, dep, req))
+	resp := s.purgeSiteDeploymentCache(r.Context(), site, dep, req)
+	if !s.auditMutation(w, r, "site.purge", "site:"+site.ID+";deployment:"+dep.ID) {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handlePurgeSiteDeploymentCache(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +196,11 @@ func (s *Server) handlePurgeSiteDeploymentCache(w http.ResponseWriter, r *http.R
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.purgeSiteDeploymentCache(r.Context(), site, dep, req))
+	resp := s.purgeSiteDeploymentCache(r.Context(), site, dep, req)
+	if !s.auditMutation(w, r, "site.deployment.purge", "site:"+site.ID+";deployment:"+dep.ID) {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handlePromoteSiteDeployment(w http.ResponseWriter, r *http.Request) {
@@ -211,6 +225,9 @@ func (s *Server) handlePromoteSiteDeployment(w http.ResponseWriter, r *http.Requ
 	activated, err := s.db.ActivateSiteDeployment(r.Context(), siteID, deploymentID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.auditMutation(w, r, "site.deployment.promote", "site:"+siteID+";deployment:"+deploymentID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.siteDeploymentView(r.Context(), activated))
@@ -277,6 +294,9 @@ func (s *Server) handleDeleteSiteDeployment(w http.ResponseWriter, r *http.Reque
 	result.Deleted = true
 	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic {
 		result.Warning = "deleted Super CDN metadata only; Cloudflare Worker versions and custom domains are not deleted by this command"
+	}
+	if !s.auditMutation(w, r, "site.deployment.delete", "site:"+siteID+";deployment:"+deploymentID) {
+		return
 	}
 	writeJSON(w, http.StatusOK, result)
 }

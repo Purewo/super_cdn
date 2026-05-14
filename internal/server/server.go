@@ -416,6 +416,9 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if !s.auditMutation(w, r, "auth.invite.create", "invite:"+invite.ID) {
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"invite":       invite,
 		"invite_token": inviteToken,
@@ -452,6 +455,15 @@ func (s *Server) handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := s.db.CreateAuditEvent(r.Context(), model.AuditEvent{
+		WorkspaceID: token.WorkspaceID,
+		UserID:      user.ID,
+		Action:      "auth.invite.accept",
+		Resource:    fmt.Sprintf("user:%d;token:%s", user.ID, token.ID),
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "audit event write failed: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -518,6 +530,9 @@ func (s *Server) handleCreateUserToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if !s.auditMutation(w, r, "auth.token.create", "token:"+token.ID) {
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"api_token": apiToken,
 		"token":     token,
@@ -556,6 +571,9 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusNotFound
 		}
 		writeError(w, status, err.Error())
+		return
+	}
+	if !s.auditMutation(w, r, "auth.token.revoke", "token:"+tokenID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "token_id": tokenID})
@@ -1207,6 +1225,9 @@ func (s *Server) handleInitResourceLibraries(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if !s.auditMutation(w, r, "resource_library.init", "resource_library:"+strings.Join(libraries, ",")) {
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job":            job,
 		"max_concurrent": cap(s.transferSem),
@@ -1353,6 +1374,11 @@ func (s *Server) handleResourceLibraryHealthCheck(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if req.WriteProbe {
+		if !s.auditMutation(w, r, "resource_library.health_check.write_probe", "resource_library:"+strings.Join(libraries, ",")) {
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, resourceLibraryHealthResponse{
 		WriteProbe:         req.WriteProbe,
 		MinIntervalSeconds: minInterval,
@@ -1369,6 +1395,9 @@ func (s *Server) handleResourceLibraryE2EProbe(w http.ResponseWriter, r *http.Re
 	result, err := s.runResourceLibraryE2EProbe(r.Context(), req)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, result)
+		return
+	}
+	if !s.auditMutation(w, r, "resource_library.e2e_probe", "route_profile:"+req.RouteProfile) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -1507,6 +1536,9 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if !s.auditMutation(w, r, "site.create", "site:"+site.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, s.siteView(site))
 }
 
@@ -1551,6 +1583,13 @@ func (s *Server) handleSetSiteStatus(w http.ResponseWriter, r *http.Request, sta
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	action := "site.online"
+	if status == model.SiteStatusOffline {
+		action = "site.offline"
+	}
+	if !s.auditMutation(w, r, action, "site:"+site.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, s.siteView(site))
 }
 
@@ -1581,6 +1620,9 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request) {
 	result := s.deleteSite(r.Context(), site, deleteRemote)
 	if len(result.Errors) > 0 {
 		writeJSON(w, http.StatusBadGateway, result)
+		return
+	}
+	if !s.auditMutation(w, r, "site.delete", "site:"+site.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -1619,6 +1661,9 @@ func (s *Server) handleBindSiteDomains(w http.ResponseWriter, r *http.Request) {
 	site, err = s.db.GetSite(r.Context(), siteID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.auditMutation(w, r, "site.domains.bind", "site:"+site.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.siteView(site))
@@ -1708,6 +1753,9 @@ func (s *Server) handleSyncSiteWorkerRoutes(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !s.auditMutation(w, r, "cloudflare.worker_routes.sync", "site:"+site.ID) {
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1728,6 +1776,9 @@ func (s *Server) handleSyncSiteDNS(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.syncSiteDNS(r.Context(), site, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.auditMutation(w, r, "cloudflare.dns.sync", "site:"+site.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -1845,6 +1896,9 @@ func (s *Server) handleRefreshIPFSPins(w http.ResponseWriter, r *http.Request) {
 	if resp.Status == "partial" || resp.Status == "failed" {
 		status = http.StatusBadGateway
 	}
+	if !s.auditMutation(w, r, "ipfs.pins.refresh", "target:"+strings.TrimSpace(req.Target)) {
+		return
+	}
 	writeJSON(w, status, resp)
 }
 
@@ -1854,6 +1908,9 @@ func (s *Server) handleSyncCloudflareR2(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	resp := s.syncCloudflareR2(r.Context(), req)
+	if !s.auditMutation(w, r, "cloudflare.r2.sync", "cloudflare_r2:"+strings.TrimSpace(req.CloudflareAccount)) {
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1863,6 +1920,9 @@ func (s *Server) handleProvisionCloudflareR2(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	resp := s.provisionCloudflareR2(r.Context(), req)
+	if !s.auditMutation(w, r, "cloudflare.r2.provision", "cloudflare_r2:"+strings.TrimSpace(req.CloudflareAccount)) {
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1872,6 +1932,9 @@ func (s *Server) handleCreateCloudflareR2Credentials(w http.ResponseWriter, r *h
 		return
 	}
 	resp := s.createCloudflareR2Credentials(r.Context(), req)
+	if !s.auditMutation(w, r, "cloudflare.r2.credentials.create", "cloudflare_r2:"+strings.TrimSpace(req.CloudflareAccount)) {
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 

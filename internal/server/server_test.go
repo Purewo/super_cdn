@@ -4299,6 +4299,95 @@ func TestManualGCRejectsUnsafeYoungThresholdWithoutForce(t *testing.T) {
 	}
 }
 
+func TestAuditEventsForRepresentativeMutations(t *testing.T) {
+	app := newTestServer(t)
+	createSite := apiJSON(t, app, http.MethodPost, "/api/v1/sites", "test-token", map[string]any{
+		"id":            "demo",
+		"route_profile": "overseas",
+		"mode":          "standard",
+	})
+	if createSite.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", createSite.Code, createSite.Body.String())
+	}
+	offline := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/offline", "test-token", nil)
+	if offline.Code != http.StatusOK {
+		t.Fatalf("offline site status = %d body=%s", offline.Code, offline.Body.String())
+	}
+	createBucket := apiJSON(t, app, http.MethodPost, "/api/v1/asset-buckets", "test-token", map[string]any{
+		"slug":          "docs",
+		"route_profile": "overseas",
+	})
+	if createBucket.Code != http.StatusCreated {
+		t.Fatalf("create bucket status = %d body=%s", createBucket.Code, createBucket.Body.String())
+	}
+	body, ctype := multipartBody(t, map[string]string{"path": "guides/readme.txt"}, "file", "readme.txt", []byte("hello"))
+	upload := httptest.NewRequest(http.MethodPost, "/api/v1/asset-buckets/docs/objects", body)
+	upload.Header.Set("Content-Type", ctype)
+	upload.Header.Set("Authorization", "Bearer test-token")
+	uploadRec := httptest.NewRecorder()
+	app.ServeHTTP(uploadRec, upload)
+	if uploadRec.Code != http.StatusCreated {
+		t.Fatalf("upload bucket object status = %d body=%s", uploadRec.Code, uploadRec.Body.String())
+	}
+	gc := apiJSON(t, app, http.MethodPost, "/api/v1/gc", "test-token", map[string]any{"dry_run": true})
+	if gc.Code != http.StatusOK {
+		t.Fatalf("gc status = %d body=%s", gc.Code, gc.Body.String())
+	}
+
+	events := auditEventsForTest(t, app)
+	assertAuditEvent(t, events, "site.create", "site:demo")
+	assertAuditEvent(t, events, "site.offline", "site:demo")
+	assertAuditEvent(t, events, "asset_bucket.create", "asset_bucket:docs")
+	assertAuditEvent(t, events, "asset_bucket.object.upload", "asset_bucket:docs;path:guides/readme.txt")
+	assertAuditEvent(t, events, "gc.dry_run", "gc:manual")
+}
+
+func TestAuditEventsDoNotStoreInviteOrAPITokenSecrets(t *testing.T) {
+	app := newTestServer(t)
+	inviteRec := apiJSON(t, app, http.MethodPost, "/api/v1/auth/invites", "test-token", map[string]any{
+		"name": "auditor",
+		"role": "viewer",
+	})
+	if inviteRec.Code != http.StatusCreated {
+		t.Fatalf("create invite status = %d body=%s", inviteRec.Code, inviteRec.Body.String())
+	}
+	var inviteResp struct {
+		Invite      model.Invite `json:"invite"`
+		InviteToken string       `json:"invite_token"`
+	}
+	if err := json.Unmarshal(inviteRec.Body.Bytes(), &inviteResp); err != nil {
+		t.Fatal(err)
+	}
+	acceptRec := apiJSON(t, app, http.MethodPost, "/api/v1/auth/accept-invite", "", map[string]any{
+		"invite_token": inviteResp.InviteToken,
+		"token_name":   "audit-test",
+	})
+	if acceptRec.Code != http.StatusCreated {
+		t.Fatalf("accept invite status = %d body=%s", acceptRec.Code, acceptRec.Body.String())
+	}
+	var acceptResp struct {
+		APIToken string         `json:"api_token"`
+		Token    model.APIToken `json:"token"`
+	}
+	if err := json.Unmarshal(acceptRec.Body.Bytes(), &acceptResp); err != nil {
+		t.Fatal(err)
+	}
+	revokeRec := apiJSON(t, app, http.MethodDelete, "/api/v1/tokens/"+acceptResp.Token.ID, acceptResp.APIToken, nil)
+	if revokeRec.Code != http.StatusOK {
+		t.Fatalf("revoke token status = %d body=%s", revokeRec.Code, revokeRec.Body.String())
+	}
+
+	events := auditEventsForTest(t, app)
+	assertAuditEvent(t, events, "auth.invite.create", "invite:"+inviteResp.Invite.ID)
+	assertAuditEvent(t, events, "auth.invite.accept", "token:"+acceptResp.Token.ID)
+	assertAuditEvent(t, events, "auth.token.revoke", "token:"+acceptResp.Token.ID)
+	for _, event := range events {
+		if strings.Contains(event.Resource, inviteResp.InviteToken) || strings.Contains(event.Resource, acceptResp.APIToken) {
+			t.Fatalf("audit event leaked secret in resource: %+v", event)
+		}
+	}
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
@@ -4570,6 +4659,25 @@ func apiJSON(t *testing.T, app *Server, method, apiPath, token string, body any)
 	rec := httptest.NewRecorder()
 	app.ServeHTTP(rec, req)
 	return rec
+}
+
+func auditEventsForTest(t *testing.T, app *Server) []model.AuditEvent {
+	t.Helper()
+	events, err := app.db.AuditEvents(context.Background(), "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+func assertAuditEvent(t *testing.T, events []model.AuditEvent, action, resource string) {
+	t.Helper()
+	for _, event := range events {
+		if event.Action == action && strings.Contains(event.Resource, resource) {
+			return
+		}
+	}
+	t.Fatalf("missing audit event action=%q resource containing %q in %+v", action, resource, events)
 }
 
 func createInviteForTest(t *testing.T, app *Server, name, role string) string {

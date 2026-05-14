@@ -142,3 +142,12 @@ type Invite struct {
 	AcceptedAt  time.Time `json:"accepted_at,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }
+
+type AuditEvent struct {
+	ID          int64     `json:"id"`
+	WorkspaceID string    `json:"workspace_id"`
+	UserID      int64     `json:"user_id,omitempty"`
+	Action      string    `json:"action"`
+	Resource    string    `json:"resource"`
+	CreatedAt   time.Time `json:"created_at"`
+}

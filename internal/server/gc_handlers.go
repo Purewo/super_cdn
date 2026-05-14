@@ -72,6 +72,13 @@ func (s *Server) handleManualGC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	action := "gc.delete"
+	if req.DryRun {
+		action = "gc.dry_run"
+	}
+	if !s.auditMutation(w, r, action, "gc:manual") {
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
