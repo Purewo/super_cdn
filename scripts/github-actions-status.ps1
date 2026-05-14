@@ -251,7 +251,7 @@ $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 do {
   $response = Invoke-GitHubRunsRequest $Owner $Repo $Branch $Sha
   $report = Build-StatusReport $Owner $Repo $Branch $Sha $response
-  if (-not $Wait -or $report.status -eq "success" -or $report.status -eq "failure" -or $report.status -eq "missing" -or (Get-Date) -ge $deadline) {
+  if (-not $Wait -or $report.status -eq "success" -or $report.status -eq "failure" -or (Get-Date) -ge $deadline) {
     break
   }
   Start-Sleep -Seconds $IntervalSeconds
