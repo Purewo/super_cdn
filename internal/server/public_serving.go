@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"supercdn/internal/model"
@@ -472,6 +474,43 @@ func (s *Server) streamObjectNoRedirect(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	writeError(w, http.StatusNotFound, "ready replica not found")
+}
+
+func (s *Server) writeObjectStream(w http.ResponseWriter, r *http.Request, obj *model.Object, stream *storage.ObjectStream, statusOverride int) {
+	if stream.ContentType != "" {
+		w.Header().Set("Content-Type", stream.ContentType)
+	} else if obj.ContentType != "" {
+		w.Header().Set("Content-Type", obj.ContentType)
+	}
+	if cc := firstNonEmpty(obj.CacheControl, stream.CacheControl); cc != "" {
+		w.Header().Set("Cache-Control", cc)
+	}
+	if obj.SHA256 != "" {
+		w.Header().Set("ETag", `"`+obj.SHA256+`"`)
+	} else if stream.ETag != "" {
+		w.Header().Set("ETag", stream.ETag)
+	}
+	if !stream.LastModified.IsZero() {
+		w.Header().Set("Last-Modified", stream.LastModified.UTC().Format(http.TimeFormat))
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+	if stream.ContentRange != "" {
+		w.Header().Set("Content-Range", stream.ContentRange)
+	}
+	if stream.Size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(stream.Size, 10))
+	}
+	status := stream.StatusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if statusOverride != http.StatusOK && status == http.StatusOK {
+		status = statusOverride
+	}
+	w.WriteHeader(status)
+	if r.Method != http.MethodHead {
+		_, _ = io.Copy(w, stream.Body)
+	}
 }
 
 func (s *Server) objectReplicaRedirectURL(r *http.Request, obj *model.Object, replica model.Replica, store storage.Store, statusOverride int) string {

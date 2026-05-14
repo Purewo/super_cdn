@@ -32,6 +32,21 @@ type createAssetBucketRequest struct {
 	Status              string   `json:"status"`
 }
 
+func (s *Server) hydrateBucketObjectsIPFS(ctx context.Context, items []model.AssetBucketObject) ([]model.AssetBucketObject, error) {
+	objectIDs := make([]int64, 0, len(items))
+	for _, item := range items {
+		objectIDs = append(objectIDs, item.ObjectID)
+	}
+	pinsByObject, err := s.db.IPFSPinsByObjectIDs(ctx, objectIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i].IPFS = pinsByObject[items[i].ObjectID]
+	}
+	return items, nil
+}
+
 type initAssetBucketRequest struct {
 	DryRun bool `json:"dry_run"`
 }

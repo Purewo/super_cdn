@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sort"
@@ -237,6 +238,69 @@ func (s *Server) handleRefreshIPFSPins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, status, resp)
+}
+
+func (s *Server) refreshIPFSPins(ctx context.Context, req refreshIPFSPinsRequest) (refreshIPFSPinsResponse, error) {
+	if req.ObjectID <= 0 {
+		return refreshIPFSPinsResponse{}, fmt.Errorf("object_id is required")
+	}
+	pins, err := s.db.IPFSPins(ctx, req.ObjectID)
+	if err != nil {
+		return refreshIPFSPinsResponse{}, err
+	}
+	target := strings.TrimSpace(req.Target)
+	resp := refreshIPFSPinsResponse{
+		Status:   "ok",
+		ObjectID: req.ObjectID,
+		Target:   target,
+	}
+	for _, pin := range pins {
+		if target != "" && pin.Target != target {
+			continue
+		}
+		store, ok := s.stores.Get(pin.Target)
+		if !ok {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: storage target is not configured", pin.Target))
+			continue
+		}
+		refresher, ok := store.(storage.IPFSPinStatusStore)
+		if !ok {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: storage target does not support IPFS pin refresh", pin.Target))
+			continue
+		}
+		status, err := refresher.RefreshIPFSPin(ctx, pin.CID)
+		if err != nil {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s/%s: %s", pin.Target, pin.CID, err.Error()))
+			continue
+		}
+		updated := pin
+		updated.Provider = firstNonEmpty(status.Provider, pin.Provider)
+		updated.CID = firstNonEmpty(status.CID, pin.CID)
+		updated.GatewayURL = firstNonEmpty(status.GatewayURL, pin.GatewayURL)
+		updated.Locator = storage.PreserveIPFSProviderQuery(firstNonEmpty(status.Locator, pin.Locator), pin.Locator)
+		updated.PinStatus = firstNonEmpty(status.PinStatus, pin.PinStatus)
+		updated.ProviderPinID = firstNonEmpty(status.ProviderPinID, pin.ProviderPinID)
+		saved, err := s.db.UpsertIPFSPin(ctx, updated)
+		if err != nil {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s/%s: %s", pin.Target, pin.CID, err.Error()))
+			continue
+		}
+		resp.Pins = append(resp.Pins, *saved)
+	}
+	if target != "" && len(resp.Pins) == 0 && len(resp.Errors) == 0 {
+		return refreshIPFSPinsResponse{}, fmt.Errorf("ipfs pin for object %d target %q not found", req.ObjectID, target)
+	}
+	if len(resp.Pins) == 0 && len(resp.Errors) == 0 {
+		return refreshIPFSPinsResponse{}, fmt.Errorf("object %d has no IPFS pins", req.ObjectID)
+	}
+	if len(resp.Errors) > 0 {
+		if len(resp.Pins) > 0 {
+			resp.Status = "partial"
+		} else {
+			resp.Status = "failed"
+		}
+	}
+	return resp, nil
 }
 
 func (s *Server) handleSyncCloudflareR2(w http.ResponseWriter, r *http.Request) {
