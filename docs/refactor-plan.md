@@ -4,6 +4,22 @@ Last updated: 2026-05-14 Asia/Shanghai.
 
 Baseline: `v0.4.0` is the current staged stable release. It freezes onboarding, diagnostics, cleanup and storage guardrails before the larger refactor.
 
+## Progress On `main`
+
+Completed after `v0.4.0`:
+
+- Phase 0 safety net: GitHub Actions CI and `docs/release-checklist.md`.
+- Phase 1/2 first extraction pass: diagnostics, GC, asset buckets, site deployments, edge manifests and several CLI command groups moved out of the largest files.
+- Phase 3 API contract: `api/openapi.yaml` added and linked from `docs/cli-reference.md`.
+- Phase 4 versioned migrations: `schema_migrations` added, existing additive columns converted to named migrations, and old-DB upgrade tests added.
+- Phase 5 audit events: representative security and operational mutation paths write `audit_events`, with tests proving writes and secret redaction boundaries.
+
+Next refactor entry point:
+
+- Continue Phase 6 package-boundary work only where the boundary is now obvious.
+- Highest-value remaining cleanup is to reduce `internal/server/server.go` and `cmd/supercdnctl/main.go` further by moving auth/project/resource/Cloudflare command surfaces, without changing route paths or output JSON.
+- Do not restart at CI/OpenAPI/migrations/audit unless a regression appears.
+
 ## Goal
 
 Turn the current internally stable codebase into a maintainable long-lived product codebase without changing the working product surface.
@@ -25,7 +41,7 @@ The refactor should preserve the `v0.4.0` behavior while making future feature w
 - Do not remove legacy compatibility paths until tests and docs prove an equivalent migration path.
 - Do not do a broad formatting-only rewrite.
 
-## Current Pain Points
+## Original Pain Points
 
 - `internal/server/server.go` is too large and mixes routing, handlers, service logic, diagnostics, Cloudflare orchestration, storage coordination and response shaping.
 - `cmd/supercdnctl/main.go` is too large and mixes command parsing, HTTP transport, output formatting, local file packaging, Cloudflare Static publishing and operational workflows.

@@ -8,7 +8,7 @@ The service is still in development mode. There is no need to preserve compatibi
 
 v0.1 and v0.2.0 are closed as stable internal milestones. The `v0.1.x` line remains feature-frozen, and `v0.2.x` should only receive bug fixes, documentation, operational hardening and regression coverage around IPFS/Web hosting. New product work starts from `docs/v0.3-roadmap.md`, with multi-resource-library scheduling, replica repair, smart routing and explicit static-resource failover as the next major feature surface.
 
-Next-session priority note: start the post-`v0.4.0` refactor from [docs/refactor-plan.md](refactor-plan.md). Do not start new product features first. The first step is Phase 0 safety net work: CI and release checklist, then extract diagnostics and GC from `internal/server/server.go`.
+Next-session priority note: continue the post-`v0.4.0` refactor from [docs/refactor-plan.md](refactor-plan.md). Phase 0 through Phase 5 are done on `main` (CI/release checklist, first server/CLI file splits, OpenAPI, versioned migrations and audit-event writes). Do not restart from Phase 0; continue with Phase 6 package-boundary cleanup and the remaining large-file reductions.
 
 Web hosting boundary note: the current product rule is recorded in `docs/web-hosting-boundaries.md`. Go entry delivery is for tests/integration/compatibility; preferred Web hosting is Cloudflare entry plus non-entry resources on AList/OpenList, Cloudflare-native static assets or IPFS/Pinata. R2 remains a CDN/object acceleration line; R2-backed Web hosting is legacy compatibility and not the mainstream path. Static-resource failover must never fall back to Go.
 
@@ -22,11 +22,10 @@ The next session should directly follow [docs/refactor-plan.md](refactor-plan.md
 
 Immediate execution order:
 
-1. Add repository CI that runs Go format/test/vet/build and Worker test/typecheck.
-2. Add `docs/release-checklist.md` from the `v0.4.0` release verification commands.
-3. Extract diagnostics and manual GC from `internal/server/server.go` into focused files.
-4. Extract the matching CLI diagnostic and bucket command groups from `cmd/supercdnctl/main.go`.
-5. Keep behavior unchanged; run the full validation set after each slice.
+1. Continue reducing `internal/server/server.go` by moving auth/project/resource/Cloudflare surfaces only where the target boundary is clear.
+2. Continue reducing `cmd/supercdnctl/main.go` by moving remaining command groups while preserving command names and output JSON.
+3. Keep behavior unchanged; run the full validation set after each slice.
+4. Update `api/openapi.yaml` and audit coverage in the same patch as any API mutation change.
 
 Do not start with UI, routing redesign, or new cleanup semantics.
 
@@ -35,7 +34,7 @@ Refactor success criteria:
 - `internal/server/server.go` becomes construction, middleware, route registration and shared server plumbing.
 - `cmd/supercdnctl/main.go` becomes global flag parsing and command dispatch.
 - CI enforces the current local release checks.
-- OpenAPI, versioned migrations and audit-event wiring are planned follow-up phases after the file split is safe.
+- OpenAPI, versioned migrations and audit-event wiring stay aligned with future code changes.
 
 ## Previous Cycle: Real User Onboarding Hardening
 
