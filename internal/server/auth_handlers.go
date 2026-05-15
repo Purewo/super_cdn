@@ -61,7 +61,7 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "auth.invite.create", "invite:"+invite.ID) {
+	if !s.auditMutation(w, r, auditActionAuthInviteCreate, "invite:"+invite.ID) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -105,7 +105,7 @@ func (s *Server) handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.db.CreateAuditEvent(r.Context(), model.AuditEvent{
 		WorkspaceID: token.WorkspaceID,
 		UserID:      user.ID,
-		Action:      "auth.invite.accept",
+		Action:      auditActionAuthInviteAccept,
 		Resource:    fmt.Sprintf("user:%d;token:%s", user.ID, token.ID),
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "audit event write failed: "+err.Error())
@@ -175,7 +175,7 @@ func (s *Server) handleCreateUserToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "auth.token.create", "token:"+token.ID) {
+	if !s.auditMutation(w, r, auditActionAuthTokenCreate, "token:"+token.ID) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -218,7 +218,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "auth.token.revoke", "token:"+tokenID) {
+	if !s.auditMutation(w, r, auditActionAuthTokenRevoke, "token:"+tokenID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "token_id": tokenID})

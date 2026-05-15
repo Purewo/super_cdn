@@ -65,12 +65,12 @@ func (s *Server) handleSwitchAssetBucketObjectPrimaryTarget(w http.ResponseWrite
 	}
 	resp, err := s.switchAssetBucketObjectPrimaryTarget(r.Context(), bucket, req)
 	if err != nil {
-		s.auditRejectedMutation(r, "asset_bucket.object.primary_target.switch.rejected", primarySwitchAuditResource("asset_bucket:"+bucket.Slug, "", req.Path, req.Target, err))
+		s.auditRejectedMutation(r, auditActionAssetBucketPrimarySwitchReject, primarySwitchAuditResource("asset_bucket:"+bucket.Slug, "", req.Path, req.Target, err))
 		writePrimarySwitchError(w, err)
 		return
 	}
 	if !resp.DryRun && resp.Status == "switched" {
-		if !s.auditMutation(w, r, "asset_bucket.object.primary_target.switch", "asset_bucket:"+bucket.Slug+";path:"+resp.Path+";target:"+resp.Target) {
+		if !s.auditMutation(w, r, auditActionAssetBucketPrimarySwitch, "asset_bucket:"+bucket.Slug+";path:"+resp.Path+";target:"+resp.Target) {
 			return
 		}
 	}
@@ -96,12 +96,12 @@ func (s *Server) handleSwitchSiteFilePrimaryTarget(w http.ResponseWriter, r *htt
 	}
 	resp, err := s.switchSiteFilePrimaryTarget(r.Context(), site, deploymentID, req)
 	if err != nil {
-		s.auditRejectedMutation(r, "site.deployment.file.primary_target.switch.rejected", primarySwitchAuditResource("site:"+site.ID, deploymentID, req.Path, req.Target, err))
+		s.auditRejectedMutation(r, auditActionSiteFilePrimarySwitchReject, primarySwitchAuditResource("site:"+site.ID, deploymentID, req.Path, req.Target, err))
 		writePrimarySwitchError(w, err)
 		return
 	}
 	if !resp.DryRun && resp.Status == "switched" {
-		if !s.auditMutation(w, r, "site.deployment.file.primary_target.switch", "site:"+site.ID+";deployment:"+resp.DeploymentID+";file:"+firstNonEmpty(resp.File, resp.Path)+";target:"+resp.Target) {
+		if !s.auditMutation(w, r, auditActionSiteFilePrimarySwitch, "site:"+site.ID+";deployment:"+resp.DeploymentID+";file:"+firstNonEmpty(resp.File, resp.Path)+";target:"+resp.Target) {
 			return
 		}
 	}

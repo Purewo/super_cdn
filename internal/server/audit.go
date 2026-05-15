@@ -15,6 +15,64 @@ type auditEventsResponse struct {
 	Limit  int                `json:"limit"`
 }
 
+const (
+	auditActionAuthInviteCreate = "auth.invite.create"
+	auditActionAuthInviteAccept = "auth.invite.accept"
+	auditActionAuthTokenCreate  = "auth.token.create"
+	auditActionAuthTokenRevoke  = "auth.token.revoke"
+
+	auditActionAssetBucketCreate              = "asset_bucket.create"
+	auditActionAssetBucketDelete              = "asset_bucket.delete"
+	auditActionAssetBucketPurge               = "asset_bucket.purge"
+	auditActionAssetBucketWarmup              = "asset_bucket.warmup"
+	auditActionAssetBucketObjectUpload        = "asset_bucket.object.upload"
+	auditActionAssetBucketObjectDelete        = "asset_bucket.object.delete"
+	auditActionAssetBucketPrimarySwitch       = "asset_bucket.object.primary_target.switch"
+	auditActionAssetBucketPrimarySwitchReject = "asset_bucket.object.primary_target.switch.rejected"
+
+	auditActionSiteCreate                  = "site.create"
+	auditActionSiteOnline                  = "site.online"
+	auditActionSiteOffline                 = "site.offline"
+	auditActionSiteDelete                  = "site.delete"
+	auditActionSiteDomainsBind             = "site.domains.bind"
+	auditActionSitePurge                   = "site.purge"
+	auditActionSiteDeploymentCreate        = "site.deployment.create"
+	auditActionSiteDeploymentPurge         = "site.deployment.purge"
+	auditActionSiteDeploymentPromote       = "site.deployment.promote"
+	auditActionSiteDeploymentPromoteReject = "site.deployment.promote.rejected"
+	auditActionSiteDeploymentDelete        = "site.deployment.delete"
+	auditActionSiteFilePrimarySwitch       = "site.deployment.file.primary_target.switch"
+	auditActionSiteFilePrimarySwitchReject = "site.deployment.file.primary_target.switch.rejected"
+	auditActionSiteEdgeManifestPublish     = "site.edge_manifest.publish"
+
+	auditActionCloudflareStaticRecord         = "site.deployment.cloudflare_static.record"
+	auditActionCloudflareStaticRecovery       = "site.deployment.cloudflare_static.recovery"
+	auditActionCloudflareStaticRecoveryReject = "site.deployment.cloudflare_static.recovery.rejected"
+	auditActionCloudflareStaticActivate       = "site.deployment.cloudflare_static.activate"
+	auditActionCloudflareStaticActivateReject = "site.deployment.cloudflare_static.activate.rejected"
+	auditActionCloudflareStaticRollback       = "site.deployment.cloudflare_static.rollback"
+
+	auditActionHybridEdgeEvidence        = "site.deployment.hybrid_edge.evidence"
+	auditActionHybridEdgeEvidenceReject  = "site.deployment.hybrid_edge.evidence.rejected"
+	auditActionHybridEdgeRollback        = "site.deployment.hybrid_edge.rollback"
+	auditActionHybridEdgeWriteback       = "site.deployment.hybrid_edge.writeback"
+	auditActionHybridEdgeWritebackReject = "site.deployment.hybrid_edge.writeback.rejected"
+
+	auditActionCloudflareDNSSync          = "cloudflare.dns.sync"
+	auditActionCloudflareWorkerRoutesSync = "cloudflare.worker_routes.sync"
+	auditActionCloudflareR2Sync           = "cloudflare.r2.sync"
+	auditActionCloudflareR2Provision      = "cloudflare.r2.provision"
+	auditActionCloudflareR2CredsCreate    = "cloudflare.r2.credentials.create"
+
+	auditActionGCDelete = "gc.delete"
+	auditActionGCDryRun = "gc.dry_run"
+
+	auditActionIPFSPinsRefresh              = "ipfs.pins.refresh"
+	auditActionResourceLibraryInit          = "resource_library.init"
+	auditActionResourceLibraryHealthWrite   = "resource_library.health_check.write_probe"
+	auditActionResourceLibraryEndToEndProbe = "resource_library.e2e_probe"
+)
+
 func (s *Server) handleAuditEvents(w http.ResponseWriter, r *http.Request) {
 	principal := currentPrincipal(r.Context())
 	workspaceID := strings.TrimSpace(r.URL.Query().Get("workspace_id"))

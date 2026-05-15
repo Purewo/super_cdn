@@ -188,7 +188,7 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "site.create", "site:"+site.ID) {
+	if !s.auditMutation(w, r, auditActionSiteCreate, "site:"+site.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.siteView(site))
@@ -235,9 +235,9 @@ func (s *Server) handleSetSiteStatus(w http.ResponseWriter, r *http.Request, sta
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	action := "site.online"
+	action := auditActionSiteOnline
 	if status == model.SiteStatusOffline {
-		action = "site.offline"
+		action = auditActionSiteOffline
 	}
 	if !s.auditMutation(w, r, action, "site:"+site.ID) {
 		return
@@ -274,7 +274,7 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, result)
 		return
 	}
-	if !s.auditMutation(w, r, "site.delete", "site:"+site.ID) {
+	if !s.auditMutation(w, r, auditActionSiteDelete, "site:"+site.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -315,7 +315,7 @@ func (s *Server) handleBindSiteDomains(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "site.domains.bind", "site:"+site.ID) {
+	if !s.auditMutation(w, r, auditActionSiteDomainsBind, "site:"+site.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.siteView(site))
@@ -405,7 +405,7 @@ func (s *Server) handleSyncSiteWorkerRoutes(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "cloudflare.worker_routes.sync", "site:"+site.ID) {
+	if !s.auditMutation(w, r, auditActionCloudflareWorkerRoutesSync, "site:"+site.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -430,7 +430,7 @@ func (s *Server) handleSyncSiteDNS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "cloudflare.dns.sync", "site:"+site.ID) {
+	if !s.auditMutation(w, r, auditActionCloudflareDNSSync, "site:"+site.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)

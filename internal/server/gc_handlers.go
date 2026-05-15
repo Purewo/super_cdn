@@ -72,9 +72,9 @@ func (s *Server) handleManualGC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	action := "gc.delete"
+	action := auditActionGCDelete
 	if req.DryRun {
-		action = "gc.dry_run"
+		action = auditActionGCDryRun
 	}
 	if !s.auditMutation(w, r, action, "gc:manual") {
 		return

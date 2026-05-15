@@ -234,7 +234,7 @@ func (s *Server) handleRefreshIPFSPins(w http.ResponseWriter, r *http.Request) {
 	if resp.Status == "partial" || resp.Status == "failed" {
 		status = http.StatusBadGateway
 	}
-	if !s.auditMutation(w, r, "ipfs.pins.refresh", "target:"+strings.TrimSpace(req.Target)) {
+	if !s.auditMutation(w, r, auditActionIPFSPinsRefresh, "target:"+strings.TrimSpace(req.Target)) {
 		return
 	}
 	writeJSON(w, status, resp)
@@ -309,7 +309,7 @@ func (s *Server) handleSyncCloudflareR2(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	resp := s.syncCloudflareR2(r.Context(), req)
-	if !s.auditMutation(w, r, "cloudflare.r2.sync", "cloudflare_r2:"+strings.TrimSpace(req.CloudflareAccount)) {
+	if !s.auditMutation(w, r, auditActionCloudflareR2Sync, "cloudflare_r2:"+strings.TrimSpace(req.CloudflareAccount)) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -321,7 +321,7 @@ func (s *Server) handleProvisionCloudflareR2(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	resp := s.provisionCloudflareR2(r.Context(), req)
-	if !s.auditMutation(w, r, "cloudflare.r2.provision", "cloudflare_r2:"+strings.TrimSpace(req.CloudflareAccount)) {
+	if !s.auditMutation(w, r, auditActionCloudflareR2Provision, "cloudflare_r2:"+strings.TrimSpace(req.CloudflareAccount)) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -333,7 +333,7 @@ func (s *Server) handleCreateCloudflareR2Credentials(w http.ResponseWriter, r *h
 		return
 	}
 	resp := s.createCloudflareR2Credentials(r.Context(), req)
-	if !s.auditMutation(w, r, "cloudflare.r2.credentials.create", "cloudflare_r2:"+strings.TrimSpace(req.CloudflareAccount)) {
+	if !s.auditMutation(w, r, auditActionCloudflareR2CredsCreate, "cloudflare_r2:"+strings.TrimSpace(req.CloudflareAccount)) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)

@@ -174,7 +174,7 @@ func (s *Server) handleInitResourceLibraries(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "resource_library.init", "resource_library:"+strings.Join(libraries, ",")) {
+	if !s.auditMutation(w, r, auditActionResourceLibraryInit, "resource_library:"+strings.Join(libraries, ",")) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -237,7 +237,7 @@ func (s *Server) handleResourceLibraryHealthCheck(w http.ResponseWriter, r *http
 		return
 	}
 	if req.WriteProbe {
-		if !s.auditMutation(w, r, "resource_library.health_check.write_probe", "resource_library:"+strings.Join(libraries, ",")) {
+		if !s.auditMutation(w, r, auditActionResourceLibraryHealthWrite, "resource_library:"+strings.Join(libraries, ",")) {
 			return
 		}
 	}
@@ -259,7 +259,7 @@ func (s *Server) handleResourceLibraryE2EProbe(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusBadGateway, result)
 		return
 	}
-	if !s.auditMutation(w, r, "resource_library.e2e_probe", "route_profile:"+req.RouteProfile) {
+	if !s.auditMutation(w, r, auditActionResourceLibraryEndToEndProbe, "route_profile:"+req.RouteProfile) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

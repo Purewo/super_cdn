@@ -158,7 +158,7 @@ func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	depView := s.siteDeploymentView(r.Context(), dep)
-	if !s.auditMutation(w, r, "site.deployment.create", "site:"+siteID+";deployment:"+depView.ID) {
+	if !s.auditMutation(w, r, auditActionSiteDeploymentCreate, "site:"+siteID+";deployment:"+depView.ID) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, s.withOverclockWarning(map[string]any{
@@ -209,11 +209,11 @@ func (s *Server) handleRecoverCloudflareStaticDeployment(w http.ResponseWriter, 
 	}
 	resp, err := s.recoverCloudflareStaticDeployment(r.Context(), siteID, req)
 	if err != nil {
-		s.auditRejectedMutation(r, "site.deployment.cloudflare_static.recovery.rejected", cloudflareStaticRecoveryAuditResource(siteID, err))
+		s.auditRejectedMutation(r, auditActionCloudflareStaticRecoveryReject, cloudflareStaticRecoveryAuditResource(siteID, err))
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "site.deployment.cloudflare_static.recovery", "site:"+siteID+";deployment:"+resp.ID) {
+	if !s.auditMutation(w, r, auditActionCloudflareStaticRecovery, "site:"+siteID+";deployment:"+resp.ID) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, resp)
@@ -231,11 +231,11 @@ func (s *Server) handleActivateCloudflareStaticDeployment(w http.ResponseWriter,
 	}
 	resp, err := s.activateCloudflareStaticDeployment(r.Context(), siteID, deploymentID, req)
 	if err != nil {
-		s.auditRejectedMutation(r, "site.deployment.cloudflare_static.activate.rejected", cloudflareStaticActivationAuditResource(siteID, deploymentID, err))
+		s.auditRejectedMutation(r, auditActionCloudflareStaticActivateReject, cloudflareStaticActivationAuditResource(siteID, deploymentID, err))
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "site.deployment.cloudflare_static.activate", "site:"+siteID+";deployment:"+deploymentID) {
+	if !s.auditMutation(w, r, auditActionCloudflareStaticActivate, "site:"+siteID+";deployment:"+deploymentID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -321,7 +321,7 @@ func (s *Server) handlePurgeSiteCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := s.purgeSiteDeploymentCache(r.Context(), site, dep, req)
-	if !s.auditMutation(w, r, "site.purge", "site:"+site.ID+";deployment:"+dep.ID) {
+	if !s.auditMutation(w, r, auditActionSitePurge, "site:"+site.ID+";deployment:"+dep.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -344,7 +344,7 @@ func (s *Server) handlePurgeSiteDeploymentCache(w http.ResponseWriter, r *http.R
 		return
 	}
 	resp := s.purgeSiteDeploymentCache(r.Context(), site, dep, req)
-	if !s.auditMutation(w, r, "site.deployment.purge", "site:"+site.ID+";deployment:"+dep.ID) {
+	if !s.auditMutation(w, r, auditActionSiteDeploymentPurge, "site:"+site.ID+";deployment:"+dep.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -368,11 +368,11 @@ func (s *Server) handlePromoteSiteDeployment(w http.ResponseWriter, r *http.Requ
 	if !dep.Active {
 		switch dep.DeploymentTarget {
 		case model.SiteDeploymentTargetCloudflareStatic:
-			s.auditRejectedMutation(r, "site.deployment.promote.rejected", "site:"+siteID+";deployment:"+deploymentID+";target:"+dep.DeploymentTarget+";reason:metadata_only_blocked")
+			s.auditRejectedMutation(r, auditActionSiteDeploymentPromoteReject, "site:"+siteID+";deployment:"+deploymentID+";target:"+dep.DeploymentTarget+";reason:metadata_only_blocked")
 			writeError(w, http.StatusConflict, "cloudflare_static deployments cannot be promoted by metadata alone; redeploy the desired assets or use a Cloudflare Worker rollback flow")
 			return
 		case model.SiteDeploymentTargetHybridEdge:
-			s.auditRejectedMutation(r, "site.deployment.promote.rejected", "site:"+siteID+";deployment:"+deploymentID+";target:"+dep.DeploymentTarget+";reason:metadata_only_blocked")
+			s.auditRejectedMutation(r, auditActionSiteDeploymentPromoteReject, "site:"+siteID+";deployment:"+deploymentID+";target:"+dep.DeploymentTarget+";reason:metadata_only_blocked")
 			writeError(w, http.StatusConflict, "hybrid_edge deployments cannot be promoted by metadata alone; rerun deploy-site -target hybrid_edge so Worker assets and the active KV manifest are republished together")
 			return
 		}
@@ -382,7 +382,7 @@ func (s *Server) handlePromoteSiteDeployment(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "site.deployment.promote", "site:"+siteID+";deployment:"+deploymentID) {
+	if !s.auditMutation(w, r, auditActionSiteDeploymentPromote, "site:"+siteID+";deployment:"+deploymentID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.siteDeploymentView(r.Context(), activated))
@@ -460,7 +460,7 @@ func (s *Server) handleDeleteSiteDeployment(w http.ResponseWriter, r *http.Reque
 	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic || dep.DeploymentTarget == model.SiteDeploymentTargetHybridEdge {
 		result.Warning = "deleted Super CDN metadata only; Cloudflare Worker versions, custom domains and KV entries are not deleted by this command"
 	}
-	if !s.auditMutation(w, r, "site.deployment.delete", "site:"+siteID+";deployment:"+deploymentID) {
+	if !s.auditMutation(w, r, auditActionSiteDeploymentDelete, "site:"+siteID+";deployment:"+deploymentID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -1125,27 +1125,27 @@ func (s *Server) validateCloudflareStaticRecordOperation(ctx context.Context, si
 func cloudflareStaticRecordAudit(siteID, deploymentID string, req recordCloudflareStaticDeploymentRequest) (string, string) {
 	if deploymentevidence.NormalizeOperation(req.Operation) == deploymentevidence.OperationRollbackApply {
 		target := cleanDeploymentID(req.RollbackTarget)
-		return "site.deployment.cloudflare_static.rollback", "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
+		return auditActionCloudflareStaticRollback, "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
 	}
-	return "site.deployment.cloudflare_static.record", "site:" + siteID + ";deployment:" + deploymentID
+	return auditActionCloudflareStaticRecord, "site:" + siteID + ";deployment:" + deploymentID
 }
 
 func hybridEdgeEvidenceAudit(siteID, deploymentID string, req recordHybridEdgeEvidenceRequest) (string, string) {
 	switch deploymentevidence.NormalizeOperation(req.Operation) {
 	case deploymentevidence.OperationWriteback:
-		return "site.deployment.hybrid_edge.writeback", "site:" + siteID + ";deployment:" + deploymentID
+		return auditActionHybridEdgeWriteback, "site:" + siteID + ";deployment:" + deploymentID
 	case deploymentevidence.OperationRollbackApply:
 		target := cleanDeploymentID(req.RollbackTarget)
-		return "site.deployment.hybrid_edge.rollback", "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
+		return auditActionHybridEdgeRollback, "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
 	}
-	return "site.deployment.hybrid_edge.evidence", "site:" + siteID + ";deployment:" + deploymentID
+	return auditActionHybridEdgeEvidence, "site:" + siteID + ";deployment:" + deploymentID
 }
 
 func hybridEdgeEvidenceRejectedAudit(siteID, deploymentID string, req recordHybridEdgeEvidenceRequest, err error) (string, string) {
 	if deploymentevidence.NormalizeOperation(req.Operation) == deploymentevidence.OperationWriteback {
-		return "site.deployment.hybrid_edge.writeback.rejected", "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + auditReason(err)
+		return auditActionHybridEdgeWritebackReject, "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + auditReason(err)
 	}
-	return "site.deployment.hybrid_edge.evidence.rejected", "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + auditReason(err)
+	return auditActionHybridEdgeEvidenceReject, "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + auditReason(err)
 }
 
 func auditReason(err error) string {

@@ -232,7 +232,7 @@ func (s *Server) handleCreateAssetBucket(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "asset_bucket.create", "asset_bucket:"+bucket.Slug) {
+	if !s.auditMutation(w, r, auditActionAssetBucketCreate, "asset_bucket:"+bucket.Slug) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, bucket)
@@ -303,7 +303,7 @@ func (s *Server) handleDeleteAssetBucket(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	if !s.auditMutation(w, r, "asset_bucket.delete", "asset_bucket:"+bucket.Slug) {
+	if !s.auditMutation(w, r, auditActionAssetBucketDelete, "asset_bucket:"+bucket.Slug) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -336,7 +336,7 @@ func (s *Server) handlePurgeAssetBucketCache(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	resp := s.purgeAssetBucketCache(r.Context(), bucket, req)
-	if !s.auditMutation(w, r, "asset_bucket.purge", "asset_bucket:"+bucket.Slug) {
+	if !s.auditMutation(w, r, auditActionAssetBucketPurge, "asset_bucket:"+bucket.Slug) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -352,7 +352,7 @@ func (s *Server) handleWarmupAssetBucket(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	resp := s.warmupAssetBucket(r.Context(), bucket, req)
-	if !s.auditMutation(w, r, "asset_bucket.warmup", "asset_bucket:"+bucket.Slug) {
+	if !s.auditMutation(w, r, auditActionAssetBucketWarmup, "asset_bucket:"+bucket.Slug) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -433,7 +433,7 @@ func (s *Server) handleUploadBucketObject(w http.ResponseWriter, r *http.Request
 		urls = append(urls, cdnURL)
 	}
 	resp["urls"] = uniqueStrings(urls)
-	if !s.auditMutation(w, r, "asset_bucket.object.upload", "asset_bucket:"+bucket.Slug+";path:"+item.LogicalPath) {
+	if !s.auditMutation(w, r, auditActionAssetBucketObjectUpload, "asset_bucket:"+bucket.Slug+";path:"+item.LogicalPath) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.withOverclockWarning(resp))
@@ -502,7 +502,7 @@ func (s *Server) handleDeleteBucketObject(w http.ResponseWriter, r *http.Request
 			}
 			return
 		}
-		if !s.auditMutation(w, r, "asset_bucket.object.delete", "asset_bucket:"+bucket.Slug+";path:"+result.LogicalPath) {
+		if !s.auditMutation(w, r, auditActionAssetBucketObjectDelete, "asset_bucket:"+bucket.Slug+";path:"+result.LogicalPath) {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
@@ -521,7 +521,7 @@ func (s *Server) handleDeleteBucketObject(w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
-	if !s.auditMutation(w, r, "asset_bucket.object.delete", "asset_bucket:"+bucket.Slug) {
+	if !s.auditMutation(w, r, auditActionAssetBucketObjectDelete, "asset_bucket:"+bucket.Slug) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

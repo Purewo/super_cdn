@@ -234,7 +234,7 @@ func (s *Server) handlePublishSiteEdgeManifest(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "site.edge_manifest.publish", "site:"+site.ID+";deployment:"+dep.ID) {
+	if !s.auditMutation(w, r, auditActionSiteEdgeManifestPublish, "site:"+site.ID+";deployment:"+dep.ID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
