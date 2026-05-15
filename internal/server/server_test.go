@@ -1015,6 +1015,93 @@ func TestRecoverCloudflareStaticDeploymentRejectsIncompleteEvidenceAndAudits(t *
 	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.cloudflare_static.recovery.rejected", "site:demo")
 }
 
+func TestActivateCloudflareStaticDeploymentActivatesWithProviderEvidence(t *testing.T) {
+	app := newTestServer(t)
+	activeID := recordCloudflareStaticDeploymentForTest(t, app, "demo", true)
+	readyID := recordCloudflareStaticDeploymentForTest(t, app, "demo", false)
+	ready, err := app.db.GetSiteDeployment(context.Background(), readyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyView := app.siteDeploymentView(context.Background(), ready)
+	cf := readyView.CloudflareStatic
+	if cf == nil {
+		t.Fatal("missing cloudflare evidence")
+	}
+
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/deployments/"+readyID+"/cloudflare-static/activate", "test-token", map[string]any{
+		"confirm":             "activate",
+		"probe_url":           "https://demo.example.com/",
+		"worker_name":         cf.WorkerName,
+		"version_id":          cf.VersionID,
+		"domains":             cf.Domains,
+		"assets_sha256":       cf.AssetsSHA256,
+		"file_count":          readyView.FileCount,
+		"total_size":          readyView.TotalSize,
+		"verification_status": "ok",
+		"verified_at_utc":     "2026-04-29T00:01:00Z",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("activate status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"deployment_target":"cloudflare_static"`,
+		`"status":"active"`,
+		`"active":true`,
+		`"production_url":"https://demo.example.com/"`,
+		`"worker_name":"supercdn-demo-static"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("response missing %s: %s", want, body)
+		}
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.cloudflare_static.activate", "site:demo;deployment:"+readyID)
+	old, err := app.db.GetSiteDeployment(context.Background(), activeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Active {
+		t.Fatalf("old deployment stayed active: %+v", old)
+	}
+}
+
+func TestActivateCloudflareStaticDeploymentRejectsEvidenceMismatchAndAudits(t *testing.T) {
+	app := newTestServer(t)
+	readyID := recordCloudflareStaticDeploymentForTest(t, app, "demo", false)
+	ready, err := app.db.GetSiteDeployment(context.Background(), readyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf := app.siteDeploymentView(context.Background(), ready).CloudflareStatic
+	if cf == nil {
+		t.Fatal("missing cloudflare evidence")
+	}
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/deployments/"+readyID+"/cloudflare-static/activate", "test-token", map[string]any{
+		"confirm":             "activate",
+		"probe_url":           "https://demo.example.com/",
+		"worker_name":         cf.WorkerName,
+		"version_id":          cf.VersionID,
+		"domains":             cf.Domains,
+		"assets_sha256":       "wrong-sha",
+		"file_count":          ready.FileCount,
+		"total_size":          ready.TotalSize,
+		"verification_status": "ok",
+		"verified_at_utc":     "2026-04-29T00:01:00Z",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("activate status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.cloudflare_static.activate.rejected", "site:demo;deployment:"+readyID)
+	dep, err := app.db.GetSiteDeployment(context.Background(), readyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dep.Active {
+		t.Fatalf("mismatched activation changed deployment: %+v", dep)
+	}
+}
+
 func TestIPFSStatusChecksPinataProvider(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v3/files/public" {
@@ -5267,6 +5354,7 @@ func recordCloudflareStaticDeploymentForTest(t *testing.T, app *Server, siteID s
 		"version_id":          newDeploymentID(),
 		"domains":             []string{siteID + ".example.com"},
 		"compatibility_date":  "2026-04-29",
+		"assets_sha256":       "asset-sha",
 		"cache_policy":        "auto",
 		"headers_generated":   true,
 		"not_found_handling":  "single-page-application",

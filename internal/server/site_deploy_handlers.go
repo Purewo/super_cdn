@@ -92,6 +92,19 @@ type recoverCloudflareStaticDeploymentRequest struct {
 	ProbeURL string `json:"probe_url"`
 }
 
+type activateCloudflareStaticDeploymentRequest struct {
+	Confirm            string   `json:"confirm"`
+	ProbeURL           string   `json:"probe_url"`
+	WorkerName         string   `json:"worker_name"`
+	VersionID          string   `json:"version_id"`
+	Domains            []string `json:"domains"`
+	AssetsSHA256       string   `json:"assets_sha256"`
+	FileCount          int      `json:"file_count"`
+	TotalSize          int64    `json:"total_size"`
+	VerificationStatus string   `json:"verification_status"`
+	VerifiedAtUTC      string   `json:"verified_at_utc"`
+}
+
 func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	if siteID == "" {
@@ -171,6 +184,28 @@ func (s *Server) handleRecoverCloudflareStaticDeployment(w http.ResponseWriter, 
 		return
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) handleActivateCloudflareStaticDeployment(w http.ResponseWriter, r *http.Request) {
+	siteID := cleanID(r.PathValue("id"))
+	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
+	if _, ok := s.getSiteForAPI(w, r, siteID); !ok {
+		return
+	}
+	var req activateCloudflareStaticDeploymentRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.activateCloudflareStaticDeployment(r.Context(), siteID, deploymentID, req)
+	if err != nil {
+		s.auditRejectedMutation(r, "site.deployment.cloudflare_static.activate.rejected", cloudflareStaticActivationAuditResource(siteID, deploymentID, err))
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.auditMutation(w, r, "site.deployment.cloudflare_static.activate", "site:"+siteID+";deployment:"+deploymentID) {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleListSiteDeployments(w http.ResponseWriter, r *http.Request) {
@@ -796,6 +831,65 @@ func (s *Server) recoverCloudflareStaticDeployment(ctx context.Context, siteID s
 	return s.recordCloudflareStaticDeployment(ctx, siteID, recordReq)
 }
 
+func (s *Server) activateCloudflareStaticDeployment(ctx context.Context, siteID, deploymentID string, req activateCloudflareStaticDeploymentRequest) (model.SiteDeployment, error) {
+	if strings.TrimSpace(req.Confirm) != "activate" {
+		return model.SiteDeployment{}, fmt.Errorf("confirm must be activate")
+	}
+	dep, err := s.db.GetSiteDeployment(ctx, deploymentID)
+	if err != nil || dep.SiteID != siteID {
+		return model.SiteDeployment{}, fmt.Errorf("deployment not found")
+	}
+	if dep.DeploymentTarget != model.SiteDeploymentTargetCloudflareStatic {
+		return model.SiteDeployment{}, fmt.Errorf("deployment target must be cloudflare_static")
+	}
+	if dep.Status != model.SiteDeploymentReady && dep.Status != model.SiteDeploymentActive {
+		return model.SiteDeployment{}, fmt.Errorf("deployment is not ready")
+	}
+	view := s.siteDeploymentView(ctx, dep)
+	evidence := view.CloudflareStatic
+	if evidence == nil {
+		return model.SiteDeployment{}, fmt.Errorf("cloudflare_static evidence is missing")
+	}
+	if strings.TrimSpace(req.ProbeURL) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("probe_url is required")
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.VerificationStatus), "ok") {
+		return model.SiteDeployment{}, fmt.Errorf("verification_status must be ok")
+	}
+	if strings.TrimSpace(req.VerifiedAtUTC) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("verified_at_utc is required")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.VerifiedAtUTC)); err != nil {
+		return model.SiteDeployment{}, fmt.Errorf("verified_at_utc must be RFC3339: %w", err)
+	}
+	if strings.TrimSpace(req.WorkerName) == "" || strings.TrimSpace(req.WorkerName) != evidence.WorkerName {
+		return model.SiteDeployment{}, fmt.Errorf("worker_name does not match deployment evidence")
+	}
+	if strings.TrimSpace(evidence.VersionID) != "" && strings.TrimSpace(req.VersionID) != evidence.VersionID {
+		return model.SiteDeployment{}, fmt.Errorf("version_id does not match deployment evidence")
+	}
+	if strings.TrimSpace(evidence.AssetsSHA256) == "" || strings.TrimSpace(req.AssetsSHA256) != evidence.AssetsSHA256 {
+		return model.SiteDeployment{}, fmt.Errorf("assets_sha256 does not match deployment evidence")
+	}
+	if req.FileCount <= 0 || req.FileCount != dep.FileCount {
+		return model.SiteDeployment{}, fmt.Errorf("file_count does not match deployment evidence")
+	}
+	if req.TotalSize < 0 || req.TotalSize != dep.TotalSize {
+		return model.SiteDeployment{}, fmt.Errorf("total_size does not match deployment evidence")
+	}
+	if !sameDomainSet(req.Domains, evidence.Domains) {
+		return model.SiteDeployment{}, fmt.Errorf("domains do not match deployment evidence")
+	}
+	if !probeURLMatchesDomains(req.ProbeURL, evidence.Domains) {
+		return model.SiteDeployment{}, fmt.Errorf("probe_url host does not match deployment domains")
+	}
+	activated, err := s.db.ActivateSiteDeployment(ctx, siteID, deploymentID)
+	if err != nil {
+		return model.SiteDeployment{}, err
+	}
+	return s.siteDeploymentView(ctx, activated), nil
+}
+
 func hasNonEmptyString(values []string) bool {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -815,6 +909,49 @@ func cloudflareStaticRecoveryAuditResource(siteID string, err error) string {
 		}
 	}
 	return "site:" + siteID + ";reason:" + reason
+}
+
+func cloudflareStaticActivationAuditResource(siteID, deploymentID string, err error) string {
+	reason := "unknown"
+	if err != nil {
+		reason = strings.ToLower(strings.TrimSpace(err.Error()))
+		reason = strings.NewReplacer(" ", "_", ";", "_", ":", "_", "\n", "_", "\r", "_", "\t", "_").Replace(reason)
+		if len(reason) > 120 {
+			reason = reason[:120]
+		}
+	}
+	return "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + reason
+}
+
+func sameDomainSet(a, b []string) bool {
+	left := mergeDomains(a)
+	right := mergeDomains(b)
+	if len(left) != len(right) {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, value := range left {
+		seen[value] = true
+	}
+	for _, value := range right {
+		if !seen[value] {
+			return false
+		}
+	}
+	return true
+}
+
+func probeURLMatchesDomains(raw string, domains []string) bool {
+	host := publicURLHost(raw)
+	if host == "" {
+		return false
+	}
+	for _, domain := range domains {
+		if host == cleanHost(domain) {
+			return true
+		}
+	}
+	return false
 }
 
 type siteZipEntry struct {

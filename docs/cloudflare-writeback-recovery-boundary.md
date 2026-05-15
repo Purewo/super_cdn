@@ -19,7 +19,8 @@ Current supported recovery behavior:
 - `hybrid_edge` readiness timeouts after deployment creation can be inspected with `reconcile-deployment` because a Super CDN deployment id already exists.
 - `refresh-edge-manifest` can republish the active hybrid edge manifest when signatures or manifest contents need repair.
 - `recover-cloudflare-static` can validate the evidence for unrecorded `cloudflare_static` provider writes: source summary, Worker/version/domain evidence and strict live probe. With `-dry-run=false -confirm recover`, it records a non-active Super CDN deployment through a recovery-specific server endpoint and audit action.
-- `cloudflare_static` readiness timeouts before metadata recording no longer require losing all metadata evidence, but a provider write alone is still not enough to activate Super CDN metadata.
+- `activate-cloudflare-static` can activate a recovered `cloudflare_static` deployment only after loading recorded deployment evidence, matching it against the local source summary, running a strict live probe, and calling a dedicated audited endpoint with `-dry-run=false -confirm activate`.
+- `cloudflare_static` readiness timeouts before metadata recording no longer require losing all metadata evidence, but a provider write alone is still not enough to activate Super CDN metadata; activation requires the dedicated verified path above.
 - Live recovery canary `supercdn-recovery-0515-090858.qwk.ccwu.cc` proved this boundary on 2026-05-15: `publish-cloudflare-static` wrote Worker version `89fe1670-c92a-4896-bf22-d198dc2f6fa7` without Super CDN metadata, `recover-cloudflare-static` dry-run verified strict provider evidence, the confirmed write recorded inactive deployment `dpl-diiuko109n5o`, audit logged `site.deployment.cloudflare_static.recovery`, and `reconcile-deployment` returned `status=ok` / `settled=true`.
 
 ## Failure Shapes
@@ -63,7 +64,7 @@ The `cloudflare_static` recovery/writeback command is ordered as:
 4. Probe the real custom domain with `probe-site`-equivalent strict checks: Cloudflare Static HTML evidence, direct same-site assets, generated cache headers when applicable, and optional SPA fallback.
 5. If strict probe fails, emit a recovery report and do not write metadata.
 6. If strict probe passes, record a Super CDN deployment with `verification_status=ok`, published/verified timestamps and the exact evidence.
-7. Record the recovered deployment as non-active; provider-aware activation remains a future step and must not use generic `promote-deployment`.
+7. Record the recovered deployment as non-active; activation is a separate `activate-cloudflare-static` step and must not use generic `promote-deployment`.
 8. Audit the recovery write separately from normal deploys.
 9. Emit `reconcile-deployment` and `rollback-plan` next commands.
 
@@ -77,7 +78,7 @@ The recovery-specific endpoint must keep these properties:
 - idempotency key based on site id, Worker name, version id, assets hash and domains;
 - no secret fields accepted or stored;
 - rejected writes are audited when evidence is incomplete, probe evidence is missing, or activation would be metadata-only;
-- activation remains unsupported here; future provider-aware activation must not reuse the generic `promote-deployment` path for Cloudflare-backed deployments.
+- activation remains unsupported on the recovery endpoint itself; the dedicated provider-aware activation path must not reuse the generic `promote-deployment` path for Cloudflare-backed deployments.
 
 ## Non-Goals
 
@@ -88,10 +89,11 @@ The recovery-specific endpoint must keep these properties:
 
 ## Test And Canary Requirements
 
-Before extending this into activation or hybrid writeback, keep these cases covered:
+Before extending this into Cloudflare rollback writes or hybrid writeback, keep these cases covered:
 
 - unit test: dry-run refuses missing source dir, Worker name, domain or strict probe evidence;
 - unit test: successful recovery writes a deployment record with Cloudflare evidence and a distinct audit action;
-- unit test: activation is rejected without explicit confirmation;
+- unit test: activation is rejected without explicit confirmation or when source/provider evidence does not match;
+- unit test: successful activation uses a dedicated endpoint and writes a distinct audit action;
 - integration test: failed strict probe prints a recovery report and writes nothing;
 - live canary: simulate an unrecorded Cloudflare Static provider write, recover after propagation, then run `reconcile-deployment` and `probe-site` against the recovered deployment. This is currently covered by `supercdn-recovery-0515-090858` / `dpl-diiuko109n5o`.

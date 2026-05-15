@@ -118,6 +118,8 @@ func main() {
 		err = reconcileDeployment(c, args[1:])
 	case "recover-cloudflare-static":
 		err = recoverCloudflareStatic(c, args[1:])
+	case "activate-cloudflare-static":
+		err = activateCloudflareStatic(c, args[1:])
 	case "publish-cloudflare-static":
 		err = publishCloudflareStatic(args[1:])
 	case "promote-deployment":
@@ -249,6 +251,7 @@ func usage() {
   supercdnctl [global flags] rollback-plan -site blog -deployment dpl-abc
   supercdnctl [global flags] reconcile-deployment -site blog -deployment dpl-abc
   supercdnctl recover-cloudflare-static -site blog -dir ./dist -domains blog.example.com -worker-name supercdn-blog-static -version-id ver_xxx
+  supercdnctl [global flags] activate-cloudflare-static -site blog -deployment dpl-abc -dir ./dist -dry-run=false -confirm activate
   supercdnctl publish-cloudflare-static -site blog -dir ./dist -domains blog-static-test.example.com -dry-run=false
   supercdnctl [global flags] promote-deployment -site blog -deployment dpl-abc
   supercdnctl [global flags] delete-deployment -site blog -deployment dpl-abc -dry-run

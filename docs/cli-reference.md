@@ -74,6 +74,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `rollback-plan` | `GET /api/v1/sites/{id}/deployments/{deployment}` | 只读生成 deployment 回滚方式，区分 metadata promote 与 Cloudflare 重新发布 |
 | `reconcile-deployment` | `GET /api/v1/sites/{id}/deployments/{deployment}` + HTTP probe | Read-only reconcile of Super CDN deployment metadata against real Cloudflare Static / hybrid-edge provider state after a readiness timeout |
 | `recover-cloudflare-static` | Local directory summary + HTTP probe | Dry-run evidence validator for unrecorded Cloudflare Static provider writes after readiness timeouts |
+| `activate-cloudflare-static` | `POST /api/v1/sites/{id}/deployments/{deployment}/cloudflare-static/activate` | Provider-aware activation for a recovered Cloudflare Static deployment after source/probe/evidence checks |
 | `publish-cloudflare-static` | 本地 Wrangler 调用 | 发布本地目录到 Cloudflare Workers Static Assets |
 | `promote-deployment` | `POST /api/v1/sites/{id}/deployments/{deployment}/promote` | 将部署提升为当前生产版本 |
 | `delete-deployment` | `DELETE /api/v1/sites/{id}/deployments/{deployment}` | 删除未激活且未 pinned 的部署 |
@@ -555,6 +556,7 @@ local only
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target cloudflare_static -domains blog-static-test.example.com
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target hybrid_edge -profile china_mobile -domains blog.qwk.ccwu.cc -static-spa
 .\bin\supercdnctl.exe publish-cloudflare-static -site blog -dir .\dist -domains blog-static-test.example.com -dry-run=false
+.\bin\supercdnctl.exe activate-cloudflare-static -site blog -deployment dpl-recovered -dir .\dist -dry-run=false -confirm activate
 .\bin\supercdnctl.exe promote-deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc -dry-run
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc
@@ -638,6 +640,28 @@ Parameters:
 | `-resolver` | No | system DNS | Optional DNS resolver for probes |
 | `-dry-run` | No | `true` | Validate only unless `false` with `-confirm recover` |
 | `-confirm` | For writes | Empty | Must be `recover` when `-dry-run=false` |
+
+#### activate-cloudflare-static
+
+Provider-aware activation for a recovered Cloudflare Static deployment. It loads the recorded deployment, summarizes the local source directory, verifies that source hash/file count/size match the recorded Cloudflare evidence, runs a strict live probe, and defaults to dry-run. With `-dry-run=false -confirm activate`, it calls a dedicated activation endpoint and writes a distinct audit event. This is not the generic `promote-deployment` path.
+
+```powershell
+.\bin\supercdnctl.exe activate-cloudflare-static -site blog -deployment dpl-recovered -dir .\dist
+.\bin\supercdnctl.exe activate-cloudflare-static -site blog -deployment dpl-recovered -dir .\dist -url https://blog.example.com/ -dry-run=false -confirm activate
+```
+
+Parameters:
+| Parameter | Required | Default | Description |
+| --- | --- | --- | --- |
+| `-site` | Yes | Empty | Site ID |
+| `-deployment` | Yes | Empty | Recovered Cloudflare Static deployment ID |
+| `-dir` | Yes | Empty | Source dist directory used for the provider write |
+| `-url` | No | recorded Cloudflare Static URL/domain | Explicit public URL to probe |
+| `-resolver` | No | system DNS | Optional DNS resolver for probes |
+| `-max-assets` | No | `20` | Maximum JS/CSS assets to probe |
+| `-timeout` | No | `30s` | Overall probe timeout |
+| `-dry-run` | No | `true` | Validate only unless `false` with `-confirm activate` |
+| `-confirm` | For writes | Empty | Must be `activate` when `-dry-run=false` |
 
 #### export-edge-manifest
 

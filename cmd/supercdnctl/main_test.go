@@ -488,6 +488,213 @@ func TestRecoverCloudflareStaticWriteCallsRecoveryAPI(t *testing.T) {
 	}
 }
 
+func TestActivateCloudflareStaticDryRunVerifiesEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), `<script src="/app.js"></script>`)
+	writeTestFile(t, filepath.Join(dir, "app.js"), `console.log("ok")`)
+	summary, err := summarizeCloudflareStaticDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			_, _ = w.Write([]byte(`console.log("ok")`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer siteSrv.Close()
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/demo/deployments/dpl-recovered" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-recovered",
+			"site_id":           "demo",
+			"status":            "ready",
+			"deployment_target": "cloudflare_static",
+			"file_count":        summary.FileCount,
+			"total_size":        summary.TotalSize,
+			"cloudflare_static": map[string]any{
+				"worker_name":         "supercdn-demo-static",
+				"version_id":          "ver-123",
+				"domains":             []string{"demo.example.com"},
+				"urls":                []string{siteSrv.URL + "/"},
+				"assets_sha256":       summary.SHA256,
+				"cache_policy":        "none",
+				"verification_status": "ok",
+			},
+		})
+	}))
+	defer apiSrv.Close()
+
+	var activateErr error
+	out := captureStdout(t, func() {
+		activateErr = activateCloudflareStatic(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{
+			"-site", "demo",
+			"-deployment", "dpl-recovered",
+			"-dir", dir,
+			"-timeout", "2s",
+		})
+	})
+	if activateErr != nil {
+		t.Fatal(activateErr)
+	}
+	var report cloudflareStaticActivationReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "verified" || !report.WriteReady || report.Probe == nil || !report.Probe.OK {
+		t.Fatalf("unexpected activation report: %+v", report)
+	}
+	if !strings.Contains(strings.Join(report.NextCommands, "\n"), "-dry-run=false -confirm activate") {
+		t.Fatalf("next commands = %+v", report.NextCommands)
+	}
+}
+
+func TestActivateCloudflareStaticWriteCallsActivationAPI(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), `<script src="/app.js"></script>`)
+	writeTestFile(t, filepath.Join(dir, "app.js"), `console.log("ok")`)
+	summary, err := summarizeCloudflareStaticDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			_, _ = w.Write([]byte(`console.log("ok")`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer siteSrv.Close()
+	var activationReq map[string]any
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sites/demo/deployments/dpl-recovered":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":                "dpl-recovered",
+				"site_id":           "demo",
+				"status":            "ready",
+				"deployment_target": "cloudflare_static",
+				"file_count":        summary.FileCount,
+				"total_size":        summary.TotalSize,
+				"cloudflare_static": map[string]any{
+					"worker_name":         "supercdn-demo-static",
+					"version_id":          "ver-123",
+					"domains":             []string{"demo.example.com"},
+					"urls":                []string{siteSrv.URL + "/"},
+					"assets_sha256":       summary.SHA256,
+					"cache_policy":        "none",
+					"verification_status": "ok",
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sites/demo/deployments/dpl-recovered/cloudflare-static/activate":
+			if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+				t.Fatalf("Authorization = %q", auth)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&activationReq); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"id":"dpl-recovered","site_id":"demo","status":"active","deployment_target":"cloudflare_static","active":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer apiSrv.Close()
+
+	var activateErr error
+	out := captureStdout(t, func() {
+		activateErr = activateCloudflareStatic(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{
+			"-site", "demo",
+			"-deployment", "dpl-recovered",
+			"-dir", dir,
+			"-timeout", "2s",
+			"-dry-run=false",
+			"-confirm", "activate",
+		})
+	})
+	if activateErr != nil {
+		t.Fatal(activateErr)
+	}
+	if activationReq["confirm"] != "activate" || activationReq["verification_status"] != "ok" {
+		t.Fatalf("unexpected activation request: %#v", activationReq)
+	}
+	if activationReq["assets_sha256"] != summary.SHA256 || activationReq["file_count"] != float64(summary.FileCount) {
+		t.Fatalf("missing source evidence: %#v", activationReq)
+	}
+	var report cloudflareStaticActivationReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "activated" || !strings.Contains(string(report.Deployment), "dpl-recovered") {
+		t.Fatalf("unexpected activation report: %+v", report)
+	}
+}
+
+func TestActivateCloudflareStaticBlocksSourceMismatch(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), `<script src="/app.js"></script>`)
+	writeTestFile(t, filepath.Join(dir, "app.js"), `console.log("ok")`)
+	summary, err := summarizeCloudflareStaticDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/demo/deployments/dpl-recovered" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-recovered",
+			"site_id":           "demo",
+			"status":            "ready",
+			"deployment_target": "cloudflare_static",
+			"file_count":        summary.FileCount,
+			"total_size":        summary.TotalSize,
+			"cloudflare_static": map[string]any{
+				"worker_name":         "supercdn-demo-static",
+				"version_id":          "ver-123",
+				"domains":             []string{"demo.example.com"},
+				"urls":                []string{"https://demo.example.com/"},
+				"assets_sha256":       "wrong-sha",
+				"cache_policy":        "none",
+				"verification_status": "ok",
+			},
+		})
+	}))
+	defer apiSrv.Close()
+	var activateErr error
+	out := captureStdout(t, func() {
+		activateErr = activateCloudflareStatic(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{
+			"-site", "demo",
+			"-deployment", "dpl-recovered",
+			"-dir", dir,
+		})
+	})
+	if activateErr == nil {
+		t.Fatal("expected source mismatch")
+	}
+	var report cloudflareStaticActivationReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "blocked" || !strings.Contains(strings.Join(report.Warnings, "\n"), "assets_sha256") {
+		t.Fatalf("unexpected activation report: %+v", report)
+	}
+}
+
 func TestCDNDoctorCallsAPI(t *testing.T) {
 	var saw bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

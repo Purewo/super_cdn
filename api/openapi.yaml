@@ -1023,6 +1023,32 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+  "/api/v1/sites/{id}/deployments/{deployment}/cloudflare-static/activate":
+    post:
+      tags: [Deployments]
+      operationId: activateCloudflareStaticDeployment
+      summary: Activate a recovered Cloudflare Static deployment after provider verification
+      description: Dedicated provider-aware activation path for recovered Cloudflare Static deployments. The caller must provide explicit confirmation plus strict probe/source/provider evidence matching the recorded deployment; generic metadata-only promote remains blocked.
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+        - $ref: "#/components/parameters/DeploymentID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivateCloudflareStaticDeploymentRequest"
+      responses:
+        "200":
+          description: Activated deployment.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteDeployment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
   "/api/v1/sites/{id}/deployments/{deployment}/files/primary-target":
     post:
       tags: [Deployments]
@@ -2301,6 +2327,37 @@ components:
               type: boolean
               default: false
               description: Must be false; recovery records metadata only and does not activate Cloudflare-backed deployments.
+    ActivateCloudflareStaticDeploymentRequest:
+      type: object
+      required: [confirm, probe_url, worker_name, version_id, domains, assets_sha256, file_count, total_size, verification_status, verified_at_utc]
+      properties:
+        confirm:
+          type: string
+          enum: [activate]
+        probe_url:
+          type: string
+          description: Exact URL that passed the strict activation probe.
+        worker_name:
+          type: string
+        version_id:
+          type: string
+        domains:
+          type: array
+          items:
+            type: string
+        assets_sha256:
+          type: string
+          description: Source directory hash that must match the recorded deployment evidence.
+        file_count:
+          type: integer
+        total_size:
+          type: integer
+          format: int64
+        verification_status:
+          type: string
+          enum: [ok]
+        verified_at_utc:
+          type: string
     SiteDeployment:
       type: object
       properties:
