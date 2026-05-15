@@ -245,6 +245,70 @@ func TestReconcileCloudflareStaticFailureReturnsReport(t *testing.T) {
 	}
 }
 
+func TestReconcileCloudflareStaticUsesEvidenceURLForInactiveDeployment(t *testing.T) {
+	siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			_, _ = w.Write([]byte(`console.log("ok")`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer siteSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/demo/deployments/dpl-static-old" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-static-old",
+			"site_id":           "demo",
+			"environment":       "production",
+			"status":            "ready",
+			"route_profile":     "overseas",
+			"deployment_target": "cloudflare_static",
+			"active":            false,
+			"cloudflare_static": map[string]any{
+				"worker_name":         "supercdn-demo-static",
+				"urls":                []string{siteSrv.URL + "/"},
+				"domains":             []string{"demo.example.com"},
+				"verification_status": "ok",
+			},
+		})
+	}))
+	defer apiSrv.Close()
+
+	var err error
+	out := captureStdout(t, func() {
+		err = reconcileDeployment(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{"-site", "demo", "-deployment", "dpl-static-old"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report reconcileDeploymentReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "ok" || !report.Settled || report.URL != siteSrv.URL+"/" {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	joined := strings.Join(report.NextCommands, "\n")
+	if !strings.Contains(joined, "probe-site -url "+siteSrv.URL+"/") || strings.Contains(joined, "-production") {
+		t.Fatalf("unexpected next commands: %+v", report.NextCommands)
+	}
+	if !strings.Contains(joined, "domain-status -domain demo.example.com") {
+		t.Fatalf("missing domain status command: %+v", report.NextCommands)
+	}
+	if !strings.Contains(strings.Join(report.Warnings, "\n"), "not active") {
+		t.Fatalf("missing inactive warning: %+v", report.Warnings)
+	}
+}
+
 func TestCDNDoctorCallsAPI(t *testing.T) {
 	var saw bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

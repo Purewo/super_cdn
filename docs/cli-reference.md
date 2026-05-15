@@ -597,6 +597,8 @@ Read-only reconciliation for Cloudflare-backed deployments after a provider writ
 
 For `cloudflare_static`, the reconciler requires Cloudflare Static HTML evidence and direct same-site assets; when the deployment was recorded with generated headers, it also checks revalidating HTML and immutable asset cache headers. For `hybrid_edge`, it requires Cloudflare Static entry HTML and manifest-routed JS/CSS first hops.
 
+For non-active Cloudflare-backed deployments, the command falls back to recorded `cloudflare_static.urls` / `cloudflare_static.domains` when the API does not expose a production URL. The report keeps a warning because probing a shared custom domain may reflect the current live Worker/domain state rather than an archived provider version.
+
 Parameters:
 | Parameter | Required | Default | Description |
 | --- | --- | --- | --- |

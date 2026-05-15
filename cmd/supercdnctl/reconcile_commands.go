@@ -185,6 +185,18 @@ func reconcileDeploymentURL(dep reconcileDeploymentRecord) (string, error) {
 	if len(dep.ProductionURLs) > 0 && dep.ProductionURLs[0] != "" {
 		return dep.ProductionURLs[0], nil
 	}
+	if dep.CloudflareStatic != nil {
+		for _, raw := range dep.CloudflareStatic.URLs {
+			if strings.TrimSpace(raw) != "" {
+				return raw, nil
+			}
+		}
+		for _, domain := range dep.CloudflareStatic.Domains {
+			if host := strings.TrimSpace(domain); host != "" {
+				return "https://" + host + "/", nil
+			}
+		}
+	}
 	if dep.PreviewURL != "" {
 		return dep.PreviewURL, nil
 	}
@@ -249,8 +261,8 @@ func buildReconcileDeploymentReport(dep reconcileDeploymentRecord, targetURL str
 	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic && dep.CloudflareStatic == nil {
 		report.Warnings = append(report.Warnings, "cloudflare_static deployment metadata has no Cloudflare evidence block")
 	}
-	if dep.DeploymentTarget == model.SiteDeploymentTargetHybridEdge && !dep.Active {
-		report.Warnings = append(report.Warnings, "hybrid_edge deployment is not active; probe may not represent current production traffic")
+	if (dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic || dep.DeploymentTarget == model.SiteDeploymentTargetHybridEdge) && !dep.Active {
+		report.Warnings = append(report.Warnings, dep.DeploymentTarget+" deployment is not active; probe may represent the current live domain state rather than an archived provider version")
 	}
 	return report
 }
@@ -261,14 +273,23 @@ func reconcileNextCommands(dep reconcileDeploymentRecord, targetURL string) []st
 		"-site " + cliHintArg(dep.SiteID),
 		"-deployment " + cliHintArg(dep.ID),
 	}
+	if (dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic || dep.DeploymentTarget == model.SiteDeploymentTargetHybridEdge) && !dep.Active && strings.TrimSpace(targetURL) != "" {
+		probe = []string{"supercdnctl probe-site", "-url " + cliHintArg(targetURL)}
+	}
 	switch dep.DeploymentTarget {
 	case model.SiteDeploymentTargetCloudflareStatic:
-		probe = append(probe, "-production", "-require-edge-static-html", "-require-direct-assets")
+		if dep.Active {
+			probe = append(probe, "-production")
+		}
+		probe = append(probe, "-require-edge-static-html", "-require-direct-assets")
 		if dep.CloudflareStatic != nil && dep.CloudflareStatic.HeadersGenerated {
 			probe = append(probe, "-require-html-revalidate", "-require-immutable-assets")
 		}
 	case model.SiteDeploymentTargetHybridEdge:
-		probe = append(probe, "-production", "-require-edge-static-html", "-require-edge-manifest-assets")
+		if dep.Active {
+			probe = append(probe, "-production")
+		}
+		probe = append(probe, "-require-edge-static-html", "-require-edge-manifest-assets")
 	default:
 		if strings.TrimSpace(targetURL) != "" {
 			probe = []string{"supercdnctl probe-site", "-url " + cliHintArg(targetURL)}
@@ -296,7 +317,27 @@ func firstReconcileDomain(dep reconcileDeploymentRecord, targetURL string) strin
 	if host := hostFromURL(dep.ProductionURL); host != "" {
 		return host
 	}
+	if dep.CloudflareStatic != nil {
+		for _, domain := range dep.CloudflareStatic.Domains {
+			if host := cleanReconcileDomain(domain); host != "" {
+				return host
+			}
+		}
+		for _, raw := range dep.CloudflareStatic.URLs {
+			if host := hostFromURL(raw); host != "" {
+				return host
+			}
+		}
+	}
 	return hostFromURL(targetURL)
+}
+
+func cleanReconcileDomain(domain string) string {
+	parsed, err := url.Parse(strings.TrimSpace(domain))
+	if err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return strings.Trim(strings.TrimSpace(domain), "/")
 }
 
 func hostFromURL(raw string) string {
