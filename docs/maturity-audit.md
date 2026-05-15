@@ -34,6 +34,7 @@ Concrete success criteria:
 | Server ownership boundary | `internal/server/server.go` plus split handler/service files | `server.go` is now route/lifecycle plumbing; feature code lives in narrower files. |
 | CLI ownership boundary | `cmd/supercdnctl/main.go` plus command files | `main.go` is dispatcher/global flag plumbing; command groups live in separate files. |
 | Deployment target normalization | `internal/deploymenttarget` | Shared by config, server and CLI aliases. |
+| Edge evidence header constants | `internal/edgeheaders` | Go-side Cloudflare Static `_headers` generation, `siteprobe`, public redirect markers and `site-doctor` expected edge headers now share one protocol constant set. Commit `2e6153c` passed local foundation and CI run `25901652012`, then was deployed to production with backup `/opt/supercdn/backups/20260515T052212Z-edgeheaders`; installed binary hashes matched local build hashes and `https://qwk.ccwu.cc/healthz` returned 200. |
 | Doctor next actions | `cdn-doctor`, `site-doctor` recommendations | Tests cover manual switch recommendations and not-ready paths. |
 | Manual switch planning | `supercdnctl switch-plan` | Reports candidate readiness, apply support, risks and next commands. |
 | Manual switch apply | `supercdnctl switch-apply` and primary-target APIs | Dry-run by default, requires `-confirm switch`, writes audit events for applied and rejected attempts, returns rollback command. |
