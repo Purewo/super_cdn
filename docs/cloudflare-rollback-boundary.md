@@ -2,11 +2,11 @@
 
 Last updated: 2026-05-15 Asia/Shanghai.
 
-This note records the boundary for future Cloudflare Static and `hybrid_edge` rollback write commands. It complements `rollback-plan`, which is intentionally read-only.
+This note records the boundary for Cloudflare Static and `hybrid_edge` rollback write commands. It complements `rollback-plan`, which is intentionally read-only.
 
 ## Current Decision
 
-Do not add a command that claims to roll back Cloudflare-backed live traffic until the command can prove that all real traffic state moved together. The first supported write wrapper is limited to `cloudflare_static`, where the command can verify the historical source directory against recorded Worker/domain/assets evidence and then rerun the full Cloudflare Static provider deployment flow.
+Do not add a command that claims to roll back Cloudflare-backed live traffic until the command can prove that all real traffic state moved together. Supported write wrappers are limited to targets where the command verifies the historical source directory against recorded provider evidence and then reruns the full provider deployment flow.
 
 Current supported behavior:
 
@@ -15,7 +15,7 @@ Current supported behavior:
 - `rollback-plan` returns a read-only plan, version evidence when available, and explicit `write_blockers[]` / `missing_evidence[]` when a rollback write path is not ready.
 - `rollback-plan` now consumes recorded `hybrid_edge` provider evidence when available: Worker name, domains, assets hash, KV namespace, edge manifest hash/size and verification timestamps. Missing hybrid evidence is reported as `hybrid_edge.*`, not as a Cloudflare Static evidence gap.
 - `rollback-apply` can apply `cloudflare_static` rollback when the operator provides the historical source directory and the recorded target deployment has enough Worker/domain/assets evidence. It defaults to dry-run, requires `-dry-run=false -confirm rollback` for writes, verifies source hash/file count/size before writing, then republishes Cloudflare Static assets through the same provider flow as `deploy-site`. Successful writes are audited as `site.deployment.cloudflare_static.rollback` with both the new deployment id and the rollback target id.
-- `rollback-apply` does not support `hybrid_edge`; hybrid rollback still requires a future provider-aware command that couples Worker assets, active KV manifest, deployment KV manifest and live custom-domain checks.
+- `rollback-apply` can apply `hybrid_edge` rollback when the operator provides the historical source directory and the recorded target deployment has enough Worker/domain/assets/KV/manifest evidence. It defaults to dry-run, requires `-dry-run=false -confirm rollback` for writes, verifies the source assets hash against hybrid evidence, republishes Worker assets plus deployment and active KV manifests through the same provider flow as `deploy-site -target hybrid_edge`, and records successful writes as `site.deployment.hybrid_edge.rollback`.
 - `reconcile-deployment` is a read-only post-timeout inspection command for comparing recorded Super CDN deployment metadata with live Cloudflare Static / hybrid-edge provider behavior.
 - `delete-deployment` warns that Cloudflare Worker versions, custom domains and KV entries are not deleted.
 - `refresh-edge-manifest` can republish the active hybrid edge manifest after repair or signature recovery, but it is not a deployment rollback command.
@@ -51,7 +51,7 @@ If only one of those changes, the control plane can claim rollback while the dom
 
 ## Minimum Source Of Truth
 
-A future write command needs a durable rollback target that includes:
+A rollback write command needs a durable rollback target that includes:
 
 - Super CDN deployment id and site id;
 - deployment target;
@@ -103,10 +103,11 @@ For `cloudflare_static`:
 - if dry-run returns `status=verified`, run the same command with `-dry-run=false -confirm rollback`;
 - run `reconcile-deployment` or the emitted `probe-site` command against the new active deployment when a live check is needed.
 
-For `hybrid_edge`, until a safe write command exists:
+For `hybrid_edge`:
 
 - run `rollback-plan` for the target deployment;
-- confirm the target evidence;
-- rerun `deploy-site -target hybrid_edge` with the intended historical artifact directory;
-- run the `probe-site` command emitted by `rollback-plan` against the active production deployment after redeploy; Cloudflare Static must prove edge static HTML, and hybrid edge must also prove manifest-routed assets;
-- use `audit-log` to review rejected metadata promote attempts and actual deployment writes.
+- confirm `rollback_write_ready=true`;
+- run `rollback-apply -site <site> -deployment <deployment> -dir <historical-dist>`;
+- if dry-run returns `status=verified`, run the same command with `-dry-run=false -confirm rollback`;
+- run `reconcile-deployment` or the emitted `probe-site -require-edge-static-html -require-edge-manifest-assets` command against the new active deployment when a live check is needed;
+- use `audit-log -action site.deployment.hybrid_edge.rollback` to review confirmed rollback writes.

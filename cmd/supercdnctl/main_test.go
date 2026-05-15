@@ -1278,7 +1278,7 @@ func TestRollbackPlanHybridReportsMissingWriteEvidence(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &plan); err != nil {
 		t.Fatal(err)
 	}
-	if plan.Action != "redeploy_hybrid_edge" || plan.RollbackWriteReady || len(plan.WriteBlockers) != 4 {
+	if plan.Action != "redeploy_hybrid_edge" || plan.RollbackWriteReady || len(plan.WriteBlockers) != 3 {
 		t.Fatalf("unexpected rollback plan: %+v", plan)
 	}
 	if len(plan.NextCommands) != 2 || !strings.Contains(plan.NextCommands[1], "probe-site -site blog -production -require-edge-static-html -require-edge-manifest-assets") {
@@ -1338,7 +1338,7 @@ func TestRollbackPlanHybridUsesHybridEvidence(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &plan); err != nil {
 		t.Fatal(err)
 	}
-	if plan.Action != "redeploy_hybrid_edge" || !plan.RedeployRequired || len(plan.WriteBlockers) != 4 || plan.RollbackWriteReady {
+	if plan.Action != "redeploy_hybrid_edge" || !plan.RedeployRequired || len(plan.WriteBlockers) != 0 || !plan.RollbackWriteReady || !plan.SafeToRun {
 		t.Fatalf("unexpected rollback plan: %+v", plan)
 	}
 	if len(plan.MissingEvidence) != 0 {
@@ -1347,8 +1347,153 @@ func TestRollbackPlanHybridUsesHybridEvidence(t *testing.T) {
 	if plan.Evidence.HybridEdge == nil || plan.Evidence.HybridEdge.WorkerName != "supercdn-blog-edge" || plan.Evidence.HybridEdge.ManifestSHA256 != "manifest-sha" {
 		t.Fatalf("hybrid evidence = %+v", plan.Evidence.HybridEdge)
 	}
-	if len(plan.NextCommands) != 2 || !strings.Contains(plan.NextCommands[0], "deploy-site -site blog -dir 'dist old' -target hybrid_edge -profile overseas -domains blog.example.com -edge-name supercdn-blog-edge -edge-kv-namespace-id kv-123") {
+	if len(plan.NextCommands) != 3 || !strings.Contains(plan.NextCommands[0], "rollback-apply -site blog -deployment dpl-hybrid -dir 'dist old' -dry-run=false -confirm rollback") {
 		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+	if !strings.Contains(plan.NextCommands[1], "deploy-site -site blog -dir 'dist old' -target hybrid_edge -profile overseas -domains blog.example.com -edge-name supercdn-blog-edge -edge-kv-namespace-id kv-123") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+}
+
+func TestRollbackApplyHybridEdgeDryRunVerifiesSource(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), "ok")
+	writeTestFile(t, filepath.Join(dir, "app.js"), "console.log('ok')")
+	summary, err := summarizeCloudflareStaticDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-hybrid" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-hybrid",
+			"site_id":           "blog",
+			"status":            "ready",
+			"environment":       "production",
+			"route_profile":     "overseas",
+			"deployment_target": "hybrid_edge",
+			"manifest_key":      "sites/blog/manifests/dpl-hybrid.json",
+			"file_count":        summary.FileCount,
+			"total_size":        summary.TotalSize,
+			"artifact_sha256":   "artifact-sha",
+			"hybrid_edge": map[string]any{
+				"worker_name":           "supercdn-blog-edge",
+				"domains":               []string{"blog.example.com"},
+				"assets_sha256":         summary.SHA256,
+				"cache_policy":          "none",
+				"verification_status":   "ok",
+				"verified_at":           "2026-05-15T00:00:00Z",
+				"published_at":          "2026-05-15T00:01:00Z",
+				"kv_namespace_id":       "kv-123",
+				"manifest_sha256":       "manifest-sha",
+				"manifest_size":         512,
+				"manifest_mode":         "route",
+				"default_cache_control": "public, max-age=300",
+			},
+		})
+	}))
+	defer apiSrv.Close()
+
+	var applyErr error
+	out := captureStdout(t, func() {
+		applyErr = rollbackApply(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{"-site", "blog", "-deployment", "dpl-hybrid", "-dir", dir})
+	})
+	if applyErr != nil {
+		t.Fatal(applyErr)
+	}
+	var report rollbackApplyReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "verified" || !report.WriteReady || !report.WriteSupported || report.DeploymentTarget != "hybrid_edge" {
+		t.Fatalf("unexpected rollback apply report: %+v", report)
+	}
+	if report.Source.AssetsSHA256 != summary.SHA256 || len(report.MissingEvidence) != 0 {
+		t.Fatalf("source or missing evidence = %+v missing=%+v", report.Source, report.MissingEvidence)
+	}
+}
+
+func TestRollbackApplyHybridEdgeWriteCallsDeploy(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), "ok")
+	writeTestFile(t, filepath.Join(dir, "app.js"), "console.log('ok')")
+	summary, err := summarizeCloudflareStaticDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-hybrid" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-hybrid",
+			"site_id":           "blog",
+			"status":            "ready",
+			"environment":       "production",
+			"route_profile":     "overseas",
+			"deployment_target": "hybrid_edge",
+			"routing_policy":    "latency",
+			"resource_failover": true,
+			"manifest_key":      "sites/blog/manifests/dpl-hybrid.json",
+			"file_count":        summary.FileCount,
+			"total_size":        summary.TotalSize,
+			"artifact_sha256":   "artifact-sha",
+			"hybrid_edge": map[string]any{
+				"worker_name":           "supercdn-blog-edge",
+				"domains":               []string{"blog.example.com"},
+				"assets_sha256":         summary.SHA256,
+				"cache_policy":          "none",
+				"not_found_handling":    "single-page-application",
+				"verification_status":   "ok",
+				"verified_at":           "2026-05-15T00:00:00Z",
+				"published_at":          "2026-05-15T00:01:00Z",
+				"kv_namespace_id":       "kv-123",
+				"kv_namespace":          "supercdn-edge-manifest",
+				"manifest_sha256":       "manifest-sha",
+				"manifest_size":         512,
+				"manifest_mode":         "route",
+				"default_cache_control": "public, max-age=300",
+				"entry_origin_fallback": true,
+			},
+		})
+	}))
+	defer apiSrv.Close()
+
+	oldDeploy := rollbackDeployHybridEdge
+	defer func() { rollbackDeployHybridEdge = oldDeploy }()
+	var got hybridEdgeDeploySiteOptions
+	rollbackDeployHybridEdge = func(c client, opts hybridEdgeDeploySiteOptions) ([]byte, error) {
+		got = opts
+		return []byte(`{"id":"dpl-hybrid-rollback","site_id":"blog","status":"active","deployment_target":"hybrid_edge","active":true}`), nil
+	}
+
+	var applyErr error
+	out := captureStdout(t, func() {
+		applyErr = rollbackApply(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{"-site", "blog", "-deployment", "dpl-hybrid", "-dir", dir, "-dry-run=false", "-confirm", "rollback"})
+	})
+	if applyErr != nil {
+		t.Fatal(applyErr)
+	}
+	if got.Site != "blog" || got.Dir != dir || got.DeploymentTarget != "hybrid_edge" || got.RouteProfile != "overseas" || !got.Promote {
+		t.Fatalf("deploy options = %+v", got)
+	}
+	if got.Operation != "rollback_apply" || got.RollbackTarget != "dpl-hybrid" {
+		t.Fatalf("rollback audit options = %+v", got)
+	}
+	if got.WorkerName != "supercdn-blog-edge" || got.KVNamespaceID != "kv-123" || got.ManifestMode != "route" || !got.EntryOriginFallback {
+		t.Fatalf("hybrid provider options = %+v", got)
+	}
+	if !got.ResourceFailover || got.RoutingPolicy != "latency" || !got.CandidateWait {
+		t.Fatalf("routing options = %+v", got)
+	}
+	var report rollbackApplyReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "rolled_back" || !strings.Contains(string(report.Deployment), "dpl-hybrid-rollback") {
+		t.Fatalf("unexpected rollback apply report: %+v", report)
 	}
 }
 

@@ -132,6 +132,8 @@ type recordHybridEdgeEvidenceRequest struct {
 	EntryOriginFallback bool     `json:"entry_origin_fallback"`
 	ActiveKey           bool     `json:"active_key"`
 	DeploymentKey       bool     `json:"deployment_key"`
+	Operation           string   `json:"operation"`
+	RollbackTarget      string   `json:"rollback_target_deployment"`
 }
 
 func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Request) {
@@ -254,7 +256,8 @@ func (s *Server) handleRecordHybridEdgeEvidence(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "site.deployment.hybrid_edge.evidence", "site:"+siteID+";deployment:"+deploymentID) {
+	action, resource := hybridEdgeEvidenceAudit(siteID, deploymentID, req)
+	if !s.auditMutation(w, r, action, resource) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -965,6 +968,10 @@ func (s *Server) recordHybridEdgeEvidence(ctx context.Context, siteID, deploymen
 	if dep.Status != model.SiteDeploymentReady && dep.Status != model.SiteDeploymentActive {
 		return model.SiteDeployment{}, fmt.Errorf("deployment is not ready")
 	}
+	operation, rollbackTarget, err := s.validateHybridEdgeEvidenceOperation(ctx, siteID, req)
+	if err != nil {
+		return model.SiteDeployment{}, err
+	}
 	if strings.TrimSpace(req.WorkerName) == "" {
 		return model.SiteDeployment{}, fmt.Errorf("worker_name is required")
 	}
@@ -1017,6 +1024,8 @@ func (s *Server) recordHybridEdgeEvidence(ctx context.Context, siteID, deploymen
 		TotalSize:        dep.TotalSize,
 		ArtifactSHA256:   dep.ArtifactSHA256,
 		ArtifactSize:     dep.ArtifactSize,
+		Operation:        operation,
+		RollbackTarget:   rollbackTarget,
 	}
 	if strings.TrimSpace(dep.ManifestJSON) != "" {
 		_ = json.Unmarshal([]byte(dep.ManifestJSON), &manifest)
@@ -1057,6 +1066,32 @@ func (s *Server) recordHybridEdgeEvidence(ctx context.Context, siteID, deploymen
 	return s.siteDeploymentView(ctx, updated), nil
 }
 
+func (s *Server) validateHybridEdgeEvidenceOperation(ctx context.Context, siteID string, req recordHybridEdgeEvidenceRequest) (string, string, error) {
+	operation := strings.TrimSpace(req.Operation)
+	switch operation {
+	case "", "deploy":
+		return "", "", nil
+	case "rollback_apply":
+		target := cleanDeploymentID(req.RollbackTarget)
+		if target == "" {
+			return "", "", fmt.Errorf("rollback_target_deployment is required for rollback_apply")
+		}
+		dep, err := s.db.GetSiteDeployment(ctx, target)
+		if err != nil || dep.SiteID != siteID {
+			return "", "", fmt.Errorf("rollback_target_deployment not found")
+		}
+		if dep.DeploymentTarget != model.SiteDeploymentTargetHybridEdge {
+			return "", "", fmt.Errorf("rollback_target_deployment must be hybrid_edge")
+		}
+		if dep.Status != model.SiteDeploymentReady && dep.Status != model.SiteDeploymentActive {
+			return "", "", fmt.Errorf("rollback_target_deployment is not ready")
+		}
+		return operation, target, nil
+	default:
+		return "", "", fmt.Errorf("operation must be deploy or rollback_apply")
+	}
+}
+
 func (s *Server) validateCloudflareStaticRecordOperation(ctx context.Context, siteID string, req recordCloudflareStaticDeploymentRequest) (string, string, error) {
 	operation := strings.TrimSpace(req.Operation)
 	switch operation {
@@ -1089,6 +1124,14 @@ func cloudflareStaticRecordAudit(siteID, deploymentID string, req recordCloudfla
 		return "site.deployment.cloudflare_static.rollback", "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
 	}
 	return "site.deployment.cloudflare_static.record", "site:" + siteID + ";deployment:" + deploymentID
+}
+
+func hybridEdgeEvidenceAudit(siteID, deploymentID string, req recordHybridEdgeEvidenceRequest) (string, string) {
+	if strings.TrimSpace(req.Operation) == "rollback_apply" {
+		target := cleanDeploymentID(req.RollbackTarget)
+		return "site.deployment.hybrid_edge.rollback", "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
+	}
+	return "site.deployment.hybrid_edge.evidence", "site:" + siteID + ";deployment:" + deploymentID
 }
 
 func auditReason(err error) string {

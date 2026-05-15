@@ -72,7 +72,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `publish-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 发布边缘 manifest 到 Cloudflare Workers KV |
 | `refresh-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 刷新 active edge manifest 并默认执行 hybrid 探测 |
 | `rollback-plan` | `GET /api/v1/sites/{id}/deployments/{deployment}` | 只读生成 deployment 回滚方式，区分 metadata promote 与 Cloudflare 重新发布 |
-| `rollback-apply` | `GET /api/v1/sites/{id}/deployments/{deployment}` + provider deploy flow | Dry-run by default; applies origin metadata rollback or Cloudflare Static rollback after source/evidence checks and `-confirm rollback` |
+| `rollback-apply` | `GET /api/v1/sites/{id}/deployments/{deployment}` + provider deploy flow | Dry-run by default; applies origin metadata rollback, Cloudflare Static rollback or hybrid_edge rollback after source/evidence checks and `-confirm rollback` |
 | `reconcile-deployment` | `GET /api/v1/sites/{id}/deployments/{deployment}` + HTTP probe | Read-only reconcile of Super CDN deployment metadata against real Cloudflare Static / hybrid-edge provider state after a readiness timeout |
 | `recover-cloudflare-static` | Local directory summary + HTTP probe | Dry-run evidence validator for unrecorded Cloudflare Static provider writes after readiness timeouts |
 | `activate-cloudflare-static` | `POST /api/v1/sites/{id}/deployments/{deployment}/cloudflare-static/activate` | Provider-aware activation for a recovered Cloudflare Static deployment after source/probe/evidence checks |
@@ -822,7 +822,7 @@ HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/promote`
 
 - `origin_assisted` 且 ready 的历史 deployment 会给出 `metadata_promote` 和 `promote-deployment` 命令。
 - `cloudflare_static` 会给出 `redeploy_cloudflare_static`，提醒必须用目标产物重新发布 Cloudflare Static，不能做 metadata-only promote。证据完整且提供 `-dir` 时，`rollback_write_ready=true` 且 `next_commands[]` 会包含 `rollback-apply -dry-run=false -confirm rollback`；证据不足时仍返回 `write_blockers[]`/`missing_evidence[]`。`next_commands[]` 还会给出等价 `deploy-site` 命令和重发布后的 `probe-site -require-edge-static-html` 验证命令。
-- `hybrid_edge` 会给出 `redeploy_hybrid_edge`，提醒 Worker assets 与 active KV manifest 必须一起重新发布，并列出缺少的 Worker/KV/manifest 证据。若部署已记录 `hybrid_edge` evidence，`next_commands[]` 会带上 `-domains`、`-edge-name`、`-edge-kv-namespace-id` 等可复用参数；同时包含 `probe-site -require-edge-static-html -require-edge-manifest-assets`，用来验证 HTML 和 JS/CSS 首跳没有回到 Go origin。
+- `hybrid_edge` 会给出 `redeploy_hybrid_edge`，提醒 Worker assets 与 active KV manifest 必须一起重新发布，并列出缺少的 Worker/KV/manifest 证据。证据完整且提供 `-dir` 时，`rollback_write_ready=true` 且 `next_commands[]` 会包含 `rollback-apply -dry-run=false -confirm rollback`；同时会带上等价 `deploy-site` 命令和 `probe-site -require-edge-static-html -require-edge-manifest-assets`，用来验证 HTML 和 JS/CSS 首跳没有回到 Go origin。
 - 不传 `-dir` 时，Cloudflare 重发布命令会保留 `<dist>` 占位符，表示需要操作者提供正确历史产物目录。
 
 #### rollback-apply
@@ -846,7 +846,7 @@ HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/promote`
 | `-dry-run` | 否 | `true` | 只校验证据，不写 provider 或 metadata |
 | `-confirm` | 写入时必填 | 空 | `-dry-run=false` 时必须为 `rollback` |
 
-当前只支持 `origin_assisted` 和 `cloudflare_static` 写入。`hybrid_edge` 仍然保持只读计划，因为安全回滚还需要把 Worker assets、active KV manifest、deployment KV manifest 和真实域名验证一起建模。
+当前支持 `origin_assisted`、`cloudflare_static` 和 `hybrid_edge` 写入。`cloudflare_static` 会校验历史源目录的 assets hash/file_count/total_size，`hybrid_edge` 会校验历史源目录 assets hash，并通过完整 `deploy-site -target hybrid_edge` 流程重新发布 Worker assets、deployment KV manifest、active KV manifest 和真实域名验证。写入默认关闭，必须显式传 `-dry-run=false -confirm rollback`。
 
 #### delete-deployment
 

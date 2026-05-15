@@ -421,6 +421,8 @@ type hybridEdgeDeploySiteOptions struct {
 	DefaultCacheControl string
 	CandidateWait       bool
 	CandidateTimeout    time.Duration
+	Operation           string
+	RollbackTarget      string
 }
 
 type siteDeploymentResult struct {
@@ -553,12 +555,20 @@ func cloudflareVerifyFailureNextCommands(site, dir, target, profile string, doma
 }
 
 func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
+	raw, err := deploySiteHybridEdgeRaw(c, opts)
+	if len(raw) > 0 {
+		_ = printJSON(raw)
+	}
+	return err
+}
+
+func deploySiteHybridEdgeRaw(c client, opts hybridEdgeDeploySiteOptions) ([]byte, error) {
 	if len(cleanDomains(opts.Domains)) == 0 {
-		return errors.New("hybrid_edge deploy-site requires at least one domain")
+		return nil, errors.New("hybrid_edge deploy-site requires at least one domain")
 	}
 	stats, err := summarizeCloudflareStaticDirectory(opts.Dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dep, err := createAndWaitSiteDeployment(c, opts.Site, siteDeploymentUploadOptions{
 		Dir:              opts.Dir,
@@ -572,7 +582,7 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 		Timeout:          opts.Timeout,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	routingPolicy := firstNonEmpty(dep.RoutingPolicy, opts.RoutingPolicy)
 	resourceFailover := dep.ResourceFailover || opts.ResourceFailover
@@ -590,8 +600,7 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 		})
 		if err != nil {
 			raw, _ := json.Marshal(report)
-			_ = printJSON(raw)
-			return err
+			return raw, err
 		}
 	}
 	edgeManifest, err := c.publishEdgeManifestForDeployment(edgeManifestPublishOptions{
@@ -605,10 +614,10 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 		DryRun:        false,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if strings.TrimSpace(edgeManifest.KVNamespaceID) == "" {
-		return errors.New("hybrid_edge publish-edge-manifest did not return a kv_namespace_id")
+		return nil, errors.New("hybrid_edge publish-edge-manifest did not return a kv_namespace_id")
 	}
 	workerName := strings.TrimSpace(opts.WorkerName)
 	if workerName == "" {
@@ -634,8 +643,7 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 	})
 	if err != nil {
 		raw, _ := json.Marshal(publish)
-		_ = printJSON(raw)
-		return err
+		return raw, err
 	}
 	verify, err := verifyCloudflareStaticPublish(context.Background(), cloudflareStaticVerifyOptions{
 		Mode:                        opts.VerifyMode,
@@ -668,34 +676,35 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 			},
 			NextCommands: cloudflareVerifyFailureNextCommands(opts.Site, opts.Dir, "hybrid_edge", opts.RouteProfile, opts.Domains, true),
 		})
-		_ = printJSON(raw)
-		return err
+		return raw, err
 	}
 	var warnings []string
 	if strings.EqualFold(strings.TrimSpace(verify.Status), "ok") {
 		recordedAt := time.Now().UTC().Format(time.RFC3339Nano)
 		evidenceReq := map[string]any{
-			"worker_name":           workerName,
-			"version_id":            extractCloudflareVersionID(publish.Output),
-			"domains":               opts.Domains,
-			"compatibility_date":    opts.CompatibilityDate,
-			"assets_sha256":         stats.SHA256,
-			"cache_policy":          publish.CachePolicy,
-			"headers_generated":     publish.HeadersGenerated,
-			"not_found_handling":    publish.NotFoundHandling,
-			"verification_status":   verify.Status,
-			"verified_at_utc":       recordedAt,
-			"published_at_utc":      recordedAt,
-			"kv_namespace_id":       edgeManifest.KVNamespaceID,
-			"kv_namespace":          edgeManifest.KVNamespace,
-			"key_prefix":            edgeManifest.KeyPrefix,
-			"manifest_sha256":       edgeManifest.ManifestSHA256,
-			"manifest_size":         edgeManifest.ManifestSize,
-			"manifest_mode":         firstNonEmpty(opts.ManifestMode, "route"),
-			"default_cache_control": firstNonEmpty(opts.DefaultCacheControl, "public, max-age=300"),
-			"entry_origin_fallback": opts.EntryOriginFallback,
-			"active_key":            dep.Active,
-			"deployment_key":        true,
+			"worker_name":                workerName,
+			"version_id":                 extractCloudflareVersionID(publish.Output),
+			"domains":                    opts.Domains,
+			"compatibility_date":         opts.CompatibilityDate,
+			"assets_sha256":              stats.SHA256,
+			"cache_policy":               publish.CachePolicy,
+			"headers_generated":          publish.HeadersGenerated,
+			"not_found_handling":         publish.NotFoundHandling,
+			"verification_status":        verify.Status,
+			"verified_at_utc":            recordedAt,
+			"published_at_utc":           recordedAt,
+			"kv_namespace_id":            edgeManifest.KVNamespaceID,
+			"kv_namespace":               edgeManifest.KVNamespace,
+			"key_prefix":                 edgeManifest.KeyPrefix,
+			"manifest_sha256":            edgeManifest.ManifestSHA256,
+			"manifest_size":              edgeManifest.ManifestSize,
+			"manifest_mode":              firstNonEmpty(opts.ManifestMode, "route"),
+			"default_cache_control":      firstNonEmpty(opts.DefaultCacheControl, "public, max-age=300"),
+			"entry_origin_fallback":      opts.EntryOriginFallback,
+			"active_key":                 dep.Active,
+			"deployment_key":             true,
+			"operation":                  strings.TrimSpace(opts.Operation),
+			"rollback_target_deployment": strings.TrimSpace(opts.RollbackTarget),
 		}
 		recordedRaw, err := c.recordHybridEdgeEvidence(opts.Site, dep.ID, evidenceReq)
 		if err != nil {
@@ -718,8 +727,7 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 					"supercdnctl reconcile-deployment -site " + cliHintArg(opts.Site) + " -deployment " + cliHintArg(dep.ID),
 				},
 			})
-			_ = printJSON(raw)
-			return err
+			return raw, err
 		}
 		var recorded siteDeploymentResult
 		if err := json.Unmarshal(recordedRaw, &recorded); err == nil && strings.TrimSpace(recorded.ID) != "" {
@@ -742,9 +750,9 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 	}
 	raw, err := json.Marshal(resp)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return printJSON(raw)
+	return raw, nil
 }
 
 func (c client) recordHybridEdgeEvidence(site, deployment string, req map[string]any) ([]byte, error) {

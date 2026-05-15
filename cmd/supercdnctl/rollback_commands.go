@@ -119,7 +119,7 @@ func rollbackApply(c client, args []string) error {
 	fs := flag.NewFlagSet("rollback-apply", flag.ExitOnError)
 	site := fs.String("site", "", "site id")
 	deployment := fs.String("deployment", "", "deployment id to roll back to")
-	dir := fs.String("dir", "", "source dist directory for Cloudflare Static rollback")
+	dir := fs.String("dir", "", "source dist directory for Cloudflare-backed rollback")
 	staticVerify := fs.String("static-verify", cloudflareStaticVerifyWait, "Cloudflare Static readiness check: wait, warn, or none")
 	staticVerifyTimeout := fs.Duration("static-verify-timeout", 2*time.Minute, "maximum time to wait for Cloudflare Static custom domains")
 	staticVerifyInterval := fs.Duration("static-verify-interval", 5*time.Second, "delay between Cloudflare Static readiness probes")
@@ -176,6 +176,20 @@ func rollbackApply(c client, args []string) error {
 			VerifyResolver: *staticVerifyResolver,
 			DryRun:         *dryRun,
 			Confirm:        *confirm,
+		})
+	case "hybrid_edge":
+		return rollbackApplyHybridEdge(c, dep, report, rollbackApplyHybridEdgeOptions{
+			Dir:              strings.TrimSpace(*dir),
+			Message:          strings.TrimSpace(*message),
+			VerifyMode:       *staticVerify,
+			VerifyTimeout:    *staticVerifyTimeout,
+			VerifyInterval:   *staticVerifyInterval,
+			VerifySPAPath:    *staticVerifySPAPath,
+			VerifyResolver:   *staticVerifyResolver,
+			DryRun:           *dryRun,
+			Confirm:          *confirm,
+			Timeout:          30 * time.Minute,
+			CandidateTimeout: 10 * time.Minute,
 		})
 	default:
 		report.Status = "blocked"
@@ -258,8 +272,14 @@ func buildRollbackPlan(dep rollbackPlanDeployment, sourceDir string) rollbackPla
 	case "hybrid_edge":
 		out.Action = "redeploy_hybrid_edge"
 		out.RedeployRequired = true
-		out.WriteBlockers = cloudflareRollbackWriteBlockers(target)
 		out.MissingEvidence = cloudflareRollbackMissingEvidence(dep, target, sourceDir)
+		if len(out.MissingEvidence) == 0 {
+			out.SafeToRun = true
+			out.RollbackWriteReady = true
+			out.NextCommands = append(out.NextCommands, rollbackApplyCommand(dep, sourceDir))
+		} else {
+			out.WriteBlockers = hybridEdgeRollbackWriteBlockers()
+		}
 		out.Warnings = append(out.Warnings, "hybrid_edge rollback must republish Worker assets and the active KV manifest together; promote-deployment is intentionally blocked")
 		out.NextCommands = append(out.NextCommands, rollbackRedeployCommand(dep, target, sourceDir))
 		out.NextCommands = append(out.NextCommands, rollbackPostRedeployProbeCommand(dep, target))
@@ -326,6 +346,7 @@ type rollbackApplyCloudflareStaticOptions struct {
 }
 
 var rollbackDeployCloudflareStatic = deploySiteCloudflareStaticRaw
+var rollbackDeployHybridEdge = deploySiteHybridEdgeRaw
 
 func rollbackApplyCloudflareStatic(c client, dep rollbackPlanDeployment, report rollbackApplyReport, opts rollbackApplyCloudflareStaticOptions) error {
 	if dep.CloudflareStatic != nil {
@@ -408,6 +429,108 @@ func rollbackApplyCloudflareStatic(c client, dep rollbackPlanDeployment, report 
 	return printJSON(mustJSON(report))
 }
 
+type rollbackApplyHybridEdgeOptions struct {
+	Dir              string
+	Message          string
+	VerifyMode       string
+	VerifyTimeout    time.Duration
+	VerifyInterval   time.Duration
+	VerifySPAPath    string
+	VerifyResolver   string
+	DryRun           bool
+	Confirm          string
+	Timeout          time.Duration
+	CandidateTimeout time.Duration
+}
+
+func rollbackApplyHybridEdge(c client, dep rollbackPlanDeployment, report rollbackApplyReport, opts rollbackApplyHybridEdgeOptions) error {
+	if dep.HybridEdge != nil {
+		report.Source.HeadersPolicy = firstNonEmpty(strings.TrimSpace(dep.HybridEdge.CachePolicy), cloudflareStaticCachePolicyAuto)
+	}
+	if err := populateRollbackApplyCloudflareStaticSource(&report, opts.Dir); err != nil {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, err.Error())
+		_ = printJSON(mustJSON(report))
+		return err
+	}
+	report.MissingEvidence = cloudflareRollbackMissingEvidence(dep, "hybrid_edge", opts.Dir)
+	if len(report.MissingEvidence) > 0 {
+		report.Status = "blocked"
+		_ = printJSON(mustJSON(report))
+		return errors.New("hybrid_edge rollback evidence is incomplete")
+	}
+	if err := validateRollbackApplyHybridEdgeSource(report, dep); err != nil {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, err.Error())
+		_ = printJSON(mustJSON(report))
+		return err
+	}
+	report.WriteReady = true
+	if opts.DryRun {
+		report.Status = "verified"
+		return printJSON(mustJSON(report))
+	}
+	if strings.TrimSpace(opts.Confirm) != "rollback" {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, "hybrid_edge rollback writes require -confirm rollback")
+		_ = printJSON(mustJSON(report))
+		return errors.New("hybrid_edge rollback requires confirmation")
+	}
+	if strings.TrimSpace(c.token) == "" {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, "token is required for rollback writes; pass -token, SUPERCDN_TOKEN, or use a saved profile")
+		_ = printJSON(mustJSON(report))
+		return errors.New("token is required for rollback writes")
+	}
+	raw, err := rollbackDeployHybridEdge(c, hybridEdgeDeploySiteOptions{
+		Site:                dep.SiteID,
+		Dir:                 opts.Dir,
+		Environment:         firstNonEmpty(strings.TrimSpace(dep.Environment), "production"),
+		RouteProfile:        dep.RouteProfile,
+		DeploymentTarget:    "hybrid_edge",
+		RoutingPolicy:       strings.TrimSpace(dep.RoutingPolicy),
+		ResourceFailover:    dep.ResourceFailover,
+		EntryOriginFallback: dep.HybridEdge.EntryOriginFallback,
+		Domains:             rollbackCloudflareStaticDomains(dep),
+		WorkerName:          rollbackHybridEdgeWorkerName(dep),
+		CompatibilityDate:   rollbackHybridEdgeCompatibilityDate(dep),
+		Message:             firstNonEmpty(opts.Message, "SuperCDN hybrid_edge rollback "+dep.SiteID+" to "+dep.ID),
+		CachePolicy:         rollbackHybridEdgeCachePolicy(dep),
+		NotFoundHandling:    rollbackHybridEdgeNotFoundHandling(dep),
+		VerifyMode:          opts.VerifyMode,
+		VerifyTimeout:       opts.VerifyTimeout,
+		VerifyInterval:      opts.VerifyInterval,
+		VerifySPAPath:       opts.VerifySPAPath,
+		VerifyResolver:      opts.VerifyResolver,
+		Promote:             true,
+		Pinned:              false,
+		Timeout:             opts.Timeout,
+		KVNamespaceID:       rollbackHybridEdgeKVNamespaceID(dep),
+		KVNamespace:         rollbackHybridEdgeKVNamespace(dep),
+		ManifestMode:        rollbackHybridEdgeManifestMode(dep),
+		DefaultCacheControl: rollbackHybridEdgeDefaultCacheControl(dep),
+		CandidateWait:       true,
+		CandidateTimeout:    opts.CandidateTimeout,
+		Operation:           "rollback_apply",
+		RollbackTarget:      dep.ID,
+	})
+	if len(raw) > 0 {
+		if err != nil {
+			report.ProviderWrite = json.RawMessage(raw)
+		} else {
+			report.Deployment = json.RawMessage(raw)
+		}
+	}
+	if err != nil {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, err.Error())
+		_ = printJSON(mustJSON(report))
+		return err
+	}
+	report.Status = "rolled_back"
+	return printJSON(mustJSON(report))
+}
+
 func populateRollbackApplyCloudflareStaticSource(report *rollbackApplyReport, dir string) error {
 	report.Source.Dir = strings.TrimSpace(dir)
 	if report.Source.Dir == "" {
@@ -455,6 +578,22 @@ func validateRollbackApplyCloudflareStaticSource(report rollbackApplyReport, dep
 	return nil
 }
 
+func validateRollbackApplyHybridEdgeSource(report rollbackApplyReport, dep rollbackPlanDeployment) error {
+	if dep.HybridEdge == nil {
+		return errors.New("hybrid_edge evidence is missing")
+	}
+	if dep.Status != "" && dep.Status != "ready" && dep.Status != "active" {
+		return errors.New("target deployment is not ready")
+	}
+	if strings.TrimSpace(dep.Environment) != "" && dep.Environment != "production" {
+		return errors.New("rollback-apply only supports production hybrid_edge deployments")
+	}
+	if strings.TrimSpace(dep.HybridEdge.AssetsSHA256) == "" || report.Source.AssetsSHA256 != dep.HybridEdge.AssetsSHA256 {
+		return errors.New("source assets_sha256 does not match target deployment evidence")
+	}
+	return nil
+}
+
 func rollbackPlanEvidenceFromDeployment(dep rollbackPlanDeployment) rollbackPlanEvidence {
 	return rollbackPlanEvidence{
 		RouteProfile:     dep.RouteProfile,
@@ -472,22 +611,18 @@ func rollbackPlanEvidenceFromDeployment(dep rollbackPlanDeployment) rollbackPlan
 	}
 }
 
-func cloudflareRollbackWriteBlockers(target string) []string {
-	blockers := []string{
-		target + " rollback write command is not implemented; rerun deploy-site with the intended historical artifact",
-		"rollback-plan has not verified real custom-domain traffic after a Cloudflare write",
-		"Cloudflare Worker assets must move before Super CDN metadata is allowed to claim rollback",
-	}
-	if target == "hybrid_edge" {
-		blockers = append(blockers, "active Workers KV manifest must be published together with Worker assets")
-	}
-	return blockers
-}
-
 func cloudflareStaticRollbackWriteBlockers() []string {
 	return []string{
 		"cloudflare_static rollback apply requires the historical source_dist_dir plus recorded Worker/domain/assets evidence",
 		"Cloudflare Worker assets must move before Super CDN metadata is allowed to claim rollback",
+	}
+}
+
+func hybridEdgeRollbackWriteBlockers() []string {
+	return []string{
+		"hybrid_edge rollback apply requires the historical source_dist_dir plus recorded Worker/KV/manifest evidence",
+		"Worker assets, deployment KV manifest and active KV manifest must be republished together",
+		"Cloudflare custom-domain traffic must pass strict edge-static and edge-manifest probes before metadata is trusted",
 	}
 }
 
@@ -760,6 +895,27 @@ func rollbackHybridEdgeManifestMode(dep rollbackPlanDeployment) string {
 func rollbackHybridEdgeDefaultCacheControl(dep rollbackPlanDeployment) string {
 	if dep.HybridEdge != nil {
 		return strings.TrimSpace(dep.HybridEdge.DefaultCacheControl)
+	}
+	return ""
+}
+
+func rollbackHybridEdgeCompatibilityDate(dep rollbackPlanDeployment) string {
+	if dep.HybridEdge != nil && strings.TrimSpace(dep.HybridEdge.CompatibilityDate) != "" {
+		return strings.TrimSpace(dep.HybridEdge.CompatibilityDate)
+	}
+	return time.Now().UTC().Format("2006-01-02")
+}
+
+func rollbackHybridEdgeCachePolicy(dep rollbackPlanDeployment) string {
+	if dep.HybridEdge != nil && strings.TrimSpace(dep.HybridEdge.CachePolicy) != "" {
+		return strings.TrimSpace(dep.HybridEdge.CachePolicy)
+	}
+	return cloudflareStaticCachePolicyAuto
+}
+
+func rollbackHybridEdgeNotFoundHandling(dep rollbackPlanDeployment) string {
+	if dep.HybridEdge != nil {
+		return strings.TrimSpace(dep.HybridEdge.NotFoundHandling)
 	}
 	return ""
 }

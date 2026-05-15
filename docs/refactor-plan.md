@@ -29,7 +29,7 @@ Next refactor entry point:
 
 - Use `docs/maturity-audit.md` as the current evidence checklist before claiming the project is mature.
 - Use `docs/policy-switching-boundary.md` before adding any policy-level switch apply/rollback write path.
-- Use `docs/cloudflare-rollback-boundary.md` before adding any Cloudflare Static or hybrid-edge rollback write path.
+- Use `docs/cloudflare-rollback-boundary.md` before changing Cloudflare Static or hybrid-edge rollback write behavior.
 - Phase 6 large-file reduction is substantially complete. Continue only with narrow package-boundary work where a stable boundary is obvious.
 - Do not move behavior again just to reduce line counts; next work should be focused tests, docs alignment, or package extraction with clear ownership.
 - CLI cleanup is mostly complete for now; only revisit it for command-specific tests, help text fixes or smaller ownership tweaks.
