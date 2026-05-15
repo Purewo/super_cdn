@@ -114,6 +114,8 @@ func main() {
 		err = refreshEdgeManifest(c, args[1:])
 	case "rollback-plan":
 		err = rollbackPlan(c, args[1:])
+	case "rollback-apply":
+		err = rollbackApply(c, args[1:])
 	case "reconcile-deployment":
 		err = reconcileDeployment(c, args[1:])
 	case "recover-cloudflare-static":
@@ -249,6 +251,7 @@ func usage() {
   supercdnctl [global flags] publish-edge-manifest -site blog -deployment dpl-abc -kv-namespace supercdn-edge-manifest -dry-run
   supercdnctl [global flags] refresh-edge-manifest -site blog -kv-namespace supercdn-edge-manifest -spa-path /movie/123
   supercdnctl [global flags] rollback-plan -site blog -deployment dpl-abc
+  supercdnctl [global flags] rollback-apply -site blog -deployment dpl-abc -dir ./dist-rollback -dry-run=false -confirm rollback
   supercdnctl [global flags] reconcile-deployment -site blog -deployment dpl-abc
   supercdnctl recover-cloudflare-static -site blog -dir ./dist -domains blog.example.com -worker-name supercdn-blog-static -version-id ver_xxx
   supercdnctl [global flags] activate-cloudflare-static -site blog -deployment dpl-abc -dir ./dist -dry-run=false -confirm activate

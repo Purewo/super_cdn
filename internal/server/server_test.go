@@ -956,6 +956,39 @@ func TestRecordCloudflareStaticDeployment(t *testing.T) {
 	}
 }
 
+func TestRecordCloudflareStaticRollbackApplyAuditsTarget(t *testing.T) {
+	app := newTestServer(t)
+	targetID := recordCloudflareStaticDeploymentForTest(t, app, "demo", false)
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/cloudflare-static/deployments", "test-token", map[string]any{
+		"environment":                "production",
+		"route_profile":              "overseas",
+		"deployment_target":          "cloudflare_static",
+		"worker_name":                "supercdn-demo-static",
+		"version_id":                 "ver-rollback",
+		"domains":                    []string{"demo.example.com"},
+		"assets_sha256":              "asset-sha",
+		"cache_policy":               "auto",
+		"headers_generated":          true,
+		"not_found_handling":         "single-page-application",
+		"verification_status":        "ok",
+		"verified_at_utc":            "2026-04-29T00:00:02Z",
+		"file_count":                 2,
+		"total_size":                 1200,
+		"published_at_utc":           "2026-04-29T00:00:02Z",
+		"promote":                    true,
+		"operation":                  "rollback_apply",
+		"rollback_target_deployment": targetID,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("record rollback static deployment status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var dep model.SiteDeployment
+	if err := json.Unmarshal(rec.Body.Bytes(), &dep); err != nil {
+		t.Fatal(err)
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.cloudflare_static.rollback", "site:demo;deployment:"+dep.ID+";target:"+targetID)
+}
+
 func TestRecoverCloudflareStaticDeploymentRecordsInactiveAndAudits(t *testing.T) {
 	app := newTestServer(t)
 	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/cloudflare-static/recoveries", "test-token", map[string]any{

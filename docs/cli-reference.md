@@ -72,6 +72,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `publish-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 发布边缘 manifest 到 Cloudflare Workers KV |
 | `refresh-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 刷新 active edge manifest 并默认执行 hybrid 探测 |
 | `rollback-plan` | `GET /api/v1/sites/{id}/deployments/{deployment}` | 只读生成 deployment 回滚方式，区分 metadata promote 与 Cloudflare 重新发布 |
+| `rollback-apply` | `GET /api/v1/sites/{id}/deployments/{deployment}` + provider deploy flow | Dry-run by default; applies origin metadata rollback or Cloudflare Static rollback after source/evidence checks and `-confirm rollback` |
 | `reconcile-deployment` | `GET /api/v1/sites/{id}/deployments/{deployment}` + HTTP probe | Read-only reconcile of Super CDN deployment metadata against real Cloudflare Static / hybrid-edge provider state after a readiness timeout |
 | `recover-cloudflare-static` | Local directory summary + HTTP probe | Dry-run evidence validator for unrecorded Cloudflare Static provider writes after readiness timeouts |
 | `activate-cloudflare-static` | `POST /api/v1/sites/{id}/deployments/{deployment}/cloudflare-static/activate` | Provider-aware activation for a recovered Cloudflare Static deployment after source/probe/evidence checks |
@@ -557,6 +558,7 @@ local only
 .\bin\supercdnctl.exe deploy-site -site blog -dir .\dist -target hybrid_edge -profile china_mobile -domains blog.qwk.ccwu.cc -static-spa
 .\bin\supercdnctl.exe publish-cloudflare-static -site blog -dir .\dist -domains blog-static-test.example.com -dry-run=false
 .\bin\supercdnctl.exe activate-cloudflare-static -site blog -deployment dpl-recovered -dir .\dist -dry-run=false -confirm activate
+.\bin\supercdnctl.exe rollback-apply -site blog -deployment dpl-static -dir .\dist-rollback -dry-run=false -confirm rollback
 .\bin\supercdnctl.exe promote-deployment -site blog -deployment dpl-abc
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc -dry-run
 .\bin\supercdnctl.exe delete-deployment -site blog -deployment dpl-abc
@@ -819,9 +821,32 @@ HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/promote`
 输出字段包括 `action`、`metadata_promote_supported`、`redeploy_required`、`safe_to_run`、`rollback_write_ready`、`write_blockers[]`、`missing_evidence[]`、`evidence`、`warnings[]` 和 `next_commands[]`。`evidence` 会带出可核对的 route profile、artifact hash、manifest key、站点域名，以及 Cloudflare Static 的 Worker 名称、version id、assets hash、域名和验证状态。
 
 - `origin_assisted` 且 ready 的历史 deployment 会给出 `metadata_promote` 和 `promote-deployment` 命令。
-- `cloudflare_static` 会给出 `redeploy_cloudflare_static`，提醒必须用目标产物重新发布 Cloudflare Static，不能做 metadata-only promote，并用 `write_blockers[]`/`missing_evidence[]` 说明为什么当前不能做真正的 Cloudflare rollback write。`next_commands[]` 还会给出重发布后的 `probe-site -require-edge-static-html` 验证命令。
+- `cloudflare_static` 会给出 `redeploy_cloudflare_static`，提醒必须用目标产物重新发布 Cloudflare Static，不能做 metadata-only promote。证据完整且提供 `-dir` 时，`rollback_write_ready=true` 且 `next_commands[]` 会包含 `rollback-apply -dry-run=false -confirm rollback`；证据不足时仍返回 `write_blockers[]`/`missing_evidence[]`。`next_commands[]` 还会给出等价 `deploy-site` 命令和重发布后的 `probe-site -require-edge-static-html` 验证命令。
 - `hybrid_edge` 会给出 `redeploy_hybrid_edge`，提醒 Worker assets 与 active KV manifest 必须一起重新发布，并列出缺少的 Worker/KV/manifest 证据。`next_commands[]` 会包含 `probe-site -require-edge-static-html -require-edge-manifest-assets`，用来验证 HTML 和 JS/CSS 首跳没有回到 Go origin。
 - 不传 `-dir` 时，Cloudflare 重发布命令会保留 `<dist>` 占位符，表示需要操作者提供正确历史产物目录。
+
+#### rollback-apply
+
+对 `rollback-plan` 的可写执行封装，默认 dry-run。`origin_assisted` 会走 metadata promote；`cloudflare_static` 会先读取目标 deployment，核对本地 `-dir` 的 assets hash、file count 和 total size 是否匹配记录的 Cloudflare evidence，再复用完整 `deploy-site -target cloudflare_static` provider flow 重新发布 Worker Static Assets、等待真实域名验证并记录新的 active deployment。它不会对 `cloudflare_static` 使用普通 `promote-deployment`，成功记录时服务端审计动作为 `site.deployment.cloudflare_static.rollback`，resource 会包含新 deployment 和 target deployment。
+
+```powershell
+.\bin\supercdnctl.exe rollback-apply -site blog -deployment dpl-static -dir .\dist-rollback
+.\bin\supercdnctl.exe rollback-apply -site blog -deployment dpl-static -dir .\dist-rollback -dry-run=false -confirm rollback
+```
+
+参数：
+| 参数 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `-site` | 是 | 空 | 站点 ID |
+| `-deployment` | 是 | 空 | 要回滚到的历史 deployment |
+| `-dir` | Cloudflare Static 必填 | 空 | 与历史 deployment evidence 匹配的本地产物目录 |
+| `-static-verify` | 否 | `wait` | Cloudflare Static readiness check：`wait`、`warn`、`none` |
+| `-static-verify-timeout` | 否 | `2m` | 等待自定义域名就绪的最长时间 |
+| `-static-verify-resolver` | 否 | `1.1.1.1:53` | DNS resolver |
+| `-dry-run` | 否 | `true` | 只校验证据，不写 provider 或 metadata |
+| `-confirm` | 写入时必填 | 空 | `-dry-run=false` 时必须为 `rollback` |
+
+当前只支持 `origin_assisted` 和 `cloudflare_static` 写入。`hybrid_edge` 仍然保持只读计划，因为安全回滚还需要把 Worker assets、active KV manifest、deployment KV manifest 和真实域名验证一起建模。
 
 #### delete-deployment
 

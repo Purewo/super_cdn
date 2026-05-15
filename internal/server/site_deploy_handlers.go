@@ -49,6 +49,8 @@ type siteDeployManifest struct {
 	DeliverySummary  map[string]int                    `json:"delivery_summary,omitempty"`
 	ArtifactSHA256   string                            `json:"artifact_sha256,omitempty"`
 	ArtifactSize     int64                             `json:"artifact_size,omitempty"`
+	Operation        string                            `json:"operation,omitempty"`
+	RollbackTarget   string                            `json:"rollback_target_deployment,omitempty"`
 	CloudflareStatic *model.CloudflareStaticDeployment `json:"cloudflare_static,omitempty"`
 }
 
@@ -84,6 +86,8 @@ type recordCloudflareStaticDeploymentRequest struct {
 	PublishedAtUTC     string   `json:"published_at_utc"`
 	Promote            bool     `json:"promote"`
 	Pinned             bool     `json:"pinned"`
+	Operation          string   `json:"operation"`
+	RollbackTarget     string   `json:"rollback_target_deployment"`
 }
 
 type recoverCloudflareStaticDeploymentRequest struct {
@@ -155,7 +159,8 @@ func (s *Server) handleRecordCloudflareStaticDeployment(w http.ResponseWriter, r
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.auditMutation(w, r, "site.deployment.cloudflare_static.record", "site:"+siteID+";deployment:"+resp.ID) {
+	action, resource := cloudflareStaticRecordAudit(siteID, resp.ID, req)
+	if !s.auditMutation(w, r, action, resource) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, resp)
@@ -661,6 +666,10 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 	if req.ResourceFailover {
 		return model.SiteDeployment{}, fmt.Errorf("resource_failover is not supported for cloudflare_static deployments")
 	}
+	operation, rollbackTarget, err := s.validateCloudflareStaticRecordOperation(ctx, siteID, req)
+	if err != nil {
+		return model.SiteDeployment{}, err
+	}
 	site, err := s.db.GetSite(ctx, siteID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return model.SiteDeployment{}, err
@@ -757,6 +766,8 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 		CreatedAtUTC:     publishedAt.Format(time.RFC3339Nano),
 		FileCount:        req.FileCount,
 		TotalSize:        req.TotalSize,
+		Operation:        operation,
+		RollbackTarget:   rollbackTarget,
 		CloudflareStatic: &static,
 		DeliverySummary:  map[string]int{"cloudflare_static": req.FileCount},
 	}
@@ -828,6 +839,8 @@ func (s *Server) recoverCloudflareStaticDeployment(ctx context.Context, siteID s
 	recordReq.ResourceFailover = false
 	recordReq.VerificationStatus = "ok"
 	recordReq.Promote = false
+	recordReq.Operation = ""
+	recordReq.RollbackTarget = ""
 	return s.recordCloudflareStaticDeployment(ctx, siteID, recordReq)
 }
 
@@ -897,6 +910,40 @@ func hasNonEmptyString(values []string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) validateCloudflareStaticRecordOperation(ctx context.Context, siteID string, req recordCloudflareStaticDeploymentRequest) (string, string, error) {
+	operation := strings.TrimSpace(req.Operation)
+	switch operation {
+	case "", "deploy":
+		return "", "", nil
+	case "rollback_apply":
+		target := cleanDeploymentID(req.RollbackTarget)
+		if target == "" {
+			return "", "", fmt.Errorf("rollback_target_deployment is required for rollback_apply")
+		}
+		dep, err := s.db.GetSiteDeployment(ctx, target)
+		if err != nil || dep.SiteID != siteID {
+			return "", "", fmt.Errorf("rollback_target_deployment not found")
+		}
+		if dep.DeploymentTarget != model.SiteDeploymentTargetCloudflareStatic {
+			return "", "", fmt.Errorf("rollback_target_deployment must be cloudflare_static")
+		}
+		if dep.Status != model.SiteDeploymentReady && dep.Status != model.SiteDeploymentActive {
+			return "", "", fmt.Errorf("rollback_target_deployment is not ready")
+		}
+		return operation, target, nil
+	default:
+		return "", "", fmt.Errorf("operation must be deploy or rollback_apply")
+	}
+}
+
+func cloudflareStaticRecordAudit(siteID, deploymentID string, req recordCloudflareStaticDeploymentRequest) (string, string) {
+	if strings.TrimSpace(req.Operation) == "rollback_apply" {
+		target := cleanDeploymentID(req.RollbackTarget)
+		return "site.deployment.cloudflare_static.rollback", "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
+	}
+	return "site.deployment.cloudflare_static.record", "site:" + siteID + ";deployment:" + deploymentID
 }
 
 func cloudflareStaticRecoveryAuditResource(siteID string, err error) string {

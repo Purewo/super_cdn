@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type rollbackPlanDeployment struct {
@@ -78,6 +79,24 @@ type rollbackPlanOutput struct {
 	NextCommands             []string             `json:"next_commands,omitempty"`
 }
 
+type rollbackApplyReport struct {
+	Status             string                         `json:"status"`
+	DryRun             bool                           `json:"dry_run"`
+	WriteSupported     bool                           `json:"write_supported"`
+	WriteReady         bool                           `json:"write_ready"`
+	SiteID             string                         `json:"site_id"`
+	TargetDeploymentID string                         `json:"target_deployment_id"`
+	DeploymentTarget   string                         `json:"deployment_target,omitempty"`
+	Action             string                         `json:"action,omitempty"`
+	Source             cloudflareStaticRecoverySource `json:"source,omitempty"`
+	Evidence           rollbackPlanEvidence           `json:"evidence"`
+	Deployment         json.RawMessage                `json:"deployment,omitempty"`
+	ProviderWrite      json.RawMessage                `json:"provider_write,omitempty"`
+	MissingEvidence    []string                       `json:"missing_evidence,omitempty"`
+	Warnings           []string                       `json:"warnings,omitempty"`
+	NextCommands       []string                       `json:"next_commands,omitempty"`
+}
+
 func rollbackPlan(c client, args []string) error {
 	fs := flag.NewFlagSet("rollback-plan", flag.ExitOnError)
 	site := fs.String("site", "", "site id")
@@ -87,21 +106,102 @@ func rollbackPlan(c client, args []string) error {
 	if *site == "" || *deployment == "" {
 		return errors.New("-site and -deployment are required")
 	}
-	raw, err := c.doRaw(http.MethodGet, "/api/v1/sites/"+url.PathEscape(*site)+"/deployments/"+url.PathEscape(*deployment), nil, "")
+	dep, err := fetchRollbackPlanDeployment(c, *site, *deployment)
 	if err != nil {
 		return err
 	}
+	return printJSON(mustJSON(buildRollbackPlan(dep, *dir)))
+}
+
+func rollbackApply(c client, args []string) error {
+	fs := flag.NewFlagSet("rollback-apply", flag.ExitOnError)
+	site := fs.String("site", "", "site id")
+	deployment := fs.String("deployment", "", "deployment id to roll back to")
+	dir := fs.String("dir", "", "source dist directory for Cloudflare Static rollback")
+	staticVerify := fs.String("static-verify", cloudflareStaticVerifyWait, "Cloudflare Static readiness check: wait, warn, or none")
+	staticVerifyTimeout := fs.Duration("static-verify-timeout", 2*time.Minute, "maximum time to wait for Cloudflare Static custom domains")
+	staticVerifyInterval := fs.Duration("static-verify-interval", 5*time.Second, "delay between Cloudflare Static readiness probes")
+	staticVerifySPAPath := fs.String("static-verify-spa-path", "", "SPA path to verify after Cloudflare Static publish")
+	staticVerifyResolver := fs.String("static-verify-resolver", "1.1.1.1:53", "DNS resolver for Cloudflare Static readiness probes")
+	message := fs.String("message", "", "Cloudflare deployment message for the rollback write")
+	dryRun := fs.Bool("dry-run", true, "validate rollback evidence without writing provider or metadata state")
+	confirm := fs.String("confirm", "", "must be rollback for writes")
+	_ = fs.Parse(args)
+
+	report := rollbackApplyReport{
+		Status:             "planned",
+		DryRun:             *dryRun,
+		WriteSupported:     true,
+		SiteID:             strings.TrimSpace(*site),
+		TargetDeploymentID: strings.TrimSpace(*deployment),
+	}
+	if report.SiteID == "" || report.TargetDeploymentID == "" {
+		report.Status = "blocked"
+		report.MissingEvidence = rollbackApplyMissingArgs(report)
+		_ = printJSON(mustJSON(report))
+		return errors.New("rollback apply target is incomplete")
+	}
+	dep, err := fetchRollbackPlanDeployment(c, report.SiteID, report.TargetDeploymentID)
+	if err != nil {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, err.Error())
+		_ = printJSON(mustJSON(report))
+		return err
+	}
+	plan := buildRollbackPlan(dep, *dir)
+	report.DeploymentTarget = plan.DeploymentTarget
+	report.Action = plan.Action
+	report.Evidence = plan.Evidence
+	report.MissingEvidence = append(report.MissingEvidence, plan.MissingEvidence...)
+	report.Warnings = append(report.Warnings, plan.Warnings...)
+	report.NextCommands = append(report.NextCommands, plan.NextCommands...)
+	if dep.Active {
+		report.Status = "noop"
+		report.WriteReady = true
+		return printJSON(mustJSON(report))
+	}
+	switch plan.DeploymentTarget {
+	case "origin_assisted":
+		return rollbackApplyOriginAssisted(c, dep, report, *dryRun, *confirm)
+	case "cloudflare_static":
+		return rollbackApplyCloudflareStatic(c, dep, report, rollbackApplyCloudflareStaticOptions{
+			Dir:            strings.TrimSpace(*dir),
+			Message:        strings.TrimSpace(*message),
+			VerifyMode:     *staticVerify,
+			VerifyTimeout:  *staticVerifyTimeout,
+			VerifyInterval: *staticVerifyInterval,
+			VerifySPAPath:  *staticVerifySPAPath,
+			VerifyResolver: *staticVerifyResolver,
+			DryRun:         *dryRun,
+			Confirm:        *confirm,
+		})
+	default:
+		report.Status = "blocked"
+		report.WriteSupported = false
+		if len(report.Warnings) == 0 {
+			report.Warnings = append(report.Warnings, "rollback apply is not supported for deployment_target "+plan.DeploymentTarget)
+		}
+		_ = printJSON(mustJSON(report))
+		return errors.New("rollback apply is not supported for deployment target")
+	}
+}
+
+func fetchRollbackPlanDeployment(c client, site, deployment string) (rollbackPlanDeployment, error) {
+	raw, err := c.doRaw(http.MethodGet, "/api/v1/sites/"+url.PathEscape(site)+"/deployments/"+url.PathEscape(deployment), nil, "")
+	if err != nil {
+		return rollbackPlanDeployment{}, err
+	}
 	var dep rollbackPlanDeployment
 	if err := json.Unmarshal(raw, &dep); err != nil {
-		return fmt.Errorf("parse deployment: %w", err)
+		return rollbackPlanDeployment{}, fmt.Errorf("parse deployment: %w", err)
 	}
 	if strings.TrimSpace(dep.SiteID) == "" {
-		dep.SiteID = strings.TrimSpace(*site)
+		dep.SiteID = strings.TrimSpace(site)
 	}
 	if strings.TrimSpace(dep.ID) == "" {
-		dep.ID = strings.TrimSpace(*deployment)
+		dep.ID = strings.TrimSpace(deployment)
 	}
-	return printJSON(mustJSON(buildRollbackPlan(dep, *dir)))
+	return dep, nil
 }
 
 func buildRollbackPlan(dep rollbackPlanDeployment, sourceDir string) rollbackPlanOutput {
@@ -142,8 +242,14 @@ func buildRollbackPlan(dep rollbackPlanDeployment, sourceDir string) rollbackPla
 	case "cloudflare_static":
 		out.Action = "redeploy_cloudflare_static"
 		out.RedeployRequired = true
-		out.WriteBlockers = cloudflareRollbackWriteBlockers(target)
 		out.MissingEvidence = cloudflareRollbackMissingEvidence(dep, target, sourceDir)
+		if len(out.MissingEvidence) == 0 {
+			out.SafeToRun = true
+			out.RollbackWriteReady = true
+			out.NextCommands = append(out.NextCommands, rollbackApplyCommand(dep, sourceDir))
+		} else {
+			out.WriteBlockers = cloudflareStaticRollbackWriteBlockers()
+		}
 		out.Warnings = append(out.Warnings, "cloudflare_static rollback must republish the desired asset version; promote-deployment is intentionally blocked")
 		out.NextCommands = append(out.NextCommands, rollbackRedeployCommand(dep, target, sourceDir))
 		out.NextCommands = append(out.NextCommands, rollbackPostRedeployProbeCommand(dep, target))
@@ -162,6 +268,189 @@ func buildRollbackPlan(dep rollbackPlanDeployment, sourceDir string) rollbackPla
 		out.NextCommands = append(out.NextCommands, "supercdnctl deployment -site "+cliHintArg(dep.SiteID)+" -deployment "+cliHintArg(dep.ID))
 	}
 	return out
+}
+
+func rollbackApplyMissingArgs(report rollbackApplyReport) []string {
+	var missing []string
+	if strings.TrimSpace(report.SiteID) == "" {
+		missing = append(missing, "site")
+	}
+	if strings.TrimSpace(report.TargetDeploymentID) == "" {
+		missing = append(missing, "deployment")
+	}
+	return missing
+}
+
+func rollbackApplyOriginAssisted(c client, dep rollbackPlanDeployment, report rollbackApplyReport, dryRun bool, confirm string) error {
+	report.WriteReady = true
+	if dryRun {
+		report.Status = "verified"
+		return printJSON(mustJSON(report))
+	}
+	if strings.TrimSpace(confirm) != "rollback" {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, "origin_assisted rollback writes require -confirm rollback")
+		_ = printJSON(mustJSON(report))
+		return errors.New("rollback apply requires confirmation")
+	}
+	if strings.TrimSpace(c.token) == "" {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, "token is required for rollback writes; pass -token, SUPERCDN_TOKEN, or use a saved profile")
+		_ = printJSON(mustJSON(report))
+		return errors.New("token is required for rollback writes")
+	}
+	raw, err := c.doRaw(http.MethodPost, "/api/v1/sites/"+url.PathEscape(dep.SiteID)+"/deployments/"+url.PathEscape(dep.ID)+"/promote", nil, "")
+	if err != nil {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, err.Error())
+		_ = printJSON(mustJSON(report))
+		return err
+	}
+	report.Status = "promoted"
+	report.Deployment = json.RawMessage(raw)
+	return printJSON(mustJSON(report))
+}
+
+type rollbackApplyCloudflareStaticOptions struct {
+	Dir            string
+	Message        string
+	VerifyMode     string
+	VerifyTimeout  time.Duration
+	VerifyInterval time.Duration
+	VerifySPAPath  string
+	VerifyResolver string
+	DryRun         bool
+	Confirm        string
+}
+
+var rollbackDeployCloudflareStatic = deploySiteCloudflareStaticRaw
+
+func rollbackApplyCloudflareStatic(c client, dep rollbackPlanDeployment, report rollbackApplyReport, opts rollbackApplyCloudflareStaticOptions) error {
+	if dep.CloudflareStatic != nil {
+		report.Source.HeadersPolicy = firstNonEmpty(strings.TrimSpace(dep.CloudflareStatic.CachePolicy), cloudflareStaticCachePolicyAuto)
+	}
+	if err := populateRollbackApplyCloudflareStaticSource(&report, opts.Dir); err != nil {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, err.Error())
+		_ = printJSON(mustJSON(report))
+		return err
+	}
+	report.MissingEvidence = cloudflareRollbackMissingEvidence(dep, "cloudflare_static", opts.Dir)
+	if len(report.MissingEvidence) > 0 {
+		report.Status = "blocked"
+		_ = printJSON(mustJSON(report))
+		return errors.New("cloudflare static rollback evidence is incomplete")
+	}
+	if err := validateRollbackApplyCloudflareStaticSource(report, dep); err != nil {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, err.Error())
+		_ = printJSON(mustJSON(report))
+		return err
+	}
+	report.WriteReady = true
+	if opts.DryRun {
+		report.Status = "verified"
+		return printJSON(mustJSON(report))
+	}
+	if strings.TrimSpace(opts.Confirm) != "rollback" {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, "Cloudflare Static rollback writes require -confirm rollback")
+		_ = printJSON(mustJSON(report))
+		return errors.New("cloudflare static rollback requires confirmation")
+	}
+	if strings.TrimSpace(c.token) == "" {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, "token is required for rollback writes; pass -token, SUPERCDN_TOKEN, or use a saved profile")
+		_ = printJSON(mustJSON(report))
+		return errors.New("token is required for rollback writes")
+	}
+	domains := rollbackCloudflareStaticDomains(dep)
+	raw, err := rollbackDeployCloudflareStatic(c, cloudflareStaticDeploySiteOptions{
+		Site:              dep.SiteID,
+		Dir:               opts.Dir,
+		Environment:       firstNonEmpty(strings.TrimSpace(dep.Environment), "production"),
+		RouteProfile:      dep.RouteProfile,
+		DeploymentTarget:  "cloudflare_static",
+		RoutingPolicy:     strings.TrimSpace(dep.RoutingPolicy),
+		ResourceFailover:  false,
+		Domains:           domains,
+		WorkerName:        rollbackCloudflareStaticWorkerName(dep),
+		CompatibilityDate: rollbackCloudflareStaticCompatibilityDate(dep),
+		Message:           firstNonEmpty(opts.Message, "SuperCDN cloudflare_static rollback "+dep.SiteID+" to "+dep.ID),
+		CachePolicy:       rollbackCloudflareStaticCachePolicy(dep),
+		NotFoundHandling:  rollbackCloudflareStaticNotFoundHandling(dep),
+		VerifyMode:        opts.VerifyMode,
+		VerifyTimeout:     opts.VerifyTimeout,
+		VerifyInterval:    opts.VerifyInterval,
+		VerifySPAPath:     opts.VerifySPAPath,
+		VerifyResolver:    opts.VerifyResolver,
+		Promote:           true,
+		Pinned:            false,
+		Operation:         "rollback_apply",
+		RollbackTarget:    dep.ID,
+	})
+	if len(raw) > 0 {
+		if err != nil {
+			report.ProviderWrite = json.RawMessage(raw)
+		} else {
+			report.Deployment = json.RawMessage(raw)
+		}
+	}
+	if err != nil {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, err.Error())
+		_ = printJSON(mustJSON(report))
+		return err
+	}
+	report.Status = "rolled_back"
+	return printJSON(mustJSON(report))
+}
+
+func populateRollbackApplyCloudflareStaticSource(report *rollbackApplyReport, dir string) error {
+	report.Source.Dir = strings.TrimSpace(dir)
+	if report.Source.Dir == "" {
+		return nil
+	}
+	summary, err := summarizeCloudflareStaticDirectory(report.Source.Dir)
+	if err != nil {
+		return err
+	}
+	_, cleanup, headers, err := prepareCloudflareStaticAssetsDir(report.Source.Dir, report.Source.HeadersPolicy)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		return err
+	}
+	report.Source.FileCount = summary.FileCount
+	report.Source.TotalSize = summary.TotalSize
+	report.Source.AssetsSHA256 = summary.SHA256
+	report.Source.HeadersPolicy = headers.Policy
+	report.Source.HeadersSource = headers.Source
+	report.Source.HeadersGenerated = headers.Generated
+	return nil
+}
+
+func validateRollbackApplyCloudflareStaticSource(report rollbackApplyReport, dep rollbackPlanDeployment) error {
+	if dep.CloudflareStatic == nil {
+		return errors.New("cloudflare_static evidence is missing")
+	}
+	if dep.Status != "" && dep.Status != "ready" && dep.Status != "active" {
+		return errors.New("target deployment is not ready")
+	}
+	if strings.TrimSpace(dep.Environment) != "" && dep.Environment != "production" {
+		return errors.New("rollback-apply only supports production Cloudflare Static deployments")
+	}
+	if strings.TrimSpace(dep.CloudflareStatic.AssetsSHA256) == "" || report.Source.AssetsSHA256 != dep.CloudflareStatic.AssetsSHA256 {
+		return errors.New("source assets_sha256 does not match target deployment evidence")
+	}
+	if dep.FileCount > 0 && report.Source.FileCount != dep.FileCount {
+		return errors.New("source file_count does not match target deployment evidence")
+	}
+	if dep.TotalSize > 0 && report.Source.TotalSize != dep.TotalSize {
+		return errors.New("source total_size does not match target deployment evidence")
+	}
+	return nil
 }
 
 func rollbackPlanEvidenceFromDeployment(dep rollbackPlanDeployment) rollbackPlanEvidence {
@@ -192,6 +481,13 @@ func cloudflareRollbackWriteBlockers(target string) []string {
 	return blockers
 }
 
+func cloudflareStaticRollbackWriteBlockers() []string {
+	return []string{
+		"cloudflare_static rollback apply requires the historical source_dist_dir plus recorded Worker/domain/assets evidence",
+		"Cloudflare Worker assets must move before Super CDN metadata is allowed to claim rollback",
+	}
+}
+
 func cloudflareRollbackMissingEvidence(dep rollbackPlanDeployment, target, sourceDir string) []string {
 	var missing []string
 	if strings.TrimSpace(sourceDir) == "" {
@@ -200,7 +496,7 @@ func cloudflareRollbackMissingEvidence(dep rollbackPlanDeployment, target, sourc
 	if strings.TrimSpace(dep.RouteProfile) == "" {
 		missing = append(missing, "route_profile")
 	}
-	if strings.TrimSpace(dep.ArtifactSHA256) == "" {
+	if target != "cloudflare_static" && strings.TrimSpace(dep.ArtifactSHA256) == "" {
 		missing = append(missing, "artifact_sha256")
 	}
 	if dep.FileCount <= 0 {
@@ -269,6 +565,37 @@ func rollbackRedeployCommand(dep rollbackPlanDeployment, target, sourceDir strin
 	if dep.ResourceFailover {
 		parts = append(parts, "-resource-failover")
 	}
+	if target == "cloudflare_static" || target == "hybrid_edge" {
+		if domains := rollbackCloudflareStaticDomains(dep); len(domains) > 0 {
+			parts = append(parts, "-domains "+cliHintArg(strings.Join(domains, ",")))
+		}
+	}
+	if target == "cloudflare_static" {
+		if worker := rollbackCloudflareStaticWorkerName(dep); worker != "" {
+			parts = append(parts, "-static-name "+cliHintArg(worker))
+		}
+		if cachePolicy := rollbackCloudflareStaticCachePolicy(dep); cachePolicy != "" {
+			parts = append(parts, "-static-cache-policy "+cliHintArg(cachePolicy))
+		}
+		if notFound := rollbackCloudflareStaticNotFoundHandling(dep); notFound == cloudflareStaticNotFoundSPA {
+			parts = append(parts, "-static-spa")
+		} else if notFound != "" {
+			parts = append(parts, "-static-not-found-handling "+cliHintArg(notFound))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func rollbackApplyCommand(dep rollbackPlanDeployment, sourceDir string) string {
+	parts := []string{
+		"supercdnctl rollback-apply",
+		"-site " + cliHintArg(dep.SiteID),
+		"-deployment " + cliHintArg(dep.ID),
+	}
+	if strings.TrimSpace(sourceDir) != "" {
+		parts = append(parts, "-dir "+cliHintArg(sourceDir))
+	}
+	parts = append(parts, "-dry-run=false", "-confirm rollback")
 	return strings.Join(parts, " ")
 }
 
@@ -285,4 +612,59 @@ func rollbackPostRedeployProbeCommand(dep rollbackPlanDeployment, target string)
 		parts = append(parts, "-require-html-revalidate", "-require-immutable-assets")
 	}
 	return strings.Join(parts, " ")
+}
+
+func rollbackCloudflareStaticWorkerName(dep rollbackPlanDeployment) string {
+	if dep.CloudflareStatic != nil && strings.TrimSpace(dep.CloudflareStatic.WorkerName) != "" {
+		return strings.TrimSpace(dep.CloudflareStatic.WorkerName)
+	}
+	return "supercdn-" + cleanWorkerName(dep.SiteID) + "-static"
+}
+
+func rollbackCloudflareStaticCompatibilityDate(dep rollbackPlanDeployment) string {
+	if dep.CloudflareStatic != nil && strings.TrimSpace(dep.CloudflareStatic.CompatibilityDate) != "" {
+		return strings.TrimSpace(dep.CloudflareStatic.CompatibilityDate)
+	}
+	return time.Now().UTC().Format("2006-01-02")
+}
+
+func rollbackCloudflareStaticCachePolicy(dep rollbackPlanDeployment) string {
+	if dep.CloudflareStatic != nil && strings.TrimSpace(dep.CloudflareStatic.CachePolicy) != "" {
+		return strings.TrimSpace(dep.CloudflareStatic.CachePolicy)
+	}
+	return cloudflareStaticCachePolicyAuto
+}
+
+func rollbackCloudflareStaticNotFoundHandling(dep rollbackPlanDeployment) string {
+	if dep.CloudflareStatic != nil {
+		return strings.TrimSpace(dep.CloudflareStatic.NotFoundHandling)
+	}
+	return ""
+}
+
+func rollbackCloudflareStaticDomains(dep rollbackPlanDeployment) []string {
+	var values []string
+	if dep.CloudflareStatic != nil {
+		values = append(values, dep.CloudflareStatic.Domains...)
+		for _, raw := range dep.CloudflareStatic.URLs {
+			if host := rollbackHostFromURL(raw); host != "" {
+				values = append(values, host)
+			}
+		}
+	}
+	values = append(values, dep.SiteDomains...)
+	for _, raw := range dep.ProductionURLs {
+		if host := rollbackHostFromURL(raw); host != "" {
+			values = append(values, host)
+		}
+	}
+	return cleanDomains(values)
+}
+
+func rollbackHostFromURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Hostname() == "" {
+		return ""
+	}
+	return parsed.Hostname()
 }

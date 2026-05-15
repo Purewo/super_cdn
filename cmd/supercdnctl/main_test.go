@@ -1013,7 +1013,7 @@ func TestRollbackPlanOriginAssistedUsesMetadataPromote(t *testing.T) {
 	}
 }
 
-func TestRollbackPlanCloudflareStaticRequiresRedeploy(t *testing.T) {
+func TestRollbackPlanCloudflareStaticAllowsVerifiedApply(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-static" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
@@ -1025,7 +1025,6 @@ func TestRollbackPlanCloudflareStaticRequiresRedeploy(t *testing.T) {
 			"environment":"production",
 			"route_profile":"overseas",
 			"deployment_target":"cloudflare_static",
-			"artifact_sha256":"artifact-sha",
 			"manifest_key":"sites/blog/manifests/dpl-static.json",
 			"file_count":12,
 			"total_size":3456,
@@ -1054,26 +1053,203 @@ func TestRollbackPlanCloudflareStaticRequiresRedeploy(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &plan); err != nil {
 		t.Fatal(err)
 	}
-	if plan.Action != "redeploy_cloudflare_static" || !plan.RedeployRequired || plan.MetadataPromoteSupported || plan.SafeToRun {
+	if plan.Action != "redeploy_cloudflare_static" || !plan.RedeployRequired || plan.MetadataPromoteSupported || !plan.SafeToRun {
 		t.Fatalf("unexpected rollback plan: %+v", plan)
 	}
-	if plan.RollbackWriteReady || len(plan.WriteBlockers) != 3 || len(plan.MissingEvidence) != 0 {
+	if !plan.RollbackWriteReady || len(plan.WriteBlockers) != 0 || len(plan.MissingEvidence) != 0 {
 		t.Fatalf("unexpected rollback write readiness: %+v", plan)
 	}
-	if len(plan.NextCommands) != 2 || !strings.Contains(plan.NextCommands[0], "deploy-site -site blog -dir 'dist old' -target cloudflare_static -profile overseas") {
+	if len(plan.NextCommands) != 3 || !strings.Contains(plan.NextCommands[0], "rollback-apply -site blog -deployment dpl-static -dir 'dist old' -dry-run=false -confirm rollback") {
 		t.Fatalf("next_commands = %#v", plan.NextCommands)
 	}
-	if !strings.Contains(plan.NextCommands[1], "probe-site -site blog -production -require-edge-static-html -require-html-revalidate -require-immutable-assets") {
+	if !strings.Contains(plan.NextCommands[1], "deploy-site -site blog -dir 'dist old' -target cloudflare_static -profile overseas -domains blog.example.com -static-name supercdn-blog-static") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+	if !strings.Contains(plan.NextCommands[2], "probe-site -site blog -production -require-edge-static-html -require-html-revalidate -require-immutable-assets") {
 		t.Fatalf("next_commands = %#v", plan.NextCommands)
 	}
 	if len(plan.Warnings) == 0 || !strings.Contains(plan.Warnings[0], "promote-deployment") {
 		t.Fatalf("warnings = %#v", plan.Warnings)
 	}
-	if plan.Evidence.ArtifactSHA256 != "artifact-sha" || plan.Evidence.FileCount != 12 || len(plan.Evidence.ProductionURLs) != 1 {
+	if plan.Evidence.FileCount != 12 || len(plan.Evidence.ProductionURLs) != 1 {
 		t.Fatalf("evidence = %+v", plan.Evidence)
 	}
 	if plan.Evidence.CloudflareStatic == nil || plan.Evidence.CloudflareStatic.WorkerName != "supercdn-blog-static" || plan.Evidence.CloudflareStatic.VersionID != "ver-123" || plan.Evidence.CloudflareStatic.AssetsSHA256 != "assets-sha" {
 		t.Fatalf("cloudflare evidence = %+v", plan.Evidence.CloudflareStatic)
+	}
+}
+
+func TestRollbackApplyCloudflareStaticDryRunVerifiesSource(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), `<script src="/app.js"></script>`)
+	writeTestFile(t, filepath.Join(dir, "app.js"), `console.log("ok")`)
+	summary, err := summarizeCloudflareStaticDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-static" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-static",
+			"site_id":           "blog",
+			"status":            "ready",
+			"environment":       "production",
+			"route_profile":     "overseas",
+			"deployment_target": "cloudflare_static",
+			"file_count":        summary.FileCount,
+			"total_size":        summary.TotalSize,
+			"cloudflare_static": map[string]any{
+				"worker_name":         "supercdn-blog-static",
+				"version_id":          "ver-123",
+				"domains":             []string{"blog.example.com"},
+				"assets_sha256":       summary.SHA256,
+				"cache_policy":        "none",
+				"verification_status": "ok",
+				"verified_at":         "2026-05-15T00:00:00Z",
+				"published_at":        "2026-05-15T00:01:00Z",
+			},
+		})
+	}))
+	defer apiSrv.Close()
+
+	var applyErr error
+	out := captureStdout(t, func() {
+		applyErr = rollbackApply(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{"-site", "blog", "-deployment", "dpl-static", "-dir", dir})
+	})
+	if applyErr != nil {
+		t.Fatal(applyErr)
+	}
+	var report rollbackApplyReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "verified" || !report.WriteReady || !report.WriteSupported || report.DeploymentTarget != "cloudflare_static" {
+		t.Fatalf("unexpected rollback apply report: %+v", report)
+	}
+	if report.Source.AssetsSHA256 != summary.SHA256 || report.Source.FileCount != summary.FileCount {
+		t.Fatalf("source evidence = %+v", report.Source)
+	}
+	if !strings.Contains(strings.Join(report.NextCommands, "\n"), "-dry-run=false -confirm rollback") {
+		t.Fatalf("next commands = %+v", report.NextCommands)
+	}
+}
+
+func TestRollbackApplyCloudflareStaticBlocksSourceMismatch(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), "ok")
+	summary, err := summarizeCloudflareStaticDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-static" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-static",
+			"site_id":           "blog",
+			"status":            "ready",
+			"environment":       "production",
+			"route_profile":     "overseas",
+			"deployment_target": "cloudflare_static",
+			"file_count":        summary.FileCount,
+			"total_size":        summary.TotalSize,
+			"cloudflare_static": map[string]any{
+				"worker_name":         "supercdn-blog-static",
+				"version_id":          "ver-123",
+				"domains":             []string{"blog.example.com"},
+				"assets_sha256":       "wrong-sha",
+				"cache_policy":        "none",
+				"verification_status": "ok",
+				"verified_at":         "2026-05-15T00:00:00Z",
+				"published_at":        "2026-05-15T00:01:00Z",
+			},
+		})
+	}))
+	defer apiSrv.Close()
+
+	var applyErr error
+	out := captureStdout(t, func() {
+		applyErr = rollbackApply(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{"-site", "blog", "-deployment", "dpl-static", "-dir", dir})
+	})
+	if applyErr == nil {
+		t.Fatal("expected source mismatch")
+	}
+	var report rollbackApplyReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "blocked" || !strings.Contains(strings.Join(report.Warnings, "\n"), "assets_sha256") {
+		t.Fatalf("unexpected rollback apply report: %+v", report)
+	}
+}
+
+func TestRollbackApplyCloudflareStaticWriteCallsDeploy(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), "ok")
+	summary, err := summarizeCloudflareStaticDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-static" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-static",
+			"site_id":           "blog",
+			"status":            "ready",
+			"environment":       "production",
+			"route_profile":     "overseas",
+			"deployment_target": "cloudflare_static",
+			"file_count":        summary.FileCount,
+			"total_size":        summary.TotalSize,
+			"cloudflare_static": map[string]any{
+				"worker_name":         "supercdn-blog-static",
+				"version_id":          "ver-123",
+				"domains":             []string{"blog.example.com"},
+				"assets_sha256":       summary.SHA256,
+				"cache_policy":        "none",
+				"verification_status": "ok",
+				"verified_at":         "2026-05-15T00:00:00Z",
+				"published_at":        "2026-05-15T00:01:00Z",
+			},
+		})
+	}))
+	defer apiSrv.Close()
+
+	oldDeploy := rollbackDeployCloudflareStatic
+	defer func() { rollbackDeployCloudflareStatic = oldDeploy }()
+	var got cloudflareStaticDeploySiteOptions
+	rollbackDeployCloudflareStatic = func(c client, opts cloudflareStaticDeploySiteOptions) ([]byte, error) {
+		got = opts
+		return []byte(`{"id":"dpl-rollback","site_id":"blog","status":"active","deployment_target":"cloudflare_static","active":true}`), nil
+	}
+
+	var applyErr error
+	out := captureStdout(t, func() {
+		applyErr = rollbackApply(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{"-site", "blog", "-deployment", "dpl-static", "-dir", dir, "-dry-run=false", "-confirm", "rollback"})
+	})
+	if applyErr != nil {
+		t.Fatal(applyErr)
+	}
+	if got.Site != "blog" || got.Dir != dir || got.RouteProfile != "overseas" || got.WorkerName != "supercdn-blog-static" || !got.Promote {
+		t.Fatalf("deploy options = %+v", got)
+	}
+	if got.Operation != "rollback_apply" || got.RollbackTarget != "dpl-static" {
+		t.Fatalf("rollback audit options = %+v", got)
+	}
+	if len(got.Domains) != 1 || got.Domains[0] != "blog.example.com" || got.CachePolicy != "none" {
+		t.Fatalf("provider options = %+v", got)
+	}
+	var report rollbackApplyReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "rolled_back" || !strings.Contains(string(report.Deployment), "dpl-rollback") {
+		t.Fatalf("unexpected rollback apply report: %+v", report)
 	}
 }
 

@@ -298,12 +298,22 @@ type cloudflareStaticDeploySiteOptions struct {
 	VerifyResolver    string
 	Promote           bool
 	Pinned            bool
+	Operation         string
+	RollbackTarget    string
 }
 
 func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions) error {
+	raw, err := deploySiteCloudflareStaticRaw(c, opts)
+	if len(raw) > 0 {
+		_ = printJSON(raw)
+	}
+	return err
+}
+
+func deploySiteCloudflareStaticRaw(c client, opts cloudflareStaticDeploySiteOptions) ([]byte, error) {
 	stats, err := summarizeCloudflareStaticDirectory(opts.Dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	workerName := strings.TrimSpace(opts.WorkerName)
 	if workerName == "" {
@@ -325,8 +335,7 @@ func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions
 	})
 	if err != nil {
 		raw, _ := json.Marshal(publish)
-		_ = printJSON(raw)
-		return err
+		return raw, err
 	}
 	verify, err := verifyCloudflareStaticPublish(context.Background(), cloudflareStaticVerifyOptions{
 		Mode:                        opts.VerifyMode,
@@ -354,32 +363,33 @@ func deploySiteCloudflareStatic(c client, opts cloudflareStaticDeploySiteOptions
 			Verify:       verify,
 			NextCommands: cloudflareVerifyFailureNextCommands(opts.Site, opts.Dir, "cloudflare_static", opts.RouteProfile, opts.Domains, false),
 		})
-		_ = printJSON(raw)
-		return err
+		return raw, err
 	}
 	req := map[string]any{
-		"environment":         opts.Environment,
-		"route_profile":       opts.RouteProfile,
-		"deployment_target":   "cloudflare_static",
-		"routing_policy":      opts.RoutingPolicy,
-		"resource_failover":   opts.ResourceFailover,
-		"worker_name":         workerName,
-		"version_id":          extractCloudflareVersionID(publish.Output),
-		"domains":             opts.Domains,
-		"compatibility_date":  opts.CompatibilityDate,
-		"assets_sha256":       stats.SHA256,
-		"file_count":          stats.FileCount,
-		"total_size":          stats.TotalSize,
-		"cache_policy":        publish.CachePolicy,
-		"headers_generated":   publish.HeadersGenerated,
-		"not_found_handling":  publish.NotFoundHandling,
-		"verification_status": verify.Status,
-		"verified_at_utc":     time.Now().UTC().Format(time.RFC3339Nano),
-		"published_at_utc":    time.Now().UTC().Format(time.RFC3339Nano),
-		"promote":             opts.Promote,
-		"pinned":              opts.Pinned,
+		"environment":                opts.Environment,
+		"route_profile":              opts.RouteProfile,
+		"deployment_target":          "cloudflare_static",
+		"routing_policy":             opts.RoutingPolicy,
+		"resource_failover":          opts.ResourceFailover,
+		"worker_name":                workerName,
+		"version_id":                 extractCloudflareVersionID(publish.Output),
+		"domains":                    opts.Domains,
+		"compatibility_date":         opts.CompatibilityDate,
+		"assets_sha256":              stats.SHA256,
+		"file_count":                 stats.FileCount,
+		"total_size":                 stats.TotalSize,
+		"cache_policy":               publish.CachePolicy,
+		"headers_generated":          publish.HeadersGenerated,
+		"not_found_handling":         publish.NotFoundHandling,
+		"verification_status":        verify.Status,
+		"verified_at_utc":            time.Now().UTC().Format(time.RFC3339Nano),
+		"published_at_utc":           time.Now().UTC().Format(time.RFC3339Nano),
+		"promote":                    opts.Promote,
+		"pinned":                     opts.Pinned,
+		"operation":                  strings.TrimSpace(opts.Operation),
+		"rollback_target_deployment": strings.TrimSpace(opts.RollbackTarget),
 	}
-	return c.doJSON(http.MethodPost, "/api/v1/sites/"+url.PathEscape(opts.Site)+"/cloudflare-static/deployments", req)
+	return c.doRaw(http.MethodPost, "/api/v1/sites/"+url.PathEscape(opts.Site)+"/cloudflare-static/deployments", bytes.NewReader(mustJSON(req)), "application/json")
 }
 
 type hybridEdgeDeploySiteOptions struct {

@@ -2311,6 +2311,13 @@ components:
           type: boolean
         pinned:
           type: boolean
+        operation:
+          type: string
+          enum: [deploy, rollback_apply]
+          description: Optional operation marker for audit; rollback_apply requires rollback_target_deployment.
+        rollback_target_deployment:
+          type: string
+          description: Target deployment id when operation is rollback_apply.
     RecoverCloudflareStaticDeploymentRequest:
       allOf:
         - $ref: "#/components/schemas/RecordCloudflareStaticDeploymentRequest"
