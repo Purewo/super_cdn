@@ -214,6 +214,7 @@ func commandNeedsToken(command string) bool {
 func usage() {
 	fmt.Println(`Usage:
   supercdnctl [global flags] login -invite-token sci_xxx
+  supercdnctl [global flags] logout
   supercdnctl [global flags] whoami
   supercdnctl [global flags] doctor
   supercdnctl [global flags] audit-log -limit 50
@@ -282,6 +283,7 @@ func usage() {
   supercdnctl [global flags] create-bucket -slug movie-posters -name 影视海报�?-profile china_all -types image
   supercdnctl [global flags] create-cdn-bucket -slug movie-posters -name movie-posters -types image
   supercdnctl [global flags] create-domestic-cdn-bucket -slug mobile-posters -line mobile -types image
+  supercdnctl [global flags] create-mobile-cdn-bucket -slug mobile-posters -types image
   supercdnctl [global flags] create-ipfs-bucket -slug durable-assets -types image,archive
   supercdnctl [global flags] init-bucket -bucket movie-posters
   supercdnctl [global flags] upload-bucket -bucket movie-posters -file poster.jpg -path posters/poster.jpg -warmup

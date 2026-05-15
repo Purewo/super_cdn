@@ -3484,6 +3484,15 @@ func captureStdout(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	type readResult struct {
+		raw []byte
+		err error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		raw, err := io.ReadAll(r)
+		readDone <- readResult{raw: raw, err: err}
+	}()
 	os.Stdout = w
 	fn()
 	if err := w.Close(); err != nil {
@@ -3491,14 +3500,14 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatal(err)
 	}
 	os.Stdout = old
-	raw, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
+	result := <-readDone
+	if result.err != nil {
+		t.Fatal(result.err)
 	}
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return string(raw)
+	return string(result.raw)
 }
 
 func writeTestFile(t *testing.T, path, content string) {

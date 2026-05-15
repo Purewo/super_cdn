@@ -27,6 +27,23 @@ func TestCommandBookCoversDispatchedCommands(t *testing.T) {
 	}
 }
 
+func TestUsageCoversDispatchedCommands(t *testing.T) {
+	repo := testRepoRoot(t)
+	mainRaw := readTestFile(t, filepath.Join(repo, "cmd", "supercdnctl", "main.go"))
+	commands := dispatchedCommandsFromMain(t, mainRaw)
+	usageText := captureStdout(t, usage)
+
+	var missing []string
+	for _, command := range commands {
+		if !strings.Contains(usageText, " "+command+" ") && !strings.Contains(usageText, " "+command+"\n") {
+			missing = append(missing, command)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("usage() is missing supercdnctl commands: %s", strings.Join(missing, ", "))
+	}
+}
+
 func dispatchedCommandsFromMain(t *testing.T, mainRaw string) []string {
 	t.Helper()
 	start := strings.Index(mainRaw, "switch args[0] {")
