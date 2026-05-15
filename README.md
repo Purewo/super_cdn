@@ -57,6 +57,7 @@ Use `-resource-failover` only when the selected route profile has a primary targ
 - Formal REST contract: [api/openapi.yaml](api/openapi.yaml)
 - Web-hosting boundary: [docs/web-hosting-boundaries.md](docs/web-hosting-boundaries.md)
 - Release checklist: [docs/release-checklist.md](docs/release-checklist.md)
+- Latest staged release notes: [docs/release-v0.5.0.md](docs/release-v0.5.0.md)
 - Current maturity audit: [docs/maturity-audit.md](docs/maturity-audit.md)
 - Refactor plan and handoff: [docs/refactor-plan.md](docs/refactor-plan.md), [docs/tomorrow-plan.md](docs/tomorrow-plan.md)
 
