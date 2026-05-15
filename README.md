@@ -50,6 +50,7 @@ Use `-resource-failover` only when the selected route profile has a primary targ
 ## Documentation map
 
 - New-user onboarding: [docs/onboarding.md](docs/onboarding.md)
+- Operations runbook: [docs/operations.md](docs/operations.md)
 - Advanced command book: [docs/commands.md](docs/commands.md)
 - Parameter-level CLI reference: [docs/cli-reference.md](docs/cli-reference.md)
 - Real scenario regression runbook: [docs/real-scenario-regression.md](docs/real-scenario-regression.md)

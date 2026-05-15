@@ -6,6 +6,7 @@ Deep reference:
 
 - Parameter details: [cli-reference.md](cli-reference.md)
 - New-user flow: [onboarding.md](onboarding.md)
+- Operations runbook: [operations.md](operations.md)
 - API contract: [../api/openapi.yaml](../api/openapi.yaml)
 
 ## Conventions
@@ -324,4 +325,3 @@ go run .\cmd\supercdnctl -- purge -urls https://example.com/a.css
 - Keep static-resource failover explicit with `-resource-failover`; it requires multiple ready resource sources.
 - Do not rely on Cloudflare Static metadata-only promotion. Roll back by provider-aware redeploy or recovery commands.
 - Run destructive operations with their default dry-run first when the command supports it.
-
