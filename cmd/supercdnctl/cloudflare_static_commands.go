@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"supercdn/internal/cloudflarestatic"
 	"supercdn/internal/edgeheaders"
 )
 
@@ -30,7 +31,7 @@ func publishCloudflareStatic(args []string) error {
 	wrangler := fs.String("wrangler", "npx", "wrangler executable; default uses npx --prefix worker wrangler")
 	wranglerPrefix := fs.String("wrangler-prefix", "worker", "npm package directory when -wrangler is npx")
 	message := fs.String("message", "", "deployment message")
-	cachePolicy := fs.String("static-cache-policy", cloudflareStaticCachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
+	cachePolicy := fs.String("static-cache-policy", cloudflarestatic.CachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
 	notFoundHandling := fs.String("static-not-found-handling", "", "Cloudflare Static not_found_handling: none, 404-page, or single-page-application")
 	spa := fs.Bool("static-spa", false, "enable Cloudflare Static single-page-application fallback")
 	dryRun := fs.Bool("dry-run", true, "plan deployment without modifying Cloudflare; pass -dry-run=false to deploy")
@@ -46,7 +47,7 @@ func publishCloudflareStatic(args []string) error {
 		WranglerPrefix:    *wranglerPrefix,
 		Message:           *message,
 		CachePolicy:       *cachePolicy,
-		NotFoundHandling:  cloudflareStaticNotFoundHandlingFlag(*notFoundHandling, *spa),
+		NotFoundHandling:  cloudflarestatic.NotFoundHandlingFlag(*notFoundHandling, *spa),
 		DryRun:            *dryRun,
 	})
 	if err != nil {
@@ -90,7 +91,7 @@ func runCloudflareStaticPublish(opts cloudflareStaticPublishOptions) (cloudflare
 		}
 		workerName = "supercdn-" + cleanWorkerName(opts.Site) + "-static"
 	}
-	notFoundHandling, err := normalizeCloudflareStaticNotFoundHandling(opts.NotFoundHandling)
+	notFoundHandling, err := cloudflarestatic.NormalizeNotFoundHandling(opts.NotFoundHandling)
 	if err != nil {
 		return cloudflareStaticPublishResponse{}, err
 	}
@@ -171,15 +172,15 @@ type cloudflareStaticHeadersMeta struct {
 }
 
 func prepareCloudflareStaticAssetsDir(sourceDir, policy string) (string, func(), cloudflareStaticHeadersMeta, error) {
-	policy, err := normalizeCloudflareStaticCachePolicy(policy)
+	policy, err := cloudflarestatic.NormalizeCachePolicy(policy)
 	if err != nil {
 		return "", nil, cloudflareStaticHeadersMeta{}, err
 	}
 	existingHeaders := filepath.Join(sourceDir, "_headers")
-	if policy == cloudflareStaticCachePolicyNone {
+	if policy == cloudflarestatic.CachePolicyNone {
 		return sourceDir, nil, cloudflareStaticHeadersMeta{Policy: policy, Path: existingHeaders, Source: "disabled"}, nil
 	}
-	if policy == cloudflareStaticCachePolicyAuto {
+	if policy == cloudflarestatic.CachePolicyAuto {
 		if info, err := os.Stat(existingHeaders); err == nil && !info.IsDir() {
 			raw, err := os.ReadFile(existingHeaders)
 			if err != nil {
@@ -223,39 +224,6 @@ func copyCloudflareStaticAssetsWithHeaders(sourceDir string) (string, func(), st
 		return "", nil, "", err
 	}
 	return tmp, cleanup, filepath.Join(tmp, "_headers"), nil
-}
-
-func normalizeCloudflareStaticCachePolicy(value string) (string, error) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" {
-		return cloudflareStaticCachePolicyAuto, nil
-	}
-	switch value {
-	case cloudflareStaticCachePolicyAuto, cloudflareStaticCachePolicyForce, cloudflareStaticCachePolicyNone:
-		return value, nil
-	default:
-		return "", fmt.Errorf("static cache policy must be auto, force or none")
-	}
-}
-
-func cloudflareStaticNotFoundHandlingFlag(value string, spa bool) string {
-	if spa {
-		return cloudflareStaticNotFoundSPA
-	}
-	return value
-}
-
-func normalizeCloudflareStaticNotFoundHandling(value string) (string, error) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" || value == cloudflareStaticNotFoundNone {
-		return "", nil
-	}
-	switch value {
-	case cloudflareStaticNotFound404, cloudflareStaticNotFoundSPA:
-		return value, nil
-	default:
-		return "", fmt.Errorf("static not found handling must be none, 404-page or single-page-application")
-	}
 }
 
 func writeCloudflareStaticWranglerConfig(workerName, assetsDir, compatDate, notFoundHandling string) (string, func(), error) {
@@ -334,7 +302,7 @@ func generatedCloudflareStaticHeaders(root string) string {
 	b.WriteString("# HTML stays revalidating. Versioned/build assets get immutable browser caching.\n\n")
 	b.WriteString(cloudflareStaticEdgeSourceHeaderBlock())
 	b.WriteString("/\n")
-	b.WriteString("  Cache-Control: " + cloudflareStaticHTMLCacheControl + "\n\n")
+	b.WriteString("  Cache-Control: " + cloudflarestatic.HTMLCacheControl + "\n\n")
 	for _, rel := range files {
 		publicPath := "/" + filepath.ToSlash(rel)
 		if publicPath == "/_headers" || publicPath == "/_redirects" {
@@ -396,11 +364,11 @@ func cloudflareStaticCacheControlForPath(publicPath string, versionedRefs map[st
 	base := strings.ToLower(urlpath.Base(publicPath))
 	switch {
 	case ext == ".html" || ext == ".htm" || base == "sw.js" || base == "service-worker.js":
-		return cloudflareStaticHTMLCacheControl
+		return cloudflarestatic.HTMLCacheControl
 	case isCloudflareStaticAssetExtension(ext) && (versionedRefs[publicPath] || isKnownBuildAssetPath(publicPath) || filenameLooksVersioned(base)):
-		return cloudflareStaticImmutableCacheControl
+		return cloudflarestatic.ImmutableCacheControl
 	default:
-		return cloudflareStaticShortCacheControl
+		return cloudflarestatic.ShortCacheControl
 	}
 }
 

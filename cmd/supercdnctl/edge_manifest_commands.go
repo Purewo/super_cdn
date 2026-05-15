@@ -230,21 +230,3 @@ type cloudflareStaticPublishOptions struct {
 	NotFoundHandling  string
 	DryRun            bool
 }
-
-const (
-	cloudflareStaticCachePolicyAuto  = "auto"
-	cloudflareStaticCachePolicyForce = "force"
-	cloudflareStaticCachePolicyNone  = "none"
-
-	cloudflareStaticNotFoundNone = "none"
-	cloudflareStaticNotFound404  = "404-page"
-	cloudflareStaticNotFoundSPA  = "single-page-application"
-
-	cloudflareStaticHTMLCacheControl      = "public, max-age=0, must-revalidate"
-	cloudflareStaticShortCacheControl     = "public, max-age=300, must-revalidate"
-	cloudflareStaticImmutableCacheControl = "public, max-age=31536000, immutable"
-
-	cloudflareStaticVerifyWait = "wait"
-	cloudflareStaticVerifyWarn = "warn"
-	cloudflareStaticVerifyNone = "none"
-)

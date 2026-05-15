@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"supercdn/internal/cloudflarestatic"
 	"supercdn/internal/deploymentevidence"
 	"supercdn/internal/siteprobe"
 )
@@ -58,7 +59,7 @@ func recoverHybridEdge(c client, args []string) error {
 	domains := fs.String("domains", "", "comma-separated custom domains from the provider write")
 	probeURL := fs.String("url", "", "explicit public URL to probe; defaults to the first domain")
 	compatDate := fs.String("compatibility-date", time.Now().UTC().Format("2006-01-02"), "Workers compatibility date from the provider write")
-	cachePolicy := fs.String("static-cache-policy", cloudflareStaticCachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
+	cachePolicy := fs.String("static-cache-policy", cloudflarestatic.CachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
 	notFoundHandling := fs.String("static-not-found-handling", "", "Cloudflare Static not_found_handling: none, 404-page, or single-page-application")
 	spa := fs.Bool("static-spa", false, "record Cloudflare Static single-page-application fallback")
 	entryOriginFallback := fs.Bool("entry-origin-fallback", false, "record explicit hybrid_edge entry origin fallback")
@@ -86,7 +87,7 @@ func recoverHybridEdge(c client, args []string) error {
 			Domains:             cleanDomains(splitCSV(*domains)),
 			CompatibilityDate:   strings.TrimSpace(*compatDate),
 			CachePolicy:         strings.TrimSpace(*cachePolicy),
-			NotFoundHandling:    cloudflareStaticNotFoundHandlingFlag(*notFoundHandling, *spa),
+			NotFoundHandling:    cloudflarestatic.NotFoundHandlingFlag(*notFoundHandling, *spa),
 			KVNamespaceID:       strings.TrimSpace(*kvNamespaceID),
 			KVNamespace:         strings.TrimSpace(*kvNamespace),
 			ManifestMode:        strings.TrimSpace(*manifestMode),

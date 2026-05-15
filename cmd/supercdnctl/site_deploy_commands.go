@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"supercdn/internal/cloudflarestatic"
 	"supercdn/internal/siteprobe"
 )
 
@@ -56,10 +57,10 @@ func deploySiteWithOptions(c client, args []string, opts deploySiteCommandOption
 	edgeName := fs.String("edge-name", "", "Worker name when -target hybrid_edge; defaults to supercdn-{site}-edge")
 	compatDate := fs.String("compatibility-date", time.Now().UTC().Format("2006-01-02"), "Workers compatibility date when -target cloudflare_static or hybrid_edge")
 	staticMessage := fs.String("message", "", "Cloudflare deployment message when -target cloudflare_static or hybrid_edge")
-	staticCachePolicy := fs.String("static-cache-policy", cloudflareStaticCachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
+	staticCachePolicy := fs.String("static-cache-policy", cloudflarestatic.CachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
 	staticNotFoundHandling := fs.String("static-not-found-handling", "", "Cloudflare Static not_found_handling: none, 404-page, or single-page-application")
 	staticSPA := fs.Bool("static-spa", false, "enable Cloudflare Static single-page-application fallback")
-	staticVerify := fs.String("static-verify", cloudflareStaticVerifyWait, "Cloudflare Static readiness check: wait, warn, or none")
+	staticVerify := fs.String("static-verify", cloudflarestatic.VerifyModeWait, "Cloudflare Static readiness check: wait, warn, or none")
 	staticVerifyTimeout := fs.Duration("static-verify-timeout", 2*time.Minute, "maximum time to wait for Cloudflare Static custom domains")
 	staticVerifyInterval := fs.Duration("static-verify-interval", 5*time.Second, "delay between Cloudflare Static readiness probes")
 	staticVerifySPAPath := fs.String("static-verify-spa-path", "", "SPA path to verify after Cloudflare Static publish; defaults to /__supercdn_spa_probe when -static-spa is enabled")
@@ -155,7 +156,7 @@ func deploySiteWithOptions(c client, args []string, opts deploySiteCommandOption
 			CompatibilityDate: *compatDate,
 			Message:           *staticMessage,
 			CachePolicy:       *staticCachePolicy,
-			NotFoundHandling:  cloudflareStaticNotFoundHandlingFlag(*staticNotFoundHandling, *staticSPA),
+			NotFoundHandling:  cloudflarestatic.NotFoundHandlingFlag(*staticNotFoundHandling, *staticSPA),
 			VerifyMode:        *staticVerify,
 			VerifyTimeout:     *staticVerifyTimeout,
 			VerifyInterval:    *staticVerifyInterval,
@@ -186,7 +187,7 @@ func deploySiteWithOptions(c client, args []string, opts deploySiteCommandOption
 			CompatibilityDate:   *compatDate,
 			Message:             *staticMessage,
 			CachePolicy:         *staticCachePolicy,
-			NotFoundHandling:    cloudflareStaticNotFoundHandlingFlag(*staticNotFoundHandling, *staticSPA),
+			NotFoundHandling:    cloudflarestatic.NotFoundHandlingFlag(*staticNotFoundHandling, *staticSPA),
 			VerifyMode:          *staticVerify,
 			VerifyTimeout:       *staticVerifyTimeout,
 			VerifyInterval:      *staticVerifyInterval,
@@ -1086,7 +1087,7 @@ func runHybridEdgePublish(opts hybridEdgePublishOptions) (cloudflareStaticPublis
 	if cleanup != nil {
 		defer cleanup()
 	}
-	notFoundHandling, err := normalizeCloudflareStaticNotFoundHandling(opts.NotFoundHandling)
+	notFoundHandling, err := cloudflarestatic.NormalizeNotFoundHandling(opts.NotFoundHandling)
 	if err != nil {
 		return cloudflareStaticPublishResponse{}, err
 	}
@@ -1229,13 +1230,13 @@ type cloudflareStaticVerifyReport struct {
 }
 
 func verifyCloudflareStaticPublish(ctx context.Context, opts cloudflareStaticVerifyOptions) (cloudflareStaticVerifyReport, error) {
-	mode, err := normalizeCloudflareStaticVerifyMode(opts.Mode)
+	mode, err := cloudflarestatic.NormalizeVerifyMode(opts.Mode)
 	if err != nil {
 		return cloudflareStaticVerifyReport{}, err
 	}
 	domains := cleanDomains(opts.Domains)
 	report := cloudflareStaticVerifyReport{Status: "planned", Mode: mode, Domains: domains}
-	if mode == cloudflareStaticVerifyNone {
+	if mode == cloudflarestatic.VerifyModeNone {
 		report.Status = "skipped"
 		return report, nil
 	}
@@ -1253,7 +1254,7 @@ func verifyCloudflareStaticPublish(ctx context.Context, opts cloudflareStaticVer
 		interval = 5 * time.Second
 	}
 	spaPath := strings.TrimSpace(opts.SPAPath)
-	if spaPath == "" && opts.NotFoundHandling == cloudflareStaticNotFoundSPA {
+	if spaPath == "" && opts.NotFoundHandling == cloudflarestatic.NotFoundHandlingSPA {
 		spaPath = "/__supercdn_spa_probe"
 	}
 	httpClient, err := httpClientWithDNSResolver(opts.Resolver)
@@ -1281,7 +1282,7 @@ func verifyCloudflareStaticPublish(ctx context.Context, opts cloudflareStaticVer
 			report.Reports = last
 			return report, nil
 		}
-		if mode == cloudflareStaticVerifyWarn {
+		if mode == cloudflarestatic.VerifyModeWarn {
 			report.Status = "warning"
 			report.Reports = last
 			report.Warnings = append(report.Warnings, "Cloudflare Static readiness probe failed; deployment will still be recorded")
@@ -1329,19 +1330,6 @@ func cloudflareStaticReportsOK(reports []siteprobe.Report) bool {
 		}
 	}
 	return true
-}
-
-func normalizeCloudflareStaticVerifyMode(value string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", cloudflareStaticVerifyWait:
-		return cloudflareStaticVerifyWait, nil
-	case cloudflareStaticVerifyWarn:
-		return cloudflareStaticVerifyWarn, nil
-	case cloudflareStaticVerifyNone:
-		return cloudflareStaticVerifyNone, nil
-	default:
-		return "", fmt.Errorf("static-verify must be wait, warn, or none")
-	}
 }
 
 func cleanDomains(values []string) []string {

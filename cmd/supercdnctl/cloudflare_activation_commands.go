@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"supercdn/internal/cloudflarestatic"
 	"supercdn/internal/model"
 	"supercdn/internal/siteprobe"
 )
@@ -76,7 +77,7 @@ func activateCloudflareStatic(c client, args []string) error {
 		}
 	}
 	if report.Provider.CachePolicy == "" {
-		report.Provider.CachePolicy = cloudflareStaticCachePolicyAuto
+		report.Provider.CachePolicy = cloudflarestatic.CachePolicyAuto
 	}
 	if err := populateCloudflareStaticActivationSource(&report, strings.TrimSpace(*dir)); err != nil {
 		report.Status = "blocked"

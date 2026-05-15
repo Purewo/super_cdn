@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"supercdn/internal/cloudflarestatic"
 )
 
 func TestPrepareCloudflareStaticAssetsDirGeneratesHeaders(t *testing.T) {
@@ -1951,7 +1953,7 @@ func TestWranglerDeployArgsUsesConfigForSPA(t *testing.T) {
 }
 
 func TestWriteCloudflareStaticWranglerConfig(t *testing.T) {
-	path, cleanup, err := writeCloudflareStaticWranglerConfig("supercdn-demo-static", `C:\tmp\assets`, "2026-04-29", cloudflareStaticNotFoundSPA)
+	path, cleanup, err := writeCloudflareStaticWranglerConfig("supercdn-demo-static", `C:\tmp\assets`, "2026-04-29", cloudflarestatic.NotFoundHandlingSPA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1980,7 +1982,7 @@ func TestWriteHybridEdgeWranglerConfig(t *testing.T) {
 		WorkerMain:          `C:\repo\worker\src\index.ts`,
 		AssetsDir:           `C:\repo\dist`,
 		CompatibilityDate:   "2026-04-30",
-		NotFoundHandling:    cloudflareStaticNotFoundSPA,
+		NotFoundHandling:    cloudflarestatic.NotFoundHandlingSPA,
 		KVNamespaceID:       "kv-123",
 		ManifestMode:        "route",
 		DefaultCacheControl: "public, max-age=300",
@@ -2763,7 +2765,7 @@ func TestNormalizeCloudflareStaticVerifyMode(t *testing.T) {
 		{"warn", "warn"},
 		{"none", "none"},
 	} {
-		got, err := normalizeCloudflareStaticVerifyMode(tc.in)
+		got, err := cloudflarestatic.NormalizeVerifyMode(tc.in)
 		if err != nil {
 			t.Fatalf("normalize %q: %v", tc.in, err)
 		}
@@ -2771,7 +2773,7 @@ func TestNormalizeCloudflareStaticVerifyMode(t *testing.T) {
 			t.Fatalf("normalize %q = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-	if _, err := normalizeCloudflareStaticVerifyMode("off"); err == nil {
+	if _, err := cloudflarestatic.NormalizeVerifyMode("off"); err == nil {
 		t.Fatal("expected invalid verify mode error")
 	}
 }

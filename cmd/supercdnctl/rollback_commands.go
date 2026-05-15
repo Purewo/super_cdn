@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"supercdn/internal/cloudflarestatic"
 	"supercdn/internal/deploymentevidence"
 )
 
@@ -122,7 +123,7 @@ func rollbackApply(c client, args []string) error {
 	site := fs.String("site", "", "site id")
 	deployment := fs.String("deployment", "", "deployment id to roll back to")
 	dir := fs.String("dir", "", "source dist directory for Cloudflare-backed rollback")
-	staticVerify := fs.String("static-verify", cloudflareStaticVerifyWait, "Cloudflare Static readiness check: wait, warn, or none")
+	staticVerify := fs.String("static-verify", cloudflarestatic.VerifyModeWait, "Cloudflare Static readiness check: wait, warn, or none")
 	staticVerifyTimeout := fs.Duration("static-verify-timeout", 2*time.Minute, "maximum time to wait for Cloudflare Static custom domains")
 	staticVerifyInterval := fs.Duration("static-verify-interval", 5*time.Second, "delay between Cloudflare Static readiness probes")
 	staticVerifySPAPath := fs.String("static-verify-spa-path", "", "SPA path to verify after Cloudflare Static publish")
@@ -352,7 +353,7 @@ var rollbackDeployHybridEdge = deploySiteHybridEdgeRaw
 
 func rollbackApplyCloudflareStatic(c client, dep rollbackPlanDeployment, report rollbackApplyReport, opts rollbackApplyCloudflareStaticOptions) error {
 	if dep.CloudflareStatic != nil {
-		report.Source.HeadersPolicy = firstNonEmpty(strings.TrimSpace(dep.CloudflareStatic.CachePolicy), cloudflareStaticCachePolicyAuto)
+		report.Source.HeadersPolicy = firstNonEmpty(strings.TrimSpace(dep.CloudflareStatic.CachePolicy), cloudflarestatic.CachePolicyAuto)
 	}
 	if err := populateRollbackApplyCloudflareStaticSource(&report, opts.Dir); err != nil {
 		report.Status = "blocked"
@@ -447,7 +448,7 @@ type rollbackApplyHybridEdgeOptions struct {
 
 func rollbackApplyHybridEdge(c client, dep rollbackPlanDeployment, report rollbackApplyReport, opts rollbackApplyHybridEdgeOptions) error {
 	if dep.HybridEdge != nil {
-		report.Source.HeadersPolicy = firstNonEmpty(strings.TrimSpace(dep.HybridEdge.CachePolicy), cloudflareStaticCachePolicyAuto)
+		report.Source.HeadersPolicy = firstNonEmpty(strings.TrimSpace(dep.HybridEdge.CachePolicy), cloudflarestatic.CachePolicyAuto)
 	}
 	if err := populateRollbackApplyCloudflareStaticSource(&report, opts.Dir); err != nil {
 		report.Status = "blocked"
@@ -754,7 +755,7 @@ func rollbackRedeployCommand(dep rollbackPlanDeployment, target, sourceDir strin
 		if cachePolicy := rollbackCloudflareStaticCachePolicy(dep); cachePolicy != "" {
 			parts = append(parts, "-static-cache-policy "+cliHintArg(cachePolicy))
 		}
-		if notFound := rollbackCloudflareStaticNotFoundHandling(dep); notFound == cloudflareStaticNotFoundSPA {
+		if notFound := rollbackCloudflareStaticNotFoundHandling(dep); notFound == cloudflarestatic.NotFoundHandlingSPA {
 			parts = append(parts, "-static-spa")
 		} else if notFound != "" {
 			parts = append(parts, "-static-not-found-handling "+cliHintArg(notFound))
@@ -829,7 +830,7 @@ func rollbackCloudflareStaticCachePolicy(dep rollbackPlanDeployment) string {
 	if dep.CloudflareStatic != nil && strings.TrimSpace(dep.CloudflareStatic.CachePolicy) != "" {
 		return strings.TrimSpace(dep.CloudflareStatic.CachePolicy)
 	}
-	return cloudflareStaticCachePolicyAuto
+	return cloudflarestatic.CachePolicyAuto
 }
 
 func rollbackCloudflareStaticNotFoundHandling(dep rollbackPlanDeployment) string {
@@ -912,7 +913,7 @@ func rollbackHybridEdgeCachePolicy(dep rollbackPlanDeployment) string {
 	if dep.HybridEdge != nil && strings.TrimSpace(dep.HybridEdge.CachePolicy) != "" {
 		return strings.TrimSpace(dep.HybridEdge.CachePolicy)
 	}
-	return cloudflareStaticCachePolicyAuto
+	return cloudflarestatic.CachePolicyAuto
 }
 
 func rollbackHybridEdgeNotFoundHandling(dep rollbackPlanDeployment) string {
