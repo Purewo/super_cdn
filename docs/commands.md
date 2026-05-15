@@ -1,5 +1,7 @@
 # Super CDN Command Book
 
+[English](commands.md) | [简体中文](commands.zh-CN.md)
+
 This is the workflow-oriented command book for advanced `supercdnctl` users. It answers "which command should I run next?" and links back to the parameter-level reference when you need exact request and response shapes.
 
 Deep reference:

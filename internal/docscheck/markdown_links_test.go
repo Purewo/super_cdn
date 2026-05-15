@@ -12,7 +12,13 @@ import (
 
 func TestMarkdownLocalLinksResolve(t *testing.T) {
 	repo := repoRoot(t)
-	files := []string{filepath.Join(repo, "README.md")}
+	files, err := filepath.Glob(filepath.Join(repo, "README*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no root README markdown files found")
+	}
 	docsDir := filepath.Join(repo, "docs")
 	if err := filepath.WalkDir(docsDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {

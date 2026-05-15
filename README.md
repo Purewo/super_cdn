@@ -1,5 +1,7 @@
 # Super CDN
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Super CDN is a Windows-first control plane for CDN asset buckets and static Web hosting. It combines a Go API service, `supercdnctl`, SQLite metadata, storage adapters, and Cloudflare Worker/Static Assets automation.
 
 Use it to:
