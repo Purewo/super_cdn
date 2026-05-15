@@ -380,7 +380,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AnyObject"
+                $ref: "#/components/schemas/InitAssetBucketResult"
         "400":
           $ref: "#/components/responses/BadRequest"
   "/api/v1/asset-buckets/{slug}/objects":
@@ -654,7 +654,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AnyObject"
+                $ref: "#/components/schemas/DeleteSiteResult"
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
@@ -1306,8 +1306,486 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
-    AnyObject:
+    Job:
       type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        type:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, done, failed]
+        payload:
+          type: string
+        attempts:
+          type: integer
+        last_error:
+          type: string
+        result:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    IPFSPin:
+      type: object
+      properties:
+        object_id:
+          type: integer
+          format: int64
+        target:
+          type: string
+        provider:
+          type: string
+        cid:
+          type: string
+        gateway_url:
+          type: string
+        locator:
+          type: string
+        pin_status:
+          type: string
+        provider_pin_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    StoredObject:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        project_id:
+          type: string
+        path:
+          type: string
+        key:
+          type: string
+        route_profile:
+          type: string
+        size:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+        content_type:
+          type: string
+        cache_control:
+          type: string
+        primary_target:
+          type: string
+        ipfs:
+          type: array
+          items:
+            $ref: "#/components/schemas/IPFSPin"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    StorageCapabilities:
+      type: object
+      properties:
+        can_upload:
+          type: boolean
+        can_delete_remote:
+          type: boolean
+        can_produce_public_locator:
+          type: boolean
+        supports_range_get:
+          type: boolean
+        supports_head:
+          type: boolean
+        http_only_locator_risk:
+          type: boolean
+        web_resource_suitability:
+          type: string
+        cdn_bucket_suitability:
+          type: string
+        immutable_cid_behavior:
+          type: boolean
+        preferred_cache_policy:
+          type: string
+        direct_locator_description:
+          type: string
+        notes:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    ResourceLibraryHealth:
+      type: object
+      properties:
+        library:
+          type: string
+        binding:
+          type: string
+        binding_path:
+          type: string
+        target:
+          type: string
+        target_type:
+          type: string
+        status:
+          type: string
+        check_mode:
+          type: string
+        list_latency_ms:
+          type: integer
+          format: int64
+        write_latency_ms:
+          type: integer
+          format: int64
+        read_latency_ms:
+          type: integer
+          format: int64
+        delete_latency_ms:
+          type: integer
+          format: int64
+        last_error:
+          type: string
+        consecutive_failures:
+          type: integer
+        last_checked_at:
+          type: string
+          format: date-time
+        last_success_at:
+          type: string
+          format: date-time
+        last_failure_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    ResourceLibraryBindingStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        mount_point:
+          type: string
+        target_type:
+          type: string
+        status:
+          type: string
+        capabilities:
+          $ref: "#/components/schemas/StorageCapabilities"
+        skipped:
+          type: boolean
+        skip_reason:
+          type: string
+        health:
+          $ref: "#/components/schemas/ResourceLibraryHealth"
+      additionalProperties: true
+    ResourceLibraryStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        target_type:
+          type: string
+        capabilities:
+          $ref: "#/components/schemas/StorageCapabilities"
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResourceLibraryBindingStatus"
+      additionalProperties: true
+    RoutingPolicySourceStatus:
+      type: object
+      properties:
+        target:
+          type: string
+        target_type:
+          type: string
+        region_group:
+          type: string
+        weight:
+          type: integer
+        priority:
+          type: integer
+        fallback_only:
+          type: boolean
+        status:
+          type: string
+        health:
+          $ref: "#/components/schemas/ResourceLibraryHealth"
+        error:
+          type: string
+      additionalProperties: true
+    RoutingPolicyStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        mode:
+          type: string
+        default_region_group:
+          type: string
+        source_count:
+          type: integer
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutingPolicySourceStatus"
+        errors:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    StorageInitPathResult:
+      type: object
+      properties:
+        path:
+          type: string
+        remote_path:
+          type: string
+        status:
+          type: string
+        error:
+          type: string
+      additionalProperties: true
+    StorageInitBindingResult:
+      type: object
+      properties:
+        binding_name:
+          type: string
+        binding_path:
+          type: string
+        target:
+          type: string
+        target_type:
+          type: string
+        directories:
+          type: array
+          items:
+            $ref: "#/components/schemas/StorageInitPathResult"
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/StorageInitPathResult"
+      additionalProperties: true
+    StorageInitResult:
+      type: object
+      properties:
+        target:
+          type: string
+        target_type:
+          type: string
+        directories:
+          type: array
+          items:
+            $ref: "#/components/schemas/StorageInitPathResult"
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/StorageInitPathResult"
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/StorageInitBindingResult"
+      additionalProperties: true
+    InitAssetBucketResult:
+      type: object
+      properties:
+        bucket:
+          type: string
+        dry_run:
+          type: boolean
+        directories:
+          type: array
+          items:
+            type: string
+        result:
+          $ref: "#/components/schemas/StorageInitResult"
+        status:
+          type: string
+        reason:
+          type: string
+      additionalProperties: true
+    DeleteReplicaResult:
+      type: object
+      properties:
+        target:
+          type: string
+        status:
+          type: string
+        error:
+          type: string
+      additionalProperties: true
+    DeleteBucketObjectResult:
+      type: object
+      properties:
+        bucket:
+          type: string
+        logical_path:
+          type: string
+        object_id:
+          type: integer
+          format: int64
+        key:
+          type: string
+        delete_remote:
+          type: boolean
+        remote:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeleteReplicaResult"
+        deleted_local:
+          type: boolean
+        errors:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DeleteSiteDeploymentObjectResult:
+      type: object
+      properties:
+        role:
+          type: string
+        path:
+          type: string
+        object_id:
+          type: integer
+          format: int64
+        key:
+          type: string
+        delete_remote:
+          type: boolean
+        remote:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeleteReplicaResult"
+        deleted_local:
+          type: boolean
+        errors:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DeleteSiteDeploymentResult:
+      type: object
+      properties:
+        site_id:
+          type: string
+        deployment_id:
+          type: string
+        deleted:
+          type: boolean
+        delete_objects:
+          type: boolean
+        delete_remote:
+          type: boolean
+        object_count:
+          type: integer
+        objects:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeleteSiteDeploymentObjectResult"
+        deleted_deployment:
+          type: boolean
+        warning:
+          type: string
+        errors:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    DeleteSiteResult:
+      type: object
+      properties:
+        site_id:
+          type: string
+        deleted:
+          type: boolean
+        delete_remote:
+          type: boolean
+        deployment_count:
+          type: integer
+        object_count:
+          type: integer
+        deployments:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeleteSiteDeploymentResult"
+        deleted_site:
+          type: boolean
+        warnings:
+          type: array
+          items:
+            type: string
+        errors:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    RefreshObjectReplicaResult:
+      type: object
+      properties:
+        target:
+          type: string
+        previous_status:
+          type: string
+        status:
+          type: string
+        previous_locator:
+          type: string
+        locator:
+          type: string
+        size:
+          type: integer
+          format: int64
+        content_type:
+          type: string
+        cache_control:
+          type: string
+        ipfs:
+          $ref: "#/components/schemas/IPFSPin"
+        refreshed:
+          type: boolean
+        skipped:
+          type: boolean
+        skip_reason:
+          type: string
+        error:
+          type: string
+      additionalProperties: true
+    ReplicaRefreshObjectResult:
+      type: object
+      properties:
+        bucket_slug:
+          type: string
+        logical_path:
+          type: string
+        object_id:
+          type: integer
+          format: int64
+        status:
+          type: string
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/RefreshObjectReplicaResult"
+        errors:
+          type: array
+          items:
+            type: string
       additionalProperties: true
     ErrorResponse:
       type: object
@@ -1482,11 +1960,11 @@ components:
         resource_libraries:
           type: array
           items:
-            $ref: "#/components/schemas/AnyObject"
+            $ref: "#/components/schemas/ResourceLibraryStatus"
         routing_policies:
           type: array
           items:
-            $ref: "#/components/schemas/AnyObject"
+            $ref: "#/components/schemas/RoutingPolicyStatus"
         warnings:
           type: array
           items:
@@ -2035,13 +2513,13 @@ components:
         bucket:
           type: string
         object:
-          $ref: "#/components/schemas/AnyObject"
+          $ref: "#/components/schemas/StoredObject"
         bucket_object:
           $ref: "#/components/schemas/BucketObject"
         jobs:
           type: array
           items:
-            $ref: "#/components/schemas/AnyObject"
+            $ref: "#/components/schemas/Job"
         url:
           type: string
         public_url:
@@ -2075,7 +2553,7 @@ components:
         objects:
           type: array
           items:
-            $ref: "#/components/schemas/AnyObject"
+            $ref: "#/components/schemas/DeleteBucketObjectResult"
         errors:
           type: array
           items:
@@ -2170,7 +2648,7 @@ components:
         objects:
           type: array
           items:
-            $ref: "#/components/schemas/AnyObject"
+            $ref: "#/components/schemas/ReplicaRefreshObjectResult"
         warnings:
           type: array
           items:
