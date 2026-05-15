@@ -614,7 +614,7 @@ Parameters:
 
 #### recover-cloudflare-static
 
-Dry-run evidence validator for Cloudflare Static writes that may have succeeded at Cloudflare but were not recorded as Super CDN deployments because readiness verification timed out. It summarizes the source directory, requires provider evidence such as Worker name and version id, runs a strict live probe, and reports whether the evidence is ready for a future recovery write. It does not write Super CDN metadata or Cloudflare state; `-dry-run=false` is intentionally rejected until the recovery write endpoint and audit boundary exist.
+Evidence validator and recovery recorder for Cloudflare Static writes that may have succeeded at Cloudflare but were not recorded as Super CDN deployments because readiness verification timed out. It summarizes the source directory, requires provider evidence such as Worker name and version id, runs a strict live probe, and defaults to dry-run. With `-dry-run=false -confirm recover` and a valid token, it records a non-active Super CDN deployment through the recovery endpoint and writes a distinct audit event. It does not activate the recovered deployment or change Cloudflare state.
 
 ```powershell
 .\bin\supercdnctl.exe recover-cloudflare-static -site blog -dir .\dist -domains blog.example.com -worker-name supercdn-blog-static -version-id ver_xxx
@@ -636,7 +636,8 @@ Parameters:
 | `-max-assets` | No | `20` | Maximum JS/CSS assets to probe |
 | `-timeout` | No | `30s` | Overall probe timeout |
 | `-resolver` | No | system DNS | Optional DNS resolver for probes |
-| `-dry-run` | No | `true` | Validate only; real writes are not implemented yet |
+| `-dry-run` | No | `true` | Validate only unless `false` with `-confirm recover` |
+| `-confirm` | For writes | Empty | Must be `recover` when `-dry-run=false` |
 
 #### export-edge-manifest
 

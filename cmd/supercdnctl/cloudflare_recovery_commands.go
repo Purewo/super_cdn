@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -19,6 +23,7 @@ type cloudflareStaticRecoveryReport struct {
 	Provider        cloudflareStaticRecoveryProvider `json:"provider"`
 	ProbeURL        string                           `json:"probe_url,omitempty"`
 	Probe           *siteprobe.Report                `json:"probe,omitempty"`
+	Deployment      json.RawMessage                  `json:"deployment,omitempty"`
 	MissingEvidence []string                         `json:"missing_evidence,omitempty"`
 	Warnings        []string                         `json:"warnings,omitempty"`
 	NextCommands    []string                         `json:"next_commands,omitempty"`
@@ -56,6 +61,9 @@ func recoverCloudflareStatic(c client, args []string) error {
 	cachePolicy := fs.String("static-cache-policy", cloudflareStaticCachePolicyAuto, "Cloudflare Static cache policy: auto, force, or none")
 	notFoundHandling := fs.String("static-not-found-handling", "", "Cloudflare Static not_found_handling: none, 404-page, or single-page-application")
 	spa := fs.Bool("static-spa", false, "enable Cloudflare Static single-page-application fallback")
+	routeProfile := fs.String("profile", "", "route profile to record on recovered deployment")
+	mode := fs.String("mode", "", "site mode to record: standard or spa")
+	pinned := fs.Bool("pinned", false, "pin the recovered deployment record")
 	spaPath := fs.String("spa-path", "", "optional SPA route path to verify as HTML")
 	resolver := fs.String("resolver", "", "DNS resolver for HTTP probes, for example 1.1.1.1:53")
 	maxAssets := fs.Int("max-assets", 20, "maximum JS/CSS assets to probe from index HTML")
@@ -67,7 +75,7 @@ func recoverCloudflareStatic(c client, args []string) error {
 	report := cloudflareStaticRecoveryReport{
 		Status:         "planned",
 		DryRun:         *dryRun,
-		WriteSupported: false,
+		WriteSupported: true,
 		SiteID:         strings.TrimSpace(*site),
 		Provider: cloudflareStaticRecoveryProvider{
 			WorkerName:        strings.TrimSpace(*worker),
@@ -96,14 +104,18 @@ func recoverCloudflareStatic(c client, args []string) error {
 		return errors.New("cloudflare static recovery evidence is incomplete")
 	}
 	if !*dryRun {
-		report.Status = "blocked"
 		if strings.TrimSpace(*confirm) != "recover" {
+			report.Status = "blocked"
 			report.Warnings = append(report.Warnings, "real recovery writes require -confirm recover")
+			_ = printJSON(mustJSON(report))
+			return errors.New("cloudflare static recovery requires confirmation")
 		}
-		report.Warnings = append(report.Warnings, "cloudflare static recovery write is not implemented yet; dry-run evidence validation is the supported boundary")
-		report.NextCommands = cloudflareStaticRecoveryNextCommands(report)
-		_ = printJSON(mustJSON(report))
-		return errors.New("cloudflare static recovery write is not implemented")
+		if strings.TrimSpace(c.token) == "" {
+			report.Status = "blocked"
+			report.Warnings = append(report.Warnings, "token is required for recovery writes; pass -token, SUPERCDN_TOKEN, or use a saved profile")
+			_ = printJSON(mustJSON(report))
+			return errors.New("token is required for cloudflare static recovery writes")
+		}
 	}
 	probe, err := runSiteProbe(*resolver, siteprobe.Options{
 		URL:                        report.ProbeURL,
@@ -130,8 +142,43 @@ func recoverCloudflareStatic(c client, args []string) error {
 		_ = printJSON(mustJSON(report))
 		return errors.New("cloudflare static recovery probe failed")
 	}
-	report.Status = "verified"
 	report.WriteReady = true
+	if *dryRun {
+		report.Status = "verified"
+		return printJSON(mustJSON(report))
+	}
+	req := map[string]any{
+		"confirm":             "recover",
+		"probe_url":           report.ProbeURL,
+		"environment":         "production",
+		"route_profile":       strings.TrimSpace(*routeProfile),
+		"deployment_target":   "cloudflare_static",
+		"mode":                strings.TrimSpace(*mode),
+		"worker_name":         report.Provider.WorkerName,
+		"version_id":          report.Provider.VersionID,
+		"domains":             report.Provider.Domains,
+		"compatibility_date":  report.Provider.CompatibilityDate,
+		"assets_sha256":       report.Source.AssetsSHA256,
+		"cache_policy":        report.Source.HeadersPolicy,
+		"headers_generated":   report.Source.HeadersGenerated,
+		"not_found_handling":  report.Provider.NotFoundHandling,
+		"verification_status": "ok",
+		"verified_at_utc":     time.Now().UTC().Format(time.RFC3339Nano),
+		"file_count":          report.Source.FileCount,
+		"total_size":          report.Source.TotalSize,
+		"published_at_utc":    time.Now().UTC().Format(time.RFC3339Nano),
+		"promote":             false,
+		"pinned":              *pinned,
+	}
+	raw, err := c.doRaw(http.MethodPost, "/api/v1/sites/"+url.PathEscape(report.SiteID)+"/cloudflare-static/recoveries", bytes.NewReader(mustJSON(req)), "application/json")
+	if err != nil {
+		report.Status = "blocked"
+		report.Warnings = append(report.Warnings, err.Error())
+		_ = printJSON(mustJSON(report))
+		return err
+	}
+	report.Status = "recorded"
+	report.Deployment = json.RawMessage(raw)
 	return printJSON(mustJSON(report))
 }
 
@@ -179,6 +226,9 @@ func cloudflareStaticRecoveryMissingEvidence(report cloudflareStaticRecoveryRepo
 	}
 	if len(report.Provider.Domains) == 0 && strings.TrimSpace(report.ProbeURL) == "" {
 		missing = append(missing, "domain_or_url")
+	}
+	if !report.DryRun && len(report.Provider.Domains) == 0 {
+		missing = append(missing, "domains")
 	}
 	return missing
 }

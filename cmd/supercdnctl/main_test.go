@@ -348,7 +348,7 @@ func TestRecoverCloudflareStaticDryRunVerifiesEvidence(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != "verified" || !report.WriteReady || report.WriteSupported {
+	if report.Status != "verified" || !report.WriteReady || !report.WriteSupported {
 		t.Fatalf("unexpected recovery report: %+v", report)
 	}
 	if report.Source.FileCount != 2 || report.Source.AssetsSHA256 == "" {
@@ -389,7 +389,7 @@ func TestRecoverCloudflareStaticRequiresProviderEvidence(t *testing.T) {
 	}
 }
 
-func TestRecoverCloudflareStaticRejectsWriteModeUntilServerSupportExists(t *testing.T) {
+func TestRecoverCloudflareStaticWriteRequiresToken(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "index.html"), `<script src="/app.js"></script>`)
 	writeTestFile(t, filepath.Join(dir, "app.js"), `console.log("ok")`)
@@ -401,6 +401,7 @@ func TestRecoverCloudflareStaticRejectsWriteModeUntilServerSupportExists(t *test
 			"-dir", dir,
 			"-worker-name", "supercdn-demo-static",
 			"-version-id", "ver-123",
+			"-domains", "demo.example.com",
 			"-url", "https://demo.example.com/",
 			"-static-cache-policy", "none",
 			"-dry-run=false",
@@ -408,13 +409,81 @@ func TestRecoverCloudflareStaticRejectsWriteModeUntilServerSupportExists(t *test
 		})
 	})
 	if recoverErr == nil {
-		t.Fatal("expected write mode to be rejected")
+		t.Fatal("expected write mode without token to be rejected")
 	}
 	var report cloudflareStaticRecoveryReport
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != "blocked" || report.WriteSupported || !strings.Contains(strings.Join(report.Warnings, "\n"), "not implemented") {
+	if report.Status != "blocked" || !report.WriteSupported || !strings.Contains(strings.Join(report.Warnings, "\n"), "token is required") {
+		t.Fatalf("unexpected recovery report: %+v", report)
+	}
+}
+
+func TestRecoverCloudflareStaticWriteCallsRecoveryAPI(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), `<script src="/app.js"></script>`)
+	writeTestFile(t, filepath.Join(dir, "app.js"), `console.log("ok")`)
+
+	siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			_, _ = w.Write([]byte(`console.log("ok")`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer siteSrv.Close()
+
+	var recoveryReq map[string]any
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sites/demo/cloudflare-static/recoveries" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+			t.Fatalf("Authorization = %q", auth)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&recoveryReq); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"id":"dpl-recovered","site_id":"demo","status":"ready","deployment_target":"cloudflare_static","active":false}`))
+	}))
+	defer apiSrv.Close()
+
+	var recoverErr error
+	out := captureStdout(t, func() {
+		recoverErr = recoverCloudflareStatic(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{
+			"-site", "demo",
+			"-dir", dir,
+			"-worker-name", "supercdn-demo-static",
+			"-version-id", "ver-123",
+			"-domains", "demo.example.com",
+			"-url", siteSrv.URL + "/",
+			"-static-cache-policy", "none",
+			"-dry-run=false",
+			"-confirm", "recover",
+			"-timeout", "2s",
+		})
+	})
+	if recoverErr != nil {
+		t.Fatal(recoverErr)
+	}
+	if recoveryReq["confirm"] != "recover" || recoveryReq["verification_status"] != "ok" || recoveryReq["promote"] != false {
+		t.Fatalf("unexpected recovery request: %#v", recoveryReq)
+	}
+	if recoveryReq["assets_sha256"] == "" || recoveryReq["file_count"] != float64(2) {
+		t.Fatalf("missing source evidence: %#v", recoveryReq)
+	}
+	var report cloudflareStaticRecoveryReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "recorded" || !strings.Contains(string(report.Deployment), "dpl-recovered") {
 		t.Fatalf("unexpected recovery report: %+v", report)
 	}
 }

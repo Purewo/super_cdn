@@ -949,6 +949,29 @@ paths:
                 $ref: "#/components/schemas/SiteDeployment"
         "400":
           $ref: "#/components/responses/BadRequest"
+  "/api/v1/sites/{id}/cloudflare-static/recoveries":
+    post:
+      tags: [Deployments]
+      operationId: recoverCloudflareStaticDeployment
+      summary: Recover a verified Cloudflare Static provider write into Super CDN metadata
+      description: Records an inactive Cloudflare Static deployment only when the caller supplies explicit recovery confirmation and strict provider evidence. Activation is intentionally not supported by this endpoint.
+      parameters:
+        - $ref: "#/components/parameters/SiteID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoverCloudflareStaticDeploymentRequest"
+      responses:
+        "201":
+          description: Recovered deployment metadata was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteDeployment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
   "/api/v1/sites/{id}/deployments/{deployment}":
     get:
       tags: [Deployments]
@@ -2262,6 +2285,22 @@ components:
           type: boolean
         pinned:
           type: boolean
+    RecoverCloudflareStaticDeploymentRequest:
+      allOf:
+        - $ref: "#/components/schemas/RecordCloudflareStaticDeploymentRequest"
+        - type: object
+          required: [confirm, probe_url, domains, assets_sha256, verification_status, verified_at_utc, file_count]
+          properties:
+            confirm:
+              type: string
+              enum: [recover]
+            probe_url:
+              type: string
+              description: Exact URL that passed the strict recovery probe.
+            promote:
+              type: boolean
+              default: false
+              description: Must be false; recovery records metadata only and does not activate Cloudflare-backed deployments.
     SiteDeployment:
       type: object
       properties:

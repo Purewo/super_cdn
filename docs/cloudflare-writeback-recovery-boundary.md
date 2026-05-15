@@ -18,8 +18,8 @@ Current supported recovery behavior:
 
 - `hybrid_edge` readiness timeouts after deployment creation can be inspected with `reconcile-deployment` because a Super CDN deployment id already exists.
 - `refresh-edge-manifest` can republish the active hybrid edge manifest when signatures or manifest contents need repair.
-- `recover-cloudflare-static` can dry-run validate the evidence for unrecorded `cloudflare_static` provider writes: source summary, Worker/version/domain evidence and strict live probe. It intentionally refuses real writes until the server-side recovery endpoint and audit behavior exist.
-- `cloudflare_static` readiness timeouts before metadata recording still require rerunning `deploy-site` or a future recovery write. A provider write alone is not enough evidence to create or activate Super CDN metadata.
+- `recover-cloudflare-static` can validate the evidence for unrecorded `cloudflare_static` provider writes: source summary, Worker/version/domain evidence and strict live probe. With `-dry-run=false -confirm recover`, it records a non-active Super CDN deployment through a recovery-specific server endpoint and audit action.
+- `cloudflare_static` readiness timeouts before metadata recording no longer require losing all metadata evidence, but a provider write alone is still not enough to activate Super CDN metadata.
 
 ## Failure Shapes
 
@@ -43,7 +43,7 @@ If the report is `settled=true`, the operator can treat the deployment as provid
 
 The `cloudflare_static` flow publishes Worker Static Assets first and records Super CDN metadata only after readiness verification. If verification times out before recording, Cloudflare may already have Worker assets and custom-domain state, but Super CDN has no deployment id for that provider write.
 
-A future recovery command must not infer a deployment from Wrangler success alone. It needs durable local and remote evidence:
+The recovery command must not infer a deployment from Wrangler success alone. It needs durable local and remote evidence:
 
 - source artifact directory and deterministic asset summary;
 - Worker name, version id when available, compatibility date and Static Assets hash;
@@ -54,7 +54,7 @@ A future recovery command must not infer a deployment from Wrangler success alon
 
 ## Required Future Write Command Behavior
 
-A future `cloudflare_static` recovery/writeback command should be ordered as:
+The `cloudflare_static` recovery/writeback command is ordered as:
 
 1. Load the site and current deployment target defaults.
 2. Summarize the source directory using the same Cloudflare Static asset summary as `deploy-site`.
@@ -62,7 +62,7 @@ A future `cloudflare_static` recovery/writeback command should be ordered as:
 4. Probe the real custom domain with `probe-site`-equivalent strict checks: Cloudflare Static HTML evidence, direct same-site assets, generated cache headers when applicable, and optional SPA fallback.
 5. If strict probe fails, emit a recovery report and do not write metadata.
 6. If strict probe passes, record a Super CDN deployment with `verification_status=ok`, published/verified timestamps and the exact evidence.
-7. Activate metadata only when the recorded deployment evidence matches the verified live domain and the user passed an explicit confirmation flag.
+7. Record the recovered deployment as non-active; provider-aware activation remains a future step and must not use generic `promote-deployment`.
 8. Audit the recovery write separately from normal deploys.
 9. Emit `reconcile-deployment` and `rollback-plan` next commands.
 
@@ -70,13 +70,13 @@ The command should default to dry-run. A real write must require a confirmation 
 
 ## Required Server Boundary
 
-Before adding the write path, the server needs a recovery-specific endpoint or request mode with these properties:
+The recovery-specific endpoint must keep these properties:
 
 - audit action distinct from normal deploy, for example `site.deployment.cloudflare_static.recovery`;
 - idempotency key based on site id, Worker name, version id, assets hash and domains;
 - no secret fields accepted or stored;
 - rejected writes are audited when evidence is incomplete, probe evidence is missing, or activation would be metadata-only;
-- activation remains provider-aware and must not reuse the generic `promote-deployment` path for Cloudflare-backed deployments.
+- activation remains unsupported here; future provider-aware activation must not reuse the generic `promote-deployment` path for Cloudflare-backed deployments.
 
 ## Non-Goals
 

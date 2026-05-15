@@ -956,6 +956,65 @@ func TestRecordCloudflareStaticDeployment(t *testing.T) {
 	}
 }
 
+func TestRecoverCloudflareStaticDeploymentRecordsInactiveAndAudits(t *testing.T) {
+	app := newTestServer(t)
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/cloudflare-static/recoveries", "test-token", map[string]any{
+		"confirm":             "recover",
+		"probe_url":           "https://demo-static.example.com/",
+		"environment":         "production",
+		"route_profile":       "overseas",
+		"deployment_target":   "cloudflare_static",
+		"mode":                "standard",
+		"worker_name":         "supercdn-demo-static",
+		"version_id":          "ver-123",
+		"domains":             []string{"demo-static.example.com"},
+		"compatibility_date":  "2026-04-29",
+		"assets_sha256":       "asset-sha",
+		"cache_policy":        "none",
+		"verification_status": "ok",
+		"verified_at_utc":     "2026-04-29T00:00:01Z",
+		"file_count":          2,
+		"total_size":          1200,
+		"published_at_utc":    "2026-04-29T00:00:00Z",
+		"promote":             false,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("recover static deployment status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"deployment_target":"cloudflare_static"`,
+		`"status":"ready"`,
+		`"active":false`,
+		`"worker_name":"supercdn-demo-static"`,
+		`"version_id":"ver-123"`,
+		`"verification_status":"ok"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("response missing %s: %s", want, body)
+		}
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.cloudflare_static.recovery", "site:demo")
+}
+
+func TestRecoverCloudflareStaticDeploymentRejectsIncompleteEvidenceAndAudits(t *testing.T) {
+	app := newTestServer(t)
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/cloudflare-static/recoveries", "test-token", map[string]any{
+		"confirm":             "recover",
+		"probe_url":           "https://demo-static.example.com/",
+		"worker_name":         "supercdn-demo-static",
+		"domains":             []string{"demo-static.example.com"},
+		"assets_sha256":       "asset-sha",
+		"verification_status": "ok",
+		"verified_at_utc":     "2026-04-29T00:00:01Z",
+		"file_count":          2,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("recover static deployment status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.cloudflare_static.recovery.rejected", "site:demo")
+}
+
 func TestIPFSStatusChecksPinataProvider(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v3/files/public" {

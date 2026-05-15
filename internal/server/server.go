@@ -153,6 +153,7 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("POST /cloudflare/r2/credentials", s.handleCreateCloudflareR2Credentials)
 	s.apiMux.HandleFunc("POST /sites/{id}/deployments", s.handleCreateSiteDeployment)
 	s.apiMux.HandleFunc("POST /sites/{id}/cloudflare-static/deployments", s.handleRecordCloudflareStaticDeployment)
+	s.apiMux.HandleFunc("POST /sites/{id}/cloudflare-static/recoveries", s.handleRecoverCloudflareStaticDeployment)
 	s.apiMux.HandleFunc("GET /sites/{id}/deployments", s.handleListSiteDeployments)
 	s.apiMux.HandleFunc("GET /sites/{id}/deployments/{deployment}", s.handleGetSiteDeployment)
 	s.apiMux.HandleFunc("POST /sites/{id}/files/primary-target", s.handleSwitchActiveSiteFilePrimaryTarget)

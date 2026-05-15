@@ -86,6 +86,12 @@ type recordCloudflareStaticDeploymentRequest struct {
 	Pinned             bool     `json:"pinned"`
 }
 
+type recoverCloudflareStaticDeploymentRequest struct {
+	recordCloudflareStaticDeploymentRequest
+	Confirm  string `json:"confirm"`
+	ProbeURL string `json:"probe_url"`
+}
+
 func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Request) {
 	siteID := cleanID(r.PathValue("id"))
 	if siteID == "" {
@@ -137,6 +143,31 @@ func (s *Server) handleRecordCloudflareStaticDeployment(w http.ResponseWriter, r
 		return
 	}
 	if !s.auditMutation(w, r, "site.deployment.cloudflare_static.record", "site:"+siteID+";deployment:"+resp.ID) {
+		return
+	}
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (s *Server) handleRecoverCloudflareStaticDeployment(w http.ResponseWriter, r *http.Request) {
+	siteID := cleanID(r.PathValue("id"))
+	if siteID == "" {
+		writeError(w, http.StatusBadRequest, "site id is required")
+		return
+	}
+	if !s.ensureSiteAccessIfExists(w, r, siteID) {
+		return
+	}
+	var req recoverCloudflareStaticDeploymentRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.recoverCloudflareStaticDeployment(r.Context(), siteID, req)
+	if err != nil {
+		s.auditRejectedMutation(r, "site.deployment.cloudflare_static.recovery.rejected", cloudflareStaticRecoveryAuditResource(siteID, err))
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.auditMutation(w, r, "site.deployment.cloudflare_static.recovery", "site:"+siteID+";deployment:"+resp.ID) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, resp)
@@ -724,6 +755,66 @@ func (s *Server) recordCloudflareStaticDeployment(ctx context.Context, siteID st
 		}
 	}
 	return s.siteDeploymentView(ctx, dep), nil
+}
+
+func (s *Server) recoverCloudflareStaticDeployment(ctx context.Context, siteID string, req recoverCloudflareStaticDeploymentRequest) (model.SiteDeployment, error) {
+	if strings.TrimSpace(req.Confirm) != "recover" {
+		return model.SiteDeployment{}, fmt.Errorf("confirm must be recover")
+	}
+	if req.Promote {
+		return model.SiteDeployment{}, fmt.Errorf("cloudflare_static recovery records metadata only; activation is not supported by this endpoint")
+	}
+	if strings.TrimSpace(req.WorkerName) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("worker_name is required")
+	}
+	if strings.TrimSpace(req.VersionID) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("version_id is required")
+	}
+	if !hasNonEmptyString(req.Domains) {
+		return model.SiteDeployment{}, fmt.Errorf("domains are required")
+	}
+	if strings.TrimSpace(req.ProbeURL) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("probe_url is required")
+	}
+	if strings.TrimSpace(req.AssetsSHA256) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("assets_sha256 is required")
+	}
+	if req.FileCount <= 0 {
+		return model.SiteDeployment{}, fmt.Errorf("file_count must be positive")
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.VerificationStatus), "ok") {
+		return model.SiteDeployment{}, fmt.Errorf("verification_status must be ok")
+	}
+	if strings.TrimSpace(req.VerifiedAtUTC) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("verified_at_utc is required")
+	}
+	recordReq := req.recordCloudflareStaticDeploymentRequest
+	recordReq.DeploymentTarget = model.SiteDeploymentTargetCloudflareStatic
+	recordReq.ResourceFailover = false
+	recordReq.VerificationStatus = "ok"
+	recordReq.Promote = false
+	return s.recordCloudflareStaticDeployment(ctx, siteID, recordReq)
+}
+
+func hasNonEmptyString(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func cloudflareStaticRecoveryAuditResource(siteID string, err error) string {
+	reason := "unknown"
+	if err != nil {
+		reason = strings.ToLower(strings.TrimSpace(err.Error()))
+		reason = strings.NewReplacer(" ", "_", ";", "_", ":", "_", "\n", "_", "\r", "_", "\t", "_").Replace(reason)
+		if len(reason) > 120 {
+			reason = reason[:120]
+		}
+	}
+	return "site:" + siteID + ";reason:" + reason
 }
 
 type siteZipEntry struct {
