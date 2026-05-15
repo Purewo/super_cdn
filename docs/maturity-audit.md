@@ -2,7 +2,7 @@
 
 [English](maturity-audit.md) | [简体中文](maturity-audit.zh-CN.md)
 
-Last updated: 2026-05-15 Asia/Shanghai.
+Last updated: 2026-05-16 Asia/Shanghai.
 
 This document tracks the current maturity work after the staged `v0.4.0` release. It is intentionally evidence-based: do not mark the product mature because a broad test command passed unless the command covers the specific requirement.
 
@@ -32,6 +32,7 @@ Concrete success criteria:
 | API contract | `api/openapi.yaml` | Redocly lint passed locally. The schema no longer uses catch-all `AnyObject`; remaining dynamic response extensions use typed primary fields plus `additionalProperties: true` where forward compatibility is intentional. |
 | CLI command help coverage | `docs/commands.md`, `cmd/supercdnctl/command_docs_test.go`, `cmd/supercdnctl/main.go` | `go test ./cmd/supercdnctl` fails when a command dispatched from `cmd/supercdnctl/main.go` is not documented in the advanced command book or the built-in `usage()` output. The test exposed and fixed missing `logout` and `create-mobile-cdn-bucket` usage entries. |
 | Documentation link integrity | `internal/docscheck/markdown_links_test.go` | `go test ./internal/docscheck` walks README and `docs/*.md`, then verifies local Markdown links resolve to repository files. This protects the documentation map, command book, release checklist and handoff links from stale file references. |
+| Maintenance stabilization | `docs/maintenance-status.md` | `main` is now held as a maintenance/stabilization baseline after `v0.5.0` and commit `8dd3b16`. Future work should wait for the small-scope user test pass, or stay limited to documentation, operational corrections and targeted fixes with evidence. |
 | Operator runbook | `docs/operations.md` | Short operational entry point for first checks, site/bucket triage, manual switching, rollback/recovery, cleanup and refactor/release verification. README and the command book link to it, and docs link tests cover those links. |
 | Versioned migrations | `internal/db` migration code and tests | Covered by existing DB tests in `go test ./...`. |
 | Audit query surface | `GET /api/v1/audit-events`, `supercdnctl audit-log` | Tests cover workspace scoping, viewer rejection and CLI query parameters. |
@@ -78,5 +79,7 @@ No explicit blocker is currently open in this checklist. Keep this section evide
 
 ## Next Concrete Work
 
-1. Reuse the local race command when touching shared Go behavior: temporarily prepend `E:\Tools\winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r1\mingw64\bin` to `PATH`, set `CGO_ENABLED=1`, then run `.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race`.
-2. Continue the planned package-boundary cleanup only in narrow slices with foundation and live-canary evidence preserved.
+1. Wait for the small-scope user test pass and record concrete failures or friction before changing product behavior again.
+2. During stabilization, keep changes to documentation, operational corrections, CI/security maintenance or targeted fixes with a reproduction.
+3. Reuse the local race command when touching shared Go behavior: temporarily prepend `E:\Tools\winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r1\mingw64\bin` to `PATH`, set `CGO_ENABLED=1`, then run `.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race`.
+4. Resume package-boundary cleanup only after the maintenance gate is lifted or a confirmed test finding requires it.

@@ -9,6 +9,7 @@ Deep references:
 - Command book: [commands.md](commands.md)
 - Parameter reference: [cli-reference.md](cli-reference.md)
 - Real scenario regression: [real-scenario-regression.md](real-scenario-regression.md)
+- Maintenance status: [maintenance-status.md](maintenance-status.md)
 - Release checklist: [release-checklist.md](release-checklist.md)
 - Maturity audit: [maturity-audit.md](maturity-audit.md)
 

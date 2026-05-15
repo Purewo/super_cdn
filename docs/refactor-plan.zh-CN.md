@@ -2,9 +2,11 @@
 
 [English](refactor-plan.md) | 简体中文
 
-最后更新：2026-05-15 Asia/Shanghai。
+最后更新：2026-05-16 Asia/Shanghai。
 
 基线：`v0.5.0` 是当前阶段性成熟版本。它冻结了 post-`v0.4.0` 的结构、运维、文档和只读真实场景回归成熟度周期，后续产品功能应从这个基线继续。
+
+维护说明：当前重构计划暂缓。项目当前状态是 [maintenance-status.zh-CN.md](maintenance-status.zh-CN.md) 记录的维护维稳期；除非小范围测试完成，或测试结果暴露了需要定向清理的边界，否则不要恢复大范围重构。
 
 ## main 上的进展
 
@@ -20,8 +22,9 @@
 - 运维成熟度：`cdn-doctor`、`site-doctor`、`switch-plan`、`switch-apply`、`rollback-plan`、`rollback-apply`、recovery/writeback/reconcile 路径形成证据化边界。
 - 文档成熟度：命令覆盖测试、文档本地链接测试、运维手册、真实场景回归手册已经纳入验证。
 
-下一次重构入口：
+暂缓后的重构入口：
 
+- 只有在维稳闸门解除，或确认的测试问题要求定向重构时，才重新进入本计划；
 - 用 [maturity-audit.zh-CN.md](maturity-audit.zh-CN.md) 做当前证据清单；
 - policy-level switch 写入前先看 [policy-switching-boundary.zh-CN.md](policy-switching-boundary.zh-CN.md)；
 - Cloudflare rollback 写行为前先看 [cloudflare-rollback-boundary.zh-CN.md](cloudflare-rollback-boundary.zh-CN.md)；

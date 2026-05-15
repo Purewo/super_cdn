@@ -2,17 +2,17 @@
 
 [English](tomorrow-plan.md) | [简体中文](tomorrow-plan.zh-CN.md)
 
-Last updated: 2026-05-15 Asia/Shanghai.
+Last updated: 2026-05-16 Asia/Shanghai.
 
 ## Current State
 
-The service is still in development mode. There is no need to preserve compatibility with the old static-site deployment flow.
+The service is now in maintenance stabilization. Preserve the documented `v0.5.0` behavior plus the post-release user upload quota workflow in commit `8dd3b16`, and wait for the small-scope user test pass before resuming broad feature or refactor work.
 
-`v0.5.0` is the current staged mature milestone. It closes the post-`v0.4.0` refactor, operations, documentation and read-only real-scenario regression cycle. Start future work from `docs/refactor-plan.md`, `docs/maturity-audit.md`, `docs/operations.md` and the relevant boundary document instead of restarting broad cleanup.
+Use [docs/maintenance-status.md](maintenance-status.md) as the current first-read handoff. `v0.5.0` remains the staged mature milestone, and [docs/maturity-audit.md](maturity-audit.md), [docs/operations.md](operations.md) and the boundary documents remain the evidence and operations references.
 
-v0.1 and v0.2.0 are closed as stable internal milestones. The `v0.1.x` line remains feature-frozen, and `v0.2.x` should only receive bug fixes, documentation, operational hardening and regression coverage around IPFS/Web hosting. New product work starts from `docs/v0.3-roadmap.md`, with multi-resource-library scheduling, replica repair, smart routing and explicit static-resource failover as the next major feature surface.
+v0.1 and v0.2.0 are closed as stable internal milestones. The `v0.1.x` line remains feature-frozen, and `v0.2.x` should only receive bug fixes, documentation, operational hardening and regression coverage around IPFS/Web hosting. Historical roadmap documents remain useful context, but new product work is deferred while the maintenance gate is active.
 
-Next-session priority note: continue from the post-`v0.4.0` refactor audit in [docs/refactor-plan.md](refactor-plan.md), the evidence checklist in [docs/maturity-audit.md](maturity-audit.md), the policy switching boundary in [docs/policy-switching-boundary.md](policy-switching-boundary.md), the Cloudflare rollback boundary in [docs/cloudflare-rollback-boundary.md](cloudflare-rollback-boundary.md), and the Cloudflare writeback/recovery boundary in [docs/cloudflare-writeback-recovery-boundary.md](cloudflare-writeback-recovery-boundary.md). Phase 0 through Phase 6 are now done on `main`: CI/release checklist, OpenAPI, versioned migrations, audit-event writes, CLI dispatcher cleanup and server skeleton extraction. Narrow package-boundary cleanup has started: deployment target normalization is centralized in `internal/deploymenttarget`, deployment evidence operation names are centralized in `internal/deploymentevidence`, Go-side edge evidence/route header names are centralized in `internal/edgeheaders`, and server audit action names are centralized in `internal/server/audit.go` while tests keep literal audit contract assertions. Commits `e79d694`, `2e6153c` and `b450185` passed CI runs `25900531880`, `25901652012` and `25902976766`; the two production-relevant boundary packages were deployed with backups `/opt/supercdn/backups/20260515T044024Z-deployment-evidence-ops` and `/opt/supercdn/backups/20260515T052212Z-edgeheaders`. Do not restart from Phase 0; only continue with narrow package-boundary cleanup when the boundary and tests are clear.
+Next-session priority note: do not restart the refactor. Start by reviewing [docs/maintenance-status.md](maintenance-status.md), the user's small-scope test findings, and the current worktree/CI status. If there is no concrete test finding, keep the project in maintenance mode. If there is a finding, route it to the smallest documented surface and update code, OpenAPI, command docs, README and Chinese docs together when behavior changes.
 
 Web hosting boundary note: the current product rule is recorded in `docs/web-hosting-boundaries.md`. Go entry delivery is for tests/integration/compatibility; preferred Web hosting is Cloudflare entry plus non-entry resources on AList/OpenList, Cloudflare-native static assets or IPFS/Pinata. R2 remains a CDN/object acceleration line; R2-backed Web hosting is legacy compatibility and not the mainstream path. Static-resource failover must never fall back to Go.
 
@@ -36,21 +36,21 @@ Cloudflare live validation note: generated Cloudflare Static `_headers` now incl
 
 GitHub operation note: for GitHub network operations such as `git push`, `git fetch`, tag push and release API calls, prefer using the local proxy at `http://127.0.0.1:10808` when direct access is slow or reset. Do not configure a permanent global, system or repository Git proxy. Use per-command temporary proxy flags instead, for example `git -c http.proxy=http://127.0.0.1:10808 -c https.proxy=http://127.0.0.1:10808 push origin main`.
 
-## Next Session Plan: Post-v0.4.0 Refactor
+## Next Session Plan: Maintenance Stabilization
 
-The real-user onboarding hardening cycle is frozen in `v0.4.0`.
+The active plan is to hold the current stable product surface while the user runs a small-scope test pass.
 
-The next session should directly follow [docs/refactor-plan.md](refactor-plan.md).
+[docs/refactor-plan.md](refactor-plan.md) is deferred context, not the immediate next task.
 
 Immediate execution order:
 
-1. Start with a completion audit against [docs/refactor-plan.md](refactor-plan.md) and the current tree.
-2. Keep `internal/server/server.go` as the server skeleton and `cmd/supercdnctl/main.go` as the CLI dispatcher.
-3. Further refactor slices should be narrow package-boundary extractions with focused tests, not broad line-count work. The deployment-target and deployment-evidence-operation boundaries are already extracted.
-4. Continue improving operator workflows around explicit user-confirmed switching, rollback and health visibility. `switch-plan` and the first safe non-policy/non-failover `switch-apply` path are done; future work should focus on policy-level apply/rollback or Cloudflare/hybrid-edge rollback only when confirmation, audit and real traffic boundaries are clear.
-5. Update `api/openapi.yaml` and audit coverage in the same patch as any API mutation change.
+1. Read [docs/maintenance-status.md](maintenance-status.md).
+2. Check the latest user test notes, current worktree and CI state.
+3. If the user reports a bug, reproduce it and make the smallest targeted fix.
+4. If behavior changes, update `api/openapi.yaml`, command docs, README, Chinese docs and audit coverage in the same patch.
+5. If there is no concrete finding, keep changes to docs, runbooks, CI/security maintenance and operational corrections.
 
-Do not start with UI, routing redesign, or new cleanup semantics.
+Do not start with UI, routing redesign, new cleanup semantics, automatic CDN switching or broad package-boundary work.
 
 Refactor success criteria:
 

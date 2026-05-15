@@ -2,7 +2,7 @@
 
 [English](maturity-audit.md) | 简体中文
 
-最后更新：2026-05-15 Asia/Shanghai。
+最后更新：2026-05-16 Asia/Shanghai。
 
 本文跟踪 `v0.4.0` 阶段发布后的成熟度工作。它只接受证据，不因为一个大测试命令通过就笼统宣称项目成熟。
 
@@ -41,6 +41,7 @@
 | 手动切换 | `switch-plan`、`switch-apply` | 先 plan，写入默认 dry-run，确认后审计，policy/failover 不支持 metadata-only apply |
 | 回滚安全 | `rollback-plan`、`rollback-apply`、recovery 命令 | Cloudflare-backed 目标不能 metadata-only rollback |
 | 真实回归 | `scripts/real-scenario-regression.ps1` | 只读收集 doctor、cdn-doctor、site-doctor、probe-site、reconcile-deployment 证据 |
+| 维护维稳状态 | `docs/maintenance-status.zh-CN.md` | `main` 已在 `v0.5.0` 和 commit `8dd3b16` 后进入维护维稳基线。后续先等小范围用户测试反馈，或只做文档、运维修正和有证据的定向修复。 |
 
 英文原文保留完整长表和具体 commit/run/canary 证据：[maturity-audit.md](maturity-audit.md)。
 
@@ -58,5 +59,7 @@
 
 ## 下一步
 
-1. 修改共享 Go 行为时，继续用 Windows race gate：临时把 WinLibs GCC 加到 `PATH`，设置 `CGO_ENABLED=1`，运行 `.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race`。
-2. 继续窄切片 package-boundary 清理，必须保留 foundation 和 live-canary 证据。
+1. 先等小范围用户测试，拿到具体失败或使用摩擦后再改产品行为。
+2. 维稳期只做文档、运维修正、CI/安全维护，或有复现证据的定向修复。
+3. 修改共享 Go 行为时，继续用 Windows race gate：临时把 WinLibs GCC 加到 `PATH`，设置 `CGO_ENABLED=1`，运行 `.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race`。
+4. package-boundary 清理等维稳闸门解除后再恢复；如果测试问题要求定向重构，则按最小切片处理。

@@ -9,6 +9,7 @@
 - 命令大全：[commands.zh-CN.md](commands.zh-CN.md)
 - 参数参考：[cli-reference.zh-CN.md](cli-reference.zh-CN.md)
 - 真实场景回归：[real-scenario-regression.zh-CN.md](real-scenario-regression.zh-CN.md)
+- 维护维稳状态：[maintenance-status.zh-CN.md](maintenance-status.zh-CN.md)
 - 发布检查清单：[release-checklist.zh-CN.md](release-checklist.zh-CN.md)
 - 成熟度审计：[maturity-audit.zh-CN.md](maturity-audit.zh-CN.md)
 

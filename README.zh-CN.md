@@ -65,6 +65,7 @@ go run .\cmd\supercdnctl -- site-doctor -site cyberstream -path /assets/app.js
 - 真实场景回归手册：[docs/real-scenario-regression.zh-CN.md](docs/real-scenario-regression.zh-CN.md)
 - REST API 契约：[api/openapi.yaml](api/openapi.yaml)
 - Web 托管边界：[docs/web-hosting-boundaries.zh-CN.md](docs/web-hosting-boundaries.zh-CN.md)
+- 维护维稳状态：[docs/maintenance-status.zh-CN.md](docs/maintenance-status.zh-CN.md)
 - 当前阶段发布说明：[docs/release-v0.5.0.zh-CN.md](docs/release-v0.5.0.zh-CN.md)
 - 成熟度检查清单：[docs/maturity-audit.zh-CN.md](docs/maturity-audit.zh-CN.md)
 - 后续重构计划：[docs/refactor-plan.zh-CN.md](docs/refactor-plan.zh-CN.md)、[docs/tomorrow-plan.zh-CN.md](docs/tomorrow-plan.zh-CN.md)
@@ -140,7 +141,9 @@ go run .\cmd\supercdnctl -- route-explain -site cyberstream -path /assets/app.js
 
 ## 当前状态
 
-当前稳定基线是 `v0.5.0`。它是阶段性成熟版本，重点补齐了 CI、OpenAPI lint、迁移记录、审计事件、服务/CLI 结构拆分、运维文档、命令文档和只读真实场景回归。
+当前稳定基线是 `v0.5.0` 加 post-release 用户上传配额流程 commit `8dd3b16`。项目已经进入维护维稳状态：保护已记录行为，等待下一轮小范围用户测试反馈，在测试结果出来前只做文档、运维修正和定向 bug fix。
+
+当前交接入口是 [docs/maintenance-status.zh-CN.md](docs/maintenance-status.zh-CN.md)。重构计划仍然保留，但大范围重构要等维稳闸门解除后再继续。
 
 这不等于宽泛的公开 GA 承诺。后续如果改到 Cloudflare 写入、DNS、Worker/KV 发布、AList/OpenList 可见性、R2 provisioning/CORS、IPFS/Pinata 上传、手动切换或回滚写行为，仍需要增加真实 provider canary。
 

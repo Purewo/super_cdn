@@ -2,9 +2,11 @@
 
 [English](refactor-plan.md) | [简体中文](refactor-plan.zh-CN.md)
 
-Last updated: 2026-05-15 Asia/Shanghai.
+Last updated: 2026-05-16 Asia/Shanghai.
 
 Baseline: `v0.5.0` is the current staged mature release. It freezes the post-`v0.4.0` structure, operations, documentation and real-scenario regression maturity cycle before the next product feature slice.
+
+Maintenance note: this refactor plan is currently deferred. The active project state is maintenance stabilization in [maintenance-status.md](maintenance-status.md); do not resume broad refactor work until the small-scope user test pass is complete or a test result exposes a specific boundary that needs targeted cleanup.
 
 ## Progress On `main`
 
@@ -33,8 +35,9 @@ Completed after `v0.4.0`:
 - Documentation maturity follow-up: `docs/operations.md` is the short operator runbook for first checks, site/bucket triage, switching, rollback/recovery, cleanup and refactor/release verification; README and the command book link to it.
 - Real-scenario regression follow-up: `scripts/real-scenario-regression.ps1` and `docs/real-scenario-regression.md` provide a read-only JSON evidence harness for existing public sites, authenticated sites/deployments and CDN buckets. It wraps `doctor`, `cdn-doctor`, `site-doctor`, `probe-site` and `reconcile-deployment` without doing provider writes, so refactor slices can collect real environment evidence before asking for mutating canary tests.
 
-Next refactor entry point:
+Deferred refactor entry point:
 
+- Re-enter this plan only after the maintenance gate is lifted or a confirmed test finding requires targeted refactor work.
 - Use `docs/maturity-audit.md` as the current evidence checklist before claiming the project is mature.
 - Use `docs/policy-switching-boundary.md` before adding any policy-level switch apply/rollback write path.
 - Use `docs/cloudflare-rollback-boundary.md` before changing Cloudflare Static or hybrid-edge rollback write behavior.

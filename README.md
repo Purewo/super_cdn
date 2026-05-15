@@ -58,10 +58,17 @@ Use `-resource-failover` only when the selected route profile has a primary targ
 - Real scenario regression runbook: [docs/real-scenario-regression.md](docs/real-scenario-regression.md)
 - Formal REST contract: [api/openapi.yaml](api/openapi.yaml)
 - Web-hosting boundary: [docs/web-hosting-boundaries.md](docs/web-hosting-boundaries.md)
+- Maintenance status: [docs/maintenance-status.md](docs/maintenance-status.md)
 - Release checklist: [docs/release-checklist.md](docs/release-checklist.md)
 - Latest staged release notes: [docs/release-v0.5.0.md](docs/release-v0.5.0.md)
 - Current maturity audit: [docs/maturity-audit.md](docs/maturity-audit.md)
 - Refactor plan and handoff: [docs/refactor-plan.md](docs/refactor-plan.md), [docs/tomorrow-plan.md](docs/tomorrow-plan.md)
+
+## Current status
+
+The current stable baseline is `v0.5.0` plus the post-release user upload quota workflow in commit `8dd3b16`. Super CDN is now in maintenance stabilization: preserve documented behavior, wait for the next small-scope user test pass, and keep new code changes limited to targeted fixes unless test evidence shows a concrete need.
+
+Use [docs/maintenance-status.md](docs/maintenance-status.md) as the current handoff. The refactor plan remains available, but broad refactor work is deferred until the maintenance gate is lifted.
 
 ## Core concepts
 
@@ -123,7 +130,7 @@ route_profile: overseas_r2
 delivery: root index.html on origin, JS/CSS by 302 to Cloudflare R2
 ```
 
-Detailed handoff notes and next tasks are in [docs/tomorrow-plan.md](docs/tomorrow-plan.md).
+The active maintenance handoff is in [docs/maintenance-status.md](docs/maintenance-status.md). Historical handoff notes and deferred refactor context remain in [docs/tomorrow-plan.md](docs/tomorrow-plan.md).
 
 ## Run locally
 

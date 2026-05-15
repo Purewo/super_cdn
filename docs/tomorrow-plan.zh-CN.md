@@ -2,26 +2,26 @@
 
 [English](tomorrow-plan.md) | 简体中文
 
-最后更新：2026-05-15 Asia/Shanghai。
+最后更新：2026-05-16 Asia/Shanghai。
 
 这是中文交接版。英文 [tomorrow-plan.md](tomorrow-plan.md) 保留完整历史记录、canary 域名、commit、CI run 和生产备份路径；中文版本记录当前可执行入口，避免下次会话重新摸底。
 
 ## 当前状态
 
-服务仍处于开发模式，不需要维护旧静态站点部署流程的兼容性。
+项目已经进入维护维稳状态。当前要保护 `v0.5.0` 记录的行为，以及 post-release 用户上传配额流程 commit `8dd3b16`，等待下一轮小范围用户测试反馈后再决定是否继续改产品行为。
 
-`v0.5.0` 是当前阶段性成熟里程碑。它关闭了 post-`v0.4.0` 的重构、运维、文档和只读真实场景回归周期。后续工作从 [refactor-plan.zh-CN.md](refactor-plan.zh-CN.md)、[maturity-audit.zh-CN.md](maturity-audit.zh-CN.md)、[operations.zh-CN.md](operations.zh-CN.md) 和相关边界文档开始，不要重新做大范围 cleanup。
+当前第一入口是 [maintenance-status.zh-CN.md](maintenance-status.zh-CN.md)。`v0.5.0` 仍是阶段性成熟里程碑；[maturity-audit.zh-CN.md](maturity-audit.zh-CN.md)、[operations.zh-CN.md](operations.zh-CN.md) 和相关边界文档继续作为证据和运维参考。
 
-v0.1 和 v0.2.0 已作为稳定内部里程碑关闭。`v0.1.x` feature-freeze，`v0.2.x` 只做 bugfix、文档、运维硬化和 IPFS/Web hosting 回归。新产品工作从 [v0.3-roadmap.zh-CN.md](v0.3-roadmap.zh-CN.md) 及后续计划开始。
+v0.1 和 v0.2.0 已作为稳定内部里程碑关闭。`v0.1.x` feature-freeze，`v0.2.x` 只做 bugfix、文档、运维硬化和 IPFS/Web hosting 回归。历史 roadmap 仍可作为上下文，但维稳闸门打开前不要启动新的产品周期。
 
 ## 下次优先级
 
-1. 不要从 Phase 0 重启。
-2. 先看 `v0.5.0` 后的最新工作区状态和 CI。
-3. 若继续重构，只做边界明确的窄 package-boundary extraction。
-4. 修改 API mutation 时，同 patch 更新 OpenAPI、审计和文档。
-5. 涉及 Web delivery、provider evidence、rollback、switching、DNS 或 storage provider 行为时，跑只读真实场景回归。
-6. 本地 gate 和只读 probe 通过后，才请求 mutating real-provider canary。
+1. 先读 [maintenance-status.zh-CN.md](maintenance-status.zh-CN.md)。
+2. 查看用户小范围测试反馈、当前工作区和最新 CI。
+3. 如果用户报告 bug，先复现，再做最小定向修复。
+4. 如果行为变化，同 patch 更新 OpenAPI、命令文档、README、中文文档和审计覆盖。
+5. 如果没有具体问题，只做文档、runbook、CI/安全维护和运维修正。
+6. 不要从 Phase 0 重启，也不要主动开启 UI、路由重设计、自动 CDN 切换或大范围 package-boundary work。
 
 ## 当前关键边界
 
