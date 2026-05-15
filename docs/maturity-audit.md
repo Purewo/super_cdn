@@ -24,7 +24,7 @@ Concrete success criteria:
 
 | Requirement | Current artifact | Verification |
 | --- | --- | --- |
-| Local release gate | `scripts/foundation-check.ps1` | Includes gofmt, PowerShell script syntax validation, actionlint, Go tests/vet/vuln/build, OpenAPI lint, Worker test/typecheck/audit and service healthz. Passed with `-SkipLinuxBuild` using temporary `GOPROXY=https://goproxy.cn,direct` after `proxy.golang.org` EOF. For this run, npm audit passed direct; routing npm audit through `127.0.0.1:10808` produced TLS socket disconnects. |
+| Local release gate | `scripts/foundation-check.ps1` | Includes gofmt, PowerShell script syntax validation, actionlint, Go tests/vet/vuln/build, optional Windows race, OpenAPI lint, Worker test/typecheck/audit and service healthz. Passed with `-SkipLinuxBuild -Race` on 2026-05-15 after temporarily prepending WinLibs GCC `E:\Tools\winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r1\mingw64\bin` to `PATH`, setting `CGO_ENABLED=1`, and routing network tool installs through `127.0.0.1:10808`. |
 | CI release gate | `.github/workflows/ci.yml`, `scripts/github-actions-status.ps1` | Defines Go format/test/race/vet/vuln/build, OpenAPI lint, Worker test/typecheck/audit. Workflow static lint is part of the local foundation gate, GitHub action majors are on Node 24-compatible versions, and the status script checks pushed branch/head SHA runs through the GitHub Actions API with optional job/step summaries, dirty-worktree protection and remote branch SHA verification. Recent pushed runs, including `25894299695`, were green for Go test, race, vet, vulnerability scan, build, API contract and Worker jobs; rerun the status script after every new push. |
 | Race coverage | `.github/workflows/ci.yml` | CI runs `go test -race ./...` on Ubuntu. Local Windows race remains environment-blocked: `go env` reports `CGO_ENABLED=0`, `CC=gcc`, and no `gcc`, `clang`, `zig` or `cc` command is currently available in PATH. |
 | API contract | `api/openapi.yaml` | Redocly lint passed locally through foundation check. |
@@ -63,11 +63,9 @@ These are intentional product boundaries, not hidden unfinished features:
 
 ## Remaining Gaps
 
-These are not solved yet and must not be described as mature:
-
-- Local Windows `go test -race ./...` is still unverified until a working C toolchain is installed; CI is the current race gate. Checked PATH on 2026-05-15 and found no `gcc`, `clang`, `zig` or `cc`.
+No explicit blocker is currently open in this checklist. Keep this section evidence-based: add new gaps here when a maturity claim depends on an unverified local, CI, API or live-provider boundary.
 
 ## Next Concrete Work
 
-1. If local Windows race coverage is needed, install a working C toolchain and rerun `.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race`; until then, Ubuntu CI is the race gate.
+1. Reuse the local race command when touching shared Go behavior: temporarily prepend `E:\Tools\winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r1\mingw64\bin` to `PATH`, set `CGO_ENABLED=1`, then run `.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race`.
 2. Continue the planned package-boundary cleanup only in narrow slices with foundation and live-canary evidence preserved.
