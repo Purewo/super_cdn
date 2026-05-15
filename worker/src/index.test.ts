@@ -654,6 +654,87 @@ describe("edge proxy", () => {
     expect(res.headers.get("X-SuperCDN-Route-Reason")).toBe("resource_failover");
   });
 
+  it("keeps mixed-provider failover isolated across multiple files", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === "https://alist.example/assets/app.js") {
+        return new Response("alist app down", { status: 502 });
+      }
+      if (url === "https://r2.example/assets/app.js") {
+        return new Response("console.log('r2')", {
+          status: 200,
+          headers: { "Content-Type": "application/octet-stream" },
+        });
+      }
+      if (url === "https://alist.example/assets/wall.png") {
+        return new Response("alist image down", { status: 503 });
+      }
+      if (url === "https://gateway.example/ipfs/bafywall") {
+        return new Response("image-bytes", {
+          status: 200,
+          headers: { "Content-Type": "application/octet-stream" },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const mixedManifest = manifest({
+      resource_failover: true,
+      routes: {
+        "/assets/app.js": {
+          type: "failover",
+          delivery: "failover",
+          file: "assets/app.js",
+          status: 200,
+          content_type: "text/javascript; charset=utf-8",
+          candidates: [
+            { target: "alist", type: "redirect", priority: 0, url: "https://alist.example/assets/app.js", status: "ready" },
+            { target: "r2", type: "redirect", priority: 1, url: "https://r2.example/assets/app.js", status: "ready" },
+          ],
+        },
+        "/assets/wall.png": {
+          type: "failover",
+          delivery: "failover",
+          file: "assets/wall.png",
+          status: 200,
+          content_type: "image/png",
+          object_cache_control: "public, max-age=31536000, immutable",
+          candidates: [
+            { target: "alist", type: "redirect", priority: 0, url: "https://alist.example/assets/wall.png", status: "ready" },
+            { target: "ipfs_pinata", type: "ipfs", priority: 1, url: "https://gateway.example/ipfs/bafywall", status: "ready" },
+          ],
+        },
+      },
+    });
+    const testEnv = env({
+      EDGE_MANIFEST_MODE: "route",
+      EDGE_ORIGIN_FALLBACK: "true",
+      EDGE_MANIFEST: new MemoryKV({
+        "sites/site.example.com/active/edge-manifest": JSON.stringify(mixedManifest),
+      }) as unknown as KVNamespace,
+    });
+
+    const app = await worker.fetch(new Request("https://site.example.com/assets/app.js"), testEnv, ctx());
+    const image = await worker.fetch(new Request("https://site.example.com/assets/wall.png"), testEnv, ctx());
+
+    expect(app.status).toBe(200);
+    expect(await app.text()).toBe("console.log('r2')");
+    expect(app.headers.get("Content-Type")).toBe("text/javascript; charset=utf-8");
+    expect(app.headers.get("X-SuperCDN-Edge-Source")).toBe("resource_failover");
+    expect(app.headers.get("X-SuperCDN-Route-Target")).toBe("r2");
+    expect(app.headers.get("X-SuperCDN-Route-Reason")).toBe("resource_failover");
+
+    expect(image.status).toBe(200);
+    expect(await image.text()).toBe("image-bytes");
+    expect(image.headers.get("Content-Type")).toBe("image/png");
+    expect(image.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
+    expect(image.headers.get("X-SuperCDN-Edge-Source")).toBe("resource_failover");
+    expect(image.headers.get("X-SuperCDN-Route-Target")).toBe("ipfs_pinata");
+    expect(image.headers.get("X-SuperCDN-Route-Reason")).toBe("resource_failover");
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
   it("returns an edge error for failover routes with no ready candidates", async () => {
     const fetchSpy = vi.fn(async () => new Response("origin should not be used", { status: 200 }));
     vi.stubGlobal("fetch", fetchSpy);

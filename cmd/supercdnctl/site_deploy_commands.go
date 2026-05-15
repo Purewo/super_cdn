@@ -523,6 +523,16 @@ type cloudflareStaticProviderWriteFailure struct {
 	NextCommands []string                        `json:"next_commands,omitempty"`
 }
 
+func entryOriginFallbackWarnings(enabled bool) []string {
+	if !enabled {
+		return nil
+	}
+	return []string{
+		"entry_origin_fallback is enabled: entry HTML/SPAs may temporarily fall back to the Go origin only when Cloudflare Static entry delivery fails.",
+		"This is not static-resource failover; manifest resources must still be served by Cloudflare Static, resource libraries or IPFS, and the homepage should be migrated back to Cloudflare entry delivery.",
+	}
+}
+
 func cloudflareVerifyFailureNextCommands(site, dir, target, profile string, domains []string, hybrid bool) []string {
 	parts := []string{
 		"supercdnctl deploy-site",
@@ -660,6 +670,10 @@ func deploySiteHybridEdgeRaw(c client, opts hybridEdgeDeploySiteOptions) ([]byte
 		RequireImmutableAssetCache:  false,
 	})
 	if err != nil {
+		warnings := append(entryOriginFallbackWarnings(opts.EntryOriginFallback),
+			"Super CDN deployment metadata, active Workers KV manifest or Worker/custom-domain state may already point at this deployment, but readiness verification timed out.",
+			"Rerun deploy-site after DNS/custom-domain propagation settles, or run the probe command below to verify the live domain before treating the deployment as healthy.",
+		)
 		raw, _ := json.Marshal(hybridEdgeDeployResponse{
 			Status:       "verify_failed_after_provider_write",
 			SiteID:       opts.Site,
@@ -670,15 +684,12 @@ func deploySiteHybridEdgeRaw(c client, opts hybridEdgeDeploySiteOptions) ([]byte
 			EdgeManifest: edgeManifest,
 			Worker:       publish,
 			Verify:       verify,
-			Warnings: []string{
-				"Super CDN deployment metadata, active Workers KV manifest or Worker/custom-domain state may already point at this deployment, but readiness verification timed out.",
-				"Rerun deploy-site after DNS/custom-domain propagation settles, or run the probe command below to verify the live domain before treating the deployment as healthy.",
-			},
+			Warnings:     warnings,
 			NextCommands: cloudflareVerifyFailureNextCommands(opts.Site, opts.Dir, "hybrid_edge", opts.RouteProfile, opts.Domains, true),
 		})
 		return raw, err
 	}
-	var warnings []string
+	warnings := entryOriginFallbackWarnings(opts.EntryOriginFallback)
 	if strings.EqualFold(strings.TrimSpace(verify.Status), "ok") {
 		recordedAt := time.Now().UTC().Format(time.RFC3339Nano)
 		evidenceReq := map[string]any{
@@ -708,6 +719,10 @@ func deploySiteHybridEdgeRaw(c client, opts hybridEdgeDeploySiteOptions) ([]byte
 		}
 		recordedRaw, err := c.recordHybridEdgeEvidence(opts.Site, dep.ID, evidenceReq)
 		if err != nil {
+			evidenceWarnings := append(entryOriginFallbackWarnings(opts.EntryOriginFallback),
+				"Hybrid edge provider write and readiness verification completed, but provider evidence could not be recorded in Super CDN metadata.",
+				"Do not treat rollback evidence as complete until the deployment response contains hybrid_edge Worker/KV/manifest evidence.",
+			)
 			raw, _ := json.Marshal(hybridEdgeDeployResponse{
 				Status:       "evidence_record_failed_after_provider_write",
 				SiteID:       opts.Site,
@@ -718,10 +733,7 @@ func deploySiteHybridEdgeRaw(c client, opts hybridEdgeDeploySiteOptions) ([]byte
 				EdgeManifest: edgeManifest,
 				Worker:       publish,
 				Verify:       verify,
-				Warnings: []string{
-					"Hybrid edge provider write and readiness verification completed, but provider evidence could not be recorded in Super CDN metadata.",
-					"Do not treat rollback evidence as complete until the deployment response contains hybrid_edge Worker/KV/manifest evidence.",
-				},
+				Warnings:     evidenceWarnings,
 				NextCommands: []string{
 					"supercdnctl deployment -site " + cliHintArg(opts.Site) + " -deployment " + cliHintArg(dep.ID),
 					"supercdnctl reconcile-deployment -site " + cliHintArg(opts.Site) + " -deployment " + cliHintArg(dep.ID),

@@ -2019,6 +2019,19 @@ func TestWriteHybridEdgeWranglerConfig(t *testing.T) {
 	}
 }
 
+func TestEntryOriginFallbackWarningsAreExplicit(t *testing.T) {
+	if got := entryOriginFallbackWarnings(false); len(got) != 0 {
+		t.Fatalf("disabled warnings = %#v", got)
+	}
+	warnings := entryOriginFallbackWarnings(true)
+	joined := strings.Join(warnings, "\n")
+	for _, want := range []string{"entry HTML/SPAs", "Go origin", "not static-resource failover", "homepage"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("warnings missing %q: %#v", want, warnings)
+		}
+	}
+}
+
 func TestEdgeManifestCandidateReadinessAcceptsSmartRoutes(t *testing.T) {
 	report, err := edgeManifestCandidateReadiness([]byte(`{
 		"site_id":"demo",
