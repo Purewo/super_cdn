@@ -56,6 +56,15 @@ CI runs the Go race suite on Linux. If the local environment has a working C too
 .\scripts\foundation-check.ps1 -SkipLinuxBuild -Race
 ```
 
+On this Windows machine, prepend the portable WinLibs GCC toolchain and enable cgo before running the race gate:
+
+```powershell
+$gcc = "E:\Tools\winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r1\mingw64\bin"
+$env:Path = "$gcc;$env:Path"
+$env:CGO_ENABLED = "1"
+.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race
+```
+
 If `go test -race` cannot run because the Windows host lacks a working C toolchain, record it as unverified instead of passed.
 
 ## Release Steps
