@@ -58,10 +58,10 @@ These are not solved yet and must not be described as mature:
 
 - Local Windows `go test -race ./...` is still unverified until a working C toolchain is installed; CI is the current race gate. Checked PATH on 2026-05-15 and found no `gcc`, `clang`, `zig` or `cc`.
 - Full Cloudflare Static / hybrid-edge rollback is still not implemented as a write operation. Current behavior is read-only `rollback-plan` plus redeploy guidance; the future write-command boundary is recorded in `docs/cloudflare-rollback-boundary.md`.
-- Cloudflare provider writes are not fully transactional with Super CDN metadata. A custom-domain propagation delay can make `deploy-site` verification time out after the Worker/domain write has already succeeded; `reconcile-deployment` can now inspect recorded Super CDN metadata against the live Cloudflare Static / hybrid-edge URL after a timeout, but a future writeback/recovery flow is still needed for cases where provider writes succeeded before Super CDN recorded a deployment.
+- Cloudflare provider writes are not fully transactional with Super CDN metadata. A custom-domain propagation delay can make `deploy-site` verification time out after the Worker/domain write has already succeeded; `reconcile-deployment` can now inspect recorded Super CDN metadata against the live Cloudflare Static / hybrid-edge URL after a timeout, and the future writeback/recovery boundary is recorded in `docs/cloudflare-writeback-recovery-boundary.md`, but the actual recovery write command is not implemented yet.
 
 ## Next Concrete Work
 
 1. Use `docs/cloudflare-rollback-boundary.md` before designing any Cloudflare/hybrid rollback write command; do not add a write path until Worker, KV, domain and live-probe requirements are met.
-2. Design the writeback/recovery boundary after reconciling provider state, especially for Cloudflare Static writes that succeeded before Super CDN metadata was recorded.
+2. Implement the Cloudflare Static recovery write path from `docs/cloudflare-writeback-recovery-boundary.md`, starting with dry-run evidence validation and audit behavior before any activation support.
 3. If local Windows race coverage is needed, install a working C toolchain and rerun `.\scripts\foundation-check.ps1 -SkipLinuxBuild -Race`; until then, Ubuntu CI is the race gate.
