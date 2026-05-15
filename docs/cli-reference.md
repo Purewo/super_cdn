@@ -73,6 +73,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `refresh-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 刷新 active edge manifest 并默认执行 hybrid 探测 |
 | `rollback-plan` | `GET /api/v1/sites/{id}/deployments/{deployment}` | 只读生成 deployment 回滚方式，区分 metadata promote 与 Cloudflare 重新发布 |
 | `reconcile-deployment` | `GET /api/v1/sites/{id}/deployments/{deployment}` + HTTP probe | Read-only reconcile of Super CDN deployment metadata against real Cloudflare Static / hybrid-edge provider state after a readiness timeout |
+| `recover-cloudflare-static` | Local directory summary + HTTP probe | Dry-run evidence validator for unrecorded Cloudflare Static provider writes after readiness timeouts |
 | `publish-cloudflare-static` | 本地 Wrangler 调用 | 发布本地目录到 Cloudflare Workers Static Assets |
 | `promote-deployment` | `POST /api/v1/sites/{id}/deployments/{deployment}/promote` | 将部署提升为当前生产版本 |
 | `delete-deployment` | `DELETE /api/v1/sites/{id}/deployments/{deployment}` | 删除未激活且未 pinned 的部署 |
@@ -610,6 +611,32 @@ Parameters:
 | `-timeout` | No | `30s` | Overall probe timeout |
 | `-resolver` | No | system DNS | Optional DNS resolver for probes |
 | `-redact-urls` | No | `true` | Redact signed query values in the probe report |
+
+#### recover-cloudflare-static
+
+Dry-run evidence validator for Cloudflare Static writes that may have succeeded at Cloudflare but were not recorded as Super CDN deployments because readiness verification timed out. It summarizes the source directory, requires provider evidence such as Worker name and version id, runs a strict live probe, and reports whether the evidence is ready for a future recovery write. It does not write Super CDN metadata or Cloudflare state; `-dry-run=false` is intentionally rejected until the recovery write endpoint and audit boundary exist.
+
+```powershell
+.\bin\supercdnctl.exe recover-cloudflare-static -site blog -dir .\dist -domains blog.example.com -worker-name supercdn-blog-static -version-id ver_xxx
+.\bin\supercdnctl.exe recover-cloudflare-static -site blog -dir .\dist -url https://blog.example.com/ -worker-name supercdn-blog-static -version-id ver_xxx -static-cache-policy none
+```
+
+Parameters:
+| Parameter | Required | Default | Description |
+| --- | --- | --- | --- |
+| `-site` | Yes | Empty | Site ID |
+| `-dir` | Yes | Empty | Source dist directory |
+| `-worker-name` | No | `supercdn-{site}-static` | Worker name from the provider write |
+| `-version-id` | Yes | Empty | Worker version id from the provider write, when available |
+| `-domains` | No | Empty | Custom domains from the provider write |
+| `-url` | No | first domain | Explicit public URL to probe |
+| `-static-cache-policy` | No | `auto` | Header/cache policy used by the provider write |
+| `-static-spa` | No | `false` | Verify SPA fallback behavior |
+| `-spa-path` | No | Empty | Optional SPA route to verify as HTML |
+| `-max-assets` | No | `20` | Maximum JS/CSS assets to probe |
+| `-timeout` | No | `30s` | Overall probe timeout |
+| `-resolver` | No | system DNS | Optional DNS resolver for probes |
+| `-dry-run` | No | `true` | Validate only; real writes are not implemented yet |
 
 #### export-edge-manifest
 

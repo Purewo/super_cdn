@@ -116,6 +116,8 @@ func main() {
 		err = rollbackPlan(c, args[1:])
 	case "reconcile-deployment":
 		err = reconcileDeployment(c, args[1:])
+	case "recover-cloudflare-static":
+		err = recoverCloudflareStatic(c, args[1:])
 	case "publish-cloudflare-static":
 		err = publishCloudflareStatic(args[1:])
 	case "promote-deployment":
@@ -196,7 +198,7 @@ func main() {
 
 func commandNeedsToken(command string) bool {
 	switch command {
-	case "inspect-site", "probe-site", "set-r2-credentials", "publish-cloudflare-static", "login", "logout":
+	case "inspect-site", "probe-site", "set-r2-credentials", "publish-cloudflare-static", "recover-cloudflare-static", "login", "logout":
 		return false
 	default:
 		return true
@@ -246,6 +248,7 @@ func usage() {
   supercdnctl [global flags] refresh-edge-manifest -site blog -kv-namespace supercdn-edge-manifest -spa-path /movie/123
   supercdnctl [global flags] rollback-plan -site blog -deployment dpl-abc
   supercdnctl [global flags] reconcile-deployment -site blog -deployment dpl-abc
+  supercdnctl recover-cloudflare-static -site blog -dir ./dist -domains blog.example.com -worker-name supercdn-blog-static -version-id ver_xxx
   supercdnctl publish-cloudflare-static -site blog -dir ./dist -domains blog-static-test.example.com -dry-run=false
   supercdnctl [global flags] promote-deployment -site blog -deployment dpl-abc
   supercdnctl [global flags] delete-deployment -site blog -deployment dpl-abc -dry-run

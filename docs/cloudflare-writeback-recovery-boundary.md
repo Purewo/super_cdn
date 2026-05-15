@@ -18,7 +18,8 @@ Current supported recovery behavior:
 
 - `hybrid_edge` readiness timeouts after deployment creation can be inspected with `reconcile-deployment` because a Super CDN deployment id already exists.
 - `refresh-edge-manifest` can republish the active hybrid edge manifest when signatures or manifest contents need repair.
-- `cloudflare_static` readiness timeouts before metadata recording still require rerunning `deploy-site` or a future recovery command. A provider write alone is not enough evidence to create or activate Super CDN metadata.
+- `recover-cloudflare-static` can dry-run validate the evidence for unrecorded `cloudflare_static` provider writes: source summary, Worker/version/domain evidence and strict live probe. It intentionally refuses real writes until the server-side recovery endpoint and audit behavior exist.
+- `cloudflare_static` readiness timeouts before metadata recording still require rerunning `deploy-site` or a future recovery write. A provider write alone is not enough evidence to create or activate Super CDN metadata.
 
 ## Failure Shapes
 
