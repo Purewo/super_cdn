@@ -26,7 +26,7 @@ Validated on 2026-05-15 Asia/Shanghai with real custom domains:
 The live run also exposed two operator risks:
 
 - Cloudflare custom-domain propagation can outlast the CLI readiness timeout even when the provider write later succeeds.
-- `repo_china_mobile` AList upload visibility failed for a new hybrid deployment path and correctly blocked active deployment.
+- `repo_china_mobile` AList upload visibility failed for new hybrid deployment paths and correctly blocked activation. This specific visibility issue was later reproduced, fixed by refreshing the AList/OpenList parent directory before post-upload stat retry, deployed from commit `c2243727223d9ce9bf20a4692ff25797ec2c021e`, and revalidated by mobile hybrid canary `dpl-diit34iw5d3t`.
 
 ## Why A Metadata Rollback Is Unsafe
 
