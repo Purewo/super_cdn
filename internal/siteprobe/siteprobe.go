@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"supercdn/internal/edgeheaders"
+	"supercdn/internal/urlredact"
 )
 
 const (
@@ -608,40 +609,7 @@ func storageSignatureFailureLikely(steps []ResponseStep) bool {
 }
 
 func signedURLLike(raw string) bool {
-	if strings.TrimSpace(raw) == "" {
-		return false
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	for key := range parsed.Query() {
-		if signedQueryParam(key) {
-			return true
-		}
-	}
-	return false
-}
-
-func signedQueryParam(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "sign",
-		"signature",
-		"expires",
-		"policy",
-		"key-pair-id",
-		"awsaccesskeyid",
-		"x-amz-algorithm",
-		"x-amz-credential",
-		"x-amz-date",
-		"x-amz-expires",
-		"x-amz-security-token",
-		"x-amz-signature",
-		"x-amz-signedheaders":
-		return true
-	default:
-		return false
-	}
+	return urlredact.LooksSigned(raw)
 }
 
 func isRedirect(status int) bool {

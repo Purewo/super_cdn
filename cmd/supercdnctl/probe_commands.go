@@ -13,6 +13,7 @@ import (
 
 	"supercdn/internal/siteinspect"
 	"supercdn/internal/siteprobe"
+	"supercdn/internal/urlredact"
 )
 
 func inspectSite(args []string) error {
@@ -243,51 +244,5 @@ func redactSignedProbeReport(report siteprobe.Report) siteprobe.Report {
 }
 
 func redactSignedURL(raw string) string {
-	if strings.TrimSpace(raw) == "" {
-		return raw
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.RawQuery == "" {
-		return raw
-	}
-	query := parsed.Query()
-	hasSignature := false
-	for key := range query {
-		if signedQueryParam(key) {
-			hasSignature = true
-			break
-		}
-	}
-	if !hasSignature {
-		return raw
-	}
-	for key, values := range query {
-		for i := range values {
-			values[i] = "<redacted>"
-		}
-		query[key] = values
-	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
-}
-
-func signedQueryParam(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "sign",
-		"signature",
-		"expires",
-		"policy",
-		"key-pair-id",
-		"awsaccesskeyid",
-		"x-amz-algorithm",
-		"x-amz-credential",
-		"x-amz-date",
-		"x-amz-expires",
-		"x-amz-security-token",
-		"x-amz-signature",
-		"x-amz-signedheaders":
-		return true
-	default:
-		return false
-	}
+	return urlredact.RedactSignedQueryValues(raw)
 }
