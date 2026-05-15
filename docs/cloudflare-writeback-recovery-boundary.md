@@ -22,6 +22,7 @@ Current supported recovery behavior:
 - `activate-cloudflare-static` can activate a recovered `cloudflare_static` deployment only after loading recorded deployment evidence, matching it against the local source summary, running a strict live probe, and calling a dedicated audited endpoint with `-dry-run=false -confirm activate`.
 - `cloudflare_static` readiness timeouts before metadata recording no longer require losing all metadata evidence, but a provider write alone is still not enough to activate Super CDN metadata; activation requires the dedicated verified path above.
 - Live recovery canary `supercdn-recovery-0515-090858.qwk.ccwu.cc` proved this boundary on 2026-05-15: `publish-cloudflare-static` wrote Worker version `89fe1670-c92a-4896-bf22-d198dc2f6fa7` without Super CDN metadata, `recover-cloudflare-static` dry-run verified strict provider evidence, the confirmed write recorded inactive deployment `dpl-diiuko109n5o`, audit logged `site.deployment.cloudflare_static.recovery`, and `reconcile-deployment` returned `status=ok` / `settled=true`.
+- The same live canary then proved provider-aware activation: commit `bc08ede` was deployed to production, `activate-cloudflare-static` dry-run verified the recorded source/provider evidence and live Cloudflare Static traffic, `-dry-run=false -confirm activate` made `dpl-diiuko109n5o` active, audit logged `site.deployment.cloudflare_static.activate`, and `reconcile-deployment` still returned `status=ok` / `settled=true`.
 
 ## Failure Shapes
 
@@ -96,4 +97,4 @@ Before extending this into Cloudflare rollback writes or hybrid writeback, keep 
 - unit test: activation is rejected without explicit confirmation or when source/provider evidence does not match;
 - unit test: successful activation uses a dedicated endpoint and writes a distinct audit action;
 - integration test: failed strict probe prints a recovery report and writes nothing;
-- live canary: simulate an unrecorded Cloudflare Static provider write, recover after propagation, then run `reconcile-deployment` and `probe-site` against the recovered deployment. This is currently covered by `supercdn-recovery-0515-090858` / `dpl-diiuko109n5o`.
+- live canary: simulate an unrecorded Cloudflare Static provider write, recover after propagation, activate only after strict evidence validation, then run `reconcile-deployment` and `probe-site` against the activated deployment. This is currently covered by `supercdn-recovery-0515-090858` / `dpl-diiuko109n5o`.
