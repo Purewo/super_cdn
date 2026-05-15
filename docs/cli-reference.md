@@ -75,6 +75,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `rollback-apply` | `GET /api/v1/sites/{id}/deployments/{deployment}` + provider deploy flow | Dry-run by default; applies origin metadata rollback, Cloudflare Static rollback or hybrid_edge rollback after source/evidence checks and `-confirm rollback` |
 | `reconcile-deployment` | `GET /api/v1/sites/{id}/deployments/{deployment}` + HTTP probe | Read-only reconcile of Super CDN deployment metadata against real Cloudflare Static / hybrid-edge provider state after a readiness timeout |
 | `recover-cloudflare-static` | Local directory summary + HTTP probe | Dry-run evidence validator for unrecorded Cloudflare Static provider writes after readiness timeouts |
+| `recover-hybrid-edge` | `POST /api/v1/sites/{id}/deployments/{deployment}/hybrid-edge/evidence` | Dry-run evidence validator and confirmed writeback for hybrid_edge deployments whose provider write passed later but evidence was not recorded |
 | `activate-cloudflare-static` | `POST /api/v1/sites/{id}/deployments/{deployment}/cloudflare-static/activate` | Provider-aware activation for a recovered Cloudflare Static deployment after source/probe/evidence checks |
 | `publish-cloudflare-static` | 本地 Wrangler 调用 | 发布本地目录到 Cloudflare Workers Static Assets |
 | `promote-deployment` | `POST /api/v1/sites/{id}/deployments/{deployment}/promote` | 将部署提升为当前生产版本 |
@@ -642,6 +643,17 @@ Parameters:
 | `-resolver` | No | system DNS | Optional DNS resolver for probes |
 | `-dry-run` | No | `true` | Validate only unless `false` with `-confirm recover` |
 | `-confirm` | For writes | Empty | Must be `recover` when `-dry-run=false` |
+
+#### recover-hybrid-edge
+
+Evidence validator and writeback recorder for `hybrid_edge` deployments where the Super CDN deployment exists and the provider write may have succeeded, but readiness verification or evidence recording did not finish. It loads the target deployment, summarizes the source directory, computes edge-manifest evidence through a dry-run KV publish, runs a strict live probe requiring Cloudflare Static HTML plus manifest-routed JS/CSS, and defaults to dry-run. With `-dry-run=false -confirm recover`, it records `hybrid_edge` Worker/KV/manifest evidence into that deployment and writes `site.deployment.hybrid_edge.writeback`.
+
+```powershell
+.\bin\supercdnctl.exe recover-hybrid-edge -site blog -deployment dpl-timeout -dir .\dist -domains blog.example.com
+.\bin\supercdnctl.exe recover-hybrid-edge -site blog -deployment dpl-timeout -dir .\dist -domains blog.example.com -url https://blog.example.com/ -edge-kv-namespace-id kv_xxx -dry-run=false -confirm recover
+```
+
+Use this only when a Super CDN deployment id already exists. If Cloudflare state exists without a Super CDN deployment id, use `recover-cloudflare-static` for `cloudflare_static`; hybrid writeback needs the deployment manifest to recompute and verify deployment/active KV manifest evidence.
 
 #### activate-cloudflare-static
 

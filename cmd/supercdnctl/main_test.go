@@ -488,6 +488,201 @@ func TestRecoverCloudflareStaticWriteCallsRecoveryAPI(t *testing.T) {
 	}
 }
 
+func TestRecoverHybridEdgeDryRunVerifiesEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), `<script src="/app.js"></script>`)
+	writeTestFile(t, filepath.Join(dir, "app.js"), `console.log("ok")`)
+
+	siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			w.Header().Set("X-SuperCDN-Edge-Source", "ipfs_gateway")
+			w.Header().Set("X-SuperCDN-Edge-Manifest", "route")
+			w.Header().Set("X-SuperCDN-Edge-Action", "route")
+			_, _ = w.Write([]byte(`console.log("ok")`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer siteSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sites/demo/deployments/dpl-hybrid":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":                "dpl-hybrid",
+				"site_id":           "demo",
+				"status":            "active",
+				"environment":       "production",
+				"route_profile":     "ipfs_archive",
+				"deployment_target": "hybrid_edge",
+				"active":            true,
+				"site_domains":      []string{"demo.example.com"},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sites/demo/deployments/dpl-hybrid/edge-manifest/publish":
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req["dry_run"] != true {
+				t.Fatalf("publish request = %#v", req)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"site_id":           "demo",
+				"deployment_id":     "dpl-hybrid",
+				"active":            true,
+				"kv_namespace_id":   "kv-123",
+				"kv_namespace":      "supercdn-edge-manifest",
+				"key_prefix":        "sites/",
+				"dry_run":           true,
+				"status":            "planned",
+				"manifest_size":     512,
+				"manifest_sha256":   "manifest-sha",
+				"manifest_warnings": []string{},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer apiSrv.Close()
+
+	var recoverErr error
+	out := captureStdout(t, func() {
+		recoverErr = recoverHybridEdge(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{
+			"-site", "demo",
+			"-deployment", "dpl-hybrid",
+			"-dir", dir,
+			"-domains", "demo.example.com",
+			"-url", siteSrv.URL + "/",
+			"-static-cache-policy", "none",
+			"-edge-kv-namespace-id", "kv-123",
+			"-timeout", "2s",
+		})
+	})
+	if recoverErr != nil {
+		t.Fatal(recoverErr)
+	}
+	var report hybridEdgeRecoveryReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "verified" || !report.WriteReady || !report.WriteSupported {
+		t.Fatalf("unexpected recovery report: %+v", report)
+	}
+	if report.Source.FileCount != 2 || report.Provider.ManifestSHA256 != "manifest-sha" || report.Provider.KVNamespaceID != "kv-123" {
+		t.Fatalf("evidence = source:%+v provider:%+v", report.Source, report.Provider)
+	}
+	if report.Probe == nil || !report.Probe.OK {
+		t.Fatalf("probe = %+v", report.Probe)
+	}
+	if !strings.Contains(strings.Join(report.NextCommands, "\n"), "recover-hybrid-edge") {
+		t.Fatalf("next commands = %+v", report.NextCommands)
+	}
+}
+
+func TestRecoverHybridEdgeWriteCallsEvidenceAPI(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "index.html"), `<script src="/app.js"></script>`)
+	writeTestFile(t, filepath.Join(dir, "app.js"), `console.log("ok")`)
+
+	siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			w.Header().Set("X-SuperCDN-Edge-Source", "ipfs_gateway")
+			w.Header().Set("X-SuperCDN-Edge-Manifest", "route")
+			w.Header().Set("X-SuperCDN-Edge-Action", "route")
+			_, _ = w.Write([]byte(`console.log("ok")`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer siteSrv.Close()
+
+	var evidenceReq map[string]any
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sites/demo/deployments/dpl-hybrid":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":                "dpl-hybrid",
+				"site_id":           "demo",
+				"status":            "active",
+				"environment":       "production",
+				"route_profile":     "ipfs_archive",
+				"deployment_target": "hybrid_edge",
+				"active":            true,
+				"site_domains":      []string{"demo.example.com"},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sites/demo/deployments/dpl-hybrid/edge-manifest/publish":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"site_id":         "demo",
+				"deployment_id":   "dpl-hybrid",
+				"active":          true,
+				"kv_namespace_id": "kv-123",
+				"kv_namespace":    "supercdn-edge-manifest",
+				"key_prefix":      "sites/",
+				"dry_run":         true,
+				"status":          "planned",
+				"manifest_size":   512,
+				"manifest_sha256": "manifest-sha",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sites/demo/deployments/dpl-hybrid/hybrid-edge/evidence":
+			if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+				t.Fatalf("Authorization = %q", auth)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&evidenceReq); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"id":"dpl-hybrid","site_id":"demo","status":"active","deployment_target":"hybrid_edge","hybrid_edge":{"worker_name":"supercdn-demo-edge","manifest_sha256":"manifest-sha"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer apiSrv.Close()
+
+	var recoverErr error
+	out := captureStdout(t, func() {
+		recoverErr = recoverHybridEdge(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{
+			"-site", "demo",
+			"-deployment", "dpl-hybrid",
+			"-dir", dir,
+			"-worker-name", "supercdn-demo-edge",
+			"-domains", "demo.example.com",
+			"-url", siteSrv.URL + "/",
+			"-static-cache-policy", "none",
+			"-edge-kv-namespace-id", "kv-123",
+			"-dry-run=false",
+			"-confirm", "recover",
+			"-timeout", "2s",
+		})
+	})
+	if recoverErr != nil {
+		t.Fatal(recoverErr)
+	}
+	if evidenceReq["operation"] != "writeback" || evidenceReq["worker_name"] != "supercdn-demo-edge" || evidenceReq["manifest_sha256"] != "manifest-sha" {
+		t.Fatalf("unexpected evidence request: %#v", evidenceReq)
+	}
+	if evidenceReq["assets_sha256"] == "" || evidenceReq["active_key"] != true || evidenceReq["deployment_key"] != true {
+		t.Fatalf("missing evidence request fields: %#v", evidenceReq)
+	}
+	var report hybridEdgeRecoveryReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "recorded" || !strings.Contains(string(report.Deployment), "dpl-hybrid") {
+		t.Fatalf("unexpected recovery report: %+v", report)
+	}
+}
+
 func TestActivateCloudflareStaticDryRunVerifiesEvidence(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "index.html"), `<script src="/app.js"></script>`)

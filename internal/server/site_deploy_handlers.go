@@ -252,7 +252,8 @@ func (s *Server) handleRecordHybridEdgeEvidence(w http.ResponseWriter, r *http.R
 	}
 	resp, err := s.recordHybridEdgeEvidence(r.Context(), siteID, deploymentID, req)
 	if err != nil {
-		s.auditRejectedMutation(r, "site.deployment.hybrid_edge.evidence.rejected", "site:"+siteID+";deployment:"+deploymentID+";reason:"+auditReason(err))
+		action, resource := hybridEdgeEvidenceRejectedAudit(siteID, deploymentID, req, err)
+		s.auditRejectedMutation(r, action, resource)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1071,6 +1072,8 @@ func (s *Server) validateHybridEdgeEvidenceOperation(ctx context.Context, siteID
 	switch operation {
 	case "", "deploy":
 		return "", "", nil
+	case "writeback":
+		return operation, "", nil
 	case "rollback_apply":
 		target := cleanDeploymentID(req.RollbackTarget)
 		if target == "" {
@@ -1088,7 +1091,7 @@ func (s *Server) validateHybridEdgeEvidenceOperation(ctx context.Context, siteID
 		}
 		return operation, target, nil
 	default:
-		return "", "", fmt.Errorf("operation must be deploy or rollback_apply")
+		return "", "", fmt.Errorf("operation must be deploy, writeback or rollback_apply")
 	}
 }
 
@@ -1127,11 +1130,21 @@ func cloudflareStaticRecordAudit(siteID, deploymentID string, req recordCloudfla
 }
 
 func hybridEdgeEvidenceAudit(siteID, deploymentID string, req recordHybridEdgeEvidenceRequest) (string, string) {
+	if strings.TrimSpace(req.Operation) == "writeback" {
+		return "site.deployment.hybrid_edge.writeback", "site:" + siteID + ";deployment:" + deploymentID
+	}
 	if strings.TrimSpace(req.Operation) == "rollback_apply" {
 		target := cleanDeploymentID(req.RollbackTarget)
 		return "site.deployment.hybrid_edge.rollback", "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
 	}
 	return "site.deployment.hybrid_edge.evidence", "site:" + siteID + ";deployment:" + deploymentID
+}
+
+func hybridEdgeEvidenceRejectedAudit(siteID, deploymentID string, req recordHybridEdgeEvidenceRequest, err error) (string, string) {
+	if strings.TrimSpace(req.Operation) == "writeback" {
+		return "site.deployment.hybrid_edge.writeback.rejected", "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + auditReason(err)
+	}
+	return "site.deployment.hybrid_edge.evidence.rejected", "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + auditReason(err)
 }
 
 func auditReason(err error) string {

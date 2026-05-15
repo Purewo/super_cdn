@@ -18,6 +18,7 @@ Current supported recovery behavior:
 
 - `hybrid_edge` readiness timeouts after deployment creation can be inspected with `reconcile-deployment` because a Super CDN deployment id already exists.
 - Successful `deploy-site -target hybrid_edge` runs now record Worker/domain/Workers KV/edge-manifest evidence back into the deployment after strict provider verification through `POST /api/v1/sites/{id}/deployments/{deployment}/hybrid-edge/evidence`, with audit action `site.deployment.hybrid_edge.evidence`. This is normal deploy evidence capture, not a generic writeback command for unknown or partially failed provider writes.
+- `recover-hybrid-edge` can validate and write back evidence for an existing `hybrid_edge` deployment after provider readiness catches up: source summary, dry-run edge-manifest evidence, Worker/domain/KV fields and a strict live probe. With `-dry-run=false -confirm recover`, it records evidence on the existing deployment and audits `site.deployment.hybrid_edge.writeback`.
 - `refresh-edge-manifest` can republish the active hybrid edge manifest when signatures or manifest contents need repair.
 - `recover-cloudflare-static` can validate the evidence for unrecorded `cloudflare_static` provider writes: source summary, Worker/version/domain evidence and strict live probe. With `-dry-run=false -confirm recover`, it records a non-active Super CDN deployment through a recovery-specific server endpoint and audit action.
 - `activate-cloudflare-static` can activate a recovered `cloudflare_static` deployment only after loading recorded deployment evidence, matching it against the local source summary, running a strict live probe, and calling a dedicated audited endpoint with `-dry-run=false -confirm activate`.
@@ -41,6 +42,7 @@ If verification times out after those writes, the failure output includes a depl
 
 If the report is `settled=true`, the operator can treat the deployment as provider-verified; on successful deployments the metadata should also expose a `hybrid_edge` evidence block with Worker/KV/manifest fields. If it is not settled, the safe repair actions are still explicit:
 
+- `recover-hybrid-edge` when the live domain is now strict-probe clean but the deployment is missing `hybrid_edge` evidence;
 - `refresh-edge-manifest` when asset signatures or active manifest contents are stale;
 - rerun `deploy-site -target hybrid_edge` with the intended artifact when Worker/domain state is wrong;
 - do not use metadata-only `promote-deployment`, which is intentionally blocked.
@@ -58,7 +60,7 @@ The recovery command must not infer a deployment from Wrangler success alone. It
 - successful strict probe evidence for the live custom domain;
 - explicit operator confirmation.
 
-## Required Future Write Command Behavior
+## Required Write Command Behavior
 
 The `cloudflare_static` recovery/writeback command is ordered as:
 
@@ -74,11 +76,24 @@ The `cloudflare_static` recovery/writeback command is ordered as:
 
 The command should default to dry-run. A real write must require a confirmation token such as `-dry-run=false -confirm recover`.
 
+The `hybrid_edge` writeback command is ordered as:
+
+1. Load the existing site deployment by id and require `deployment_target=hybrid_edge`.
+2. Summarize the source directory using the same Cloudflare Static asset summary as `deploy-site`.
+3. Recompute edge manifest evidence with a dry-run `publish-edge-manifest`, including KV namespace id/title, manifest hash/size, deployment key and active key intent.
+4. Require or infer Worker name and custom domains from the deployment/site evidence.
+5. Probe the real custom domain with `probe-site`-equivalent strict checks: Cloudflare Static HTML evidence and manifest-routed JS/CSS first hops.
+6. If strict probe fails, emit a recovery report and do not write metadata.
+7. If strict probe passes and the operator confirms, record `hybrid_edge` evidence on the existing deployment through the hybrid evidence endpoint.
+8. Audit the writeback separately from normal deploys as `site.deployment.hybrid_edge.writeback`.
+9. Emit `probe-site` and repeatable `recover-hybrid-edge -dry-run=false -confirm recover` next commands.
+
 ## Required Server Boundary
 
 The recovery-specific endpoint must keep these properties:
 
 - audit action distinct from normal deploy, for example `site.deployment.cloudflare_static.recovery`;
+- hybrid evidence writeback audit action distinct from normal deploy, for example `site.deployment.hybrid_edge.writeback`;
 - idempotency key based on site id, Worker name, version id, assets hash and domains;
 - no secret fields accepted or stored;
 - rejected writes are audited when evidence is incomplete, probe evidence is missing, or activation would be metadata-only;
@@ -93,11 +108,13 @@ The recovery-specific endpoint must keep these properties:
 
 ## Test And Canary Requirements
 
-Before extending this into Cloudflare rollback writes or hybrid writeback, keep these cases covered:
+Keep these cases covered when changing Cloudflare-backed recovery or writeback:
 
 - unit test: dry-run refuses missing source dir, Worker name, domain or strict probe evidence;
 - unit test: successful recovery writes a deployment record with Cloudflare evidence and a distinct audit action;
+- unit test: successful hybrid writeback records evidence on the existing deployment and writes a distinct audit action;
 - unit test: activation is rejected without explicit confirmation or when source/provider evidence does not match;
 - unit test: successful activation uses a dedicated endpoint and writes a distinct audit action;
 - integration test: failed strict probe prints a recovery report and writes nothing;
 - live canary: simulate an unrecorded Cloudflare Static provider write, recover after propagation, activate only after strict evidence validation, then run `reconcile-deployment` and `probe-site` against the activated deployment. This is currently covered by `supercdn-recovery-0515-090858` / `dpl-diiuko109n5o`.
+- live canary: simulate a hybrid readiness timeout with an existing deployment id, wait until the live domain passes strict hybrid checks, run `recover-hybrid-edge` dry-run and confirmed writeback, then verify `deployment`, `reconcile-deployment` and `audit-log`.

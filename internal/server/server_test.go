@@ -1238,6 +1238,49 @@ func TestRecordHybridEdgeEvidenceAuditsRollbackApply(t *testing.T) {
 	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.hybrid_edge.rollback", "site:demo;deployment:"+rollbackID+";target:"+targetID)
 }
 
+func TestRecordHybridEdgeEvidenceAuditsWriteback(t *testing.T) {
+	app := newTestServer(t)
+	create := apiJSON(t, app, http.MethodPost, "/api/v1/sites", "test-token", map[string]any{
+		"id":                "demo",
+		"route_profile":     "overseas",
+		"deployment_target": "hybrid_edge",
+		"mode":              "standard",
+	})
+	if create.Code != http.StatusOK {
+		t.Fatalf("create site status = %d body=%s", create.Code, create.Body.String())
+	}
+	deploymentID := createDeployment(t, app, "demo", map[string]string{
+		"index.html": "hybrid",
+	}, map[string]string{"environment": "production", "promote": "true", "deployment_target": "hybrid_edge"})
+
+	rec := apiJSON(t, app, http.MethodPost, "/api/v1/sites/demo/deployments/"+deploymentID+"/hybrid-edge/evidence", "test-token", map[string]any{
+		"worker_name":           "supercdn-demo-edge",
+		"domains":               []string{"demo.example.com"},
+		"compatibility_date":    "2026-05-15",
+		"assets_sha256":         "assets-sha",
+		"verification_status":   "ok",
+		"verified_at_utc":       "2026-05-15T00:00:01Z",
+		"published_at_utc":      "2026-05-15T00:00:00Z",
+		"kv_namespace_id":       "kv-123",
+		"manifest_sha256":       "manifest-sha",
+		"manifest_size":         128,
+		"manifest_mode":         "route",
+		"default_cache_control": "public, max-age=300",
+		"operation":             "writeback",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("record writeback hybrid evidence status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	dep, err := app.db.GetSiteDeployment(context.Background(), deploymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(dep.ManifestJSON, `"operation": "writeback"`) {
+		t.Fatalf("writeback manifest missing operation: %s", dep.ManifestJSON)
+	}
+	assertAuditEvent(t, auditEventsForTest(t, app), "site.deployment.hybrid_edge.writeback", "site:demo;deployment:"+deploymentID)
+}
+
 func TestIPFSStatusChecksPinataProvider(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v3/files/public" {

@@ -1054,7 +1054,7 @@ paths:
       tags: [Deployments]
       operationId: recordHybridEdgeEvidence
       summary: Record hybrid edge provider evidence for a deployment
-      description: Persists Worker, domain, Workers KV and edge-manifest evidence after a hybrid_edge deployment has completed provider writes and strict live verification. rollback_apply requests are audited against the target deployment; generic metadata-only promote remains blocked for hybrid_edge rollback.
+      description: Persists Worker, domain, Workers KV and edge-manifest evidence after a hybrid_edge deployment has completed provider writes and strict live verification. writeback requests record verified post-timeout evidence on the existing deployment; rollback_apply requests are audited against the target deployment; generic metadata-only promote remains blocked for hybrid_edge rollback.
       parameters:
         - $ref: "#/components/parameters/SiteID"
         - $ref: "#/components/parameters/DeploymentID"
@@ -2442,8 +2442,8 @@ components:
           type: boolean
         operation:
           type: string
-          enum: [deploy, rollback_apply]
-          description: Optional operation marker for audit; rollback_apply requires rollback_target_deployment.
+          enum: [deploy, writeback, rollback_apply]
+          description: Optional operation marker for audit; writeback records verified post-timeout evidence, and rollback_apply requires rollback_target_deployment.
         rollback_target_deployment:
           type: string
           description: Target deployment id when operation is rollback_apply.
