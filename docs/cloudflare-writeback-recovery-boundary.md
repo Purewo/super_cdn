@@ -17,6 +17,7 @@ Do not add an automatic provider writeback command until the command can prove w
 Current supported recovery behavior:
 
 - `hybrid_edge` readiness timeouts after deployment creation can be inspected with `reconcile-deployment` because a Super CDN deployment id already exists.
+- Successful `deploy-site -target hybrid_edge` runs now record Worker/domain/Workers KV/edge-manifest evidence back into the deployment after strict provider verification through `POST /api/v1/sites/{id}/deployments/{deployment}/hybrid-edge/evidence`, with audit action `site.deployment.hybrid_edge.evidence`. This is normal deploy evidence capture, not a generic writeback command for unknown or partially failed provider writes.
 - `refresh-edge-manifest` can republish the active hybrid edge manifest when signatures or manifest contents need repair.
 - `recover-cloudflare-static` can validate the evidence for unrecorded `cloudflare_static` provider writes: source summary, Worker/version/domain evidence and strict live probe. With `-dry-run=false -confirm recover`, it records a non-active Super CDN deployment through a recovery-specific server endpoint and audit action.
 - `activate-cloudflare-static` can activate a recovered `cloudflare_static` deployment only after loading recorded deployment evidence, matching it against the local source summary, running a strict live probe, and calling a dedicated audited endpoint with `-dry-run=false -confirm activate`.
@@ -28,7 +29,7 @@ Current supported recovery behavior:
 
 ### Recorded Hybrid Deployment
 
-The `hybrid_edge` flow creates and waits for a Super CDN deployment, publishes the edge manifest, publishes Worker assets, then verifies Cloudflare custom-domain traffic.
+The `hybrid_edge` flow creates and waits for a Super CDN deployment, publishes the edge manifest, publishes Worker assets, verifies Cloudflare custom-domain traffic, then records provider evidence into the deployment manifest.
 
 If verification times out after those writes, the failure output includes a deployment id. Recovery starts with:
 
@@ -36,7 +37,7 @@ If verification times out after those writes, the failure output includes a depl
 .\bin\supercdnctl.exe reconcile-deployment -site <site> -deployment <deployment> -max-assets 20
 ```
 
-If the report is `settled=true`, the operator can treat the deployment as provider-verified. If it is not settled, the safe repair actions are still explicit:
+If the report is `settled=true`, the operator can treat the deployment as provider-verified; on successful deployments the metadata should also expose a `hybrid_edge` evidence block with Worker/KV/manifest fields. If it is not settled, the safe repair actions are still explicit:
 
 - `refresh-edge-manifest` when asset signatures or active manifest contents are stale;
 - rerun `deploy-site -target hybrid_edge` with the intended artifact when Worker/domain state is wrong;

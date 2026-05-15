@@ -27,6 +27,7 @@ type rollbackPlanDeployment struct {
 	FileCount        int                                   `json:"file_count,omitempty"`
 	TotalSize        int64                                 `json:"total_size,omitempty"`
 	CloudflareStatic *rollbackPlanCloudflareStaticEvidence `json:"cloudflare_static,omitempty"`
+	HybridEdge       *hybridEdgeDeploymentEvidence         `json:"hybrid_edge,omitempty"`
 	ProductionURLs   []string                              `json:"production_urls,omitempty"`
 	SiteDomains      []string                              `json:"site_domains,omitempty"`
 }
@@ -43,6 +44,7 @@ type rollbackPlanEvidence struct {
 	ProductionURLs   []string                              `json:"production_urls,omitempty"`
 	SiteDomains      []string                              `json:"site_domains,omitempty"`
 	CloudflareStatic *rollbackPlanCloudflareStaticEvidence `json:"cloudflare_static,omitempty"`
+	HybridEdge       *hybridEdgeDeploymentEvidence         `json:"hybrid_edge,omitempty"`
 }
 
 type rollbackPlanCloudflareStaticEvidence struct {
@@ -466,6 +468,7 @@ func rollbackPlanEvidenceFromDeployment(dep rollbackPlanDeployment) rollbackPlan
 		ProductionURLs:   append([]string(nil), dep.ProductionURLs...),
 		SiteDomains:      append([]string(nil), dep.SiteDomains...),
 		CloudflareStatic: dep.CloudflareStatic,
+		HybridEdge:       dep.HybridEdge,
 	}
 }
 
@@ -502,36 +505,73 @@ func cloudflareRollbackMissingEvidence(dep rollbackPlanDeployment, target, sourc
 	if dep.FileCount <= 0 {
 		missing = append(missing, "file_count")
 	}
-	static := dep.CloudflareStatic
-	if static == nil {
-		missing = append(missing, "cloudflare_static")
+	if target == "hybrid_edge" {
+		hybrid := dep.HybridEdge
+		if hybrid == nil {
+			missing = append(missing, "hybrid_edge")
+		} else {
+			if strings.TrimSpace(hybrid.WorkerName) == "" {
+				missing = append(missing, "hybrid_edge.worker_name")
+			}
+			if strings.TrimSpace(hybrid.AssetsSHA256) == "" {
+				missing = append(missing, "hybrid_edge.assets_sha256")
+			}
+			if strings.TrimSpace(hybrid.KVNamespaceID) == "" {
+				missing = append(missing, "hybrid_edge.kv_namespace_id")
+			}
+			if strings.TrimSpace(hybrid.ManifestSHA256) == "" {
+				missing = append(missing, "hybrid_edge.manifest_sha256")
+			}
+			if hybrid.ManifestSize <= 0 {
+				missing = append(missing, "hybrid_edge.manifest_size")
+			}
+			if !hasNonEmpty(hybrid.Domains) && !hasNonEmpty(hybrid.URLs) && !hasNonEmpty(dep.ProductionURLs) && !hasNonEmpty(dep.SiteDomains) {
+				missing = append(missing, "hybrid_edge.domains")
+			}
+			if strings.TrimSpace(hybrid.VerificationStatus) == "" {
+				missing = append(missing, "hybrid_edge.verification_status")
+			} else if !strings.EqualFold(strings.TrimSpace(hybrid.VerificationStatus), "ok") {
+				missing = append(missing, "hybrid_edge.verification_status=ok")
+			}
+			if strings.TrimSpace(hybrid.VerifiedAt) == "" {
+				missing = append(missing, "hybrid_edge.verified_at")
+			}
+			if strings.TrimSpace(hybrid.PublishedAt) == "" {
+				missing = append(missing, "hybrid_edge.published_at")
+			}
+		}
+		if strings.TrimSpace(dep.ManifestKey) == "" {
+			missing = append(missing, "edge_manifest_key")
+		}
 	} else {
-		if strings.TrimSpace(static.WorkerName) == "" {
-			missing = append(missing, "cloudflare_static.worker_name")
+		static := dep.CloudflareStatic
+		if static == nil {
+			missing = append(missing, "cloudflare_static")
+		} else {
+			if strings.TrimSpace(static.WorkerName) == "" {
+				missing = append(missing, "cloudflare_static.worker_name")
+			}
+			if strings.TrimSpace(static.VersionID) == "" {
+				missing = append(missing, "cloudflare_static.version_id")
+			}
+			if strings.TrimSpace(static.AssetsSHA256) == "" {
+				missing = append(missing, "cloudflare_static.assets_sha256")
+			}
+			if !hasNonEmpty(static.Domains) && !hasNonEmpty(static.URLs) && !hasNonEmpty(dep.ProductionURLs) && !hasNonEmpty(dep.SiteDomains) {
+				missing = append(missing, "cloudflare_static.domains")
+			}
+			if strings.TrimSpace(static.VerificationStatus) == "" {
+				missing = append(missing, "cloudflare_static.verification_status")
+			} else if !strings.EqualFold(strings.TrimSpace(static.VerificationStatus), "ok") {
+				missing = append(missing, "cloudflare_static.verification_status=ok")
+			}
+			if strings.TrimSpace(static.VerifiedAt) == "" {
+				missing = append(missing, "cloudflare_static.verified_at")
+			}
+			if strings.TrimSpace(static.PublishedAt) == "" {
+				missing = append(missing, "cloudflare_static.published_at")
+			}
 		}
-		if strings.TrimSpace(static.VersionID) == "" {
-			missing = append(missing, "cloudflare_static.version_id")
-		}
-		if strings.TrimSpace(static.AssetsSHA256) == "" {
-			missing = append(missing, "cloudflare_static.assets_sha256")
-		}
-		if !hasNonEmpty(static.Domains) && !hasNonEmpty(static.URLs) && !hasNonEmpty(dep.ProductionURLs) && !hasNonEmpty(dep.SiteDomains) {
-			missing = append(missing, "cloudflare_static.domains")
-		}
-		if strings.TrimSpace(static.VerificationStatus) == "" {
-			missing = append(missing, "cloudflare_static.verification_status")
-		} else if !strings.EqualFold(strings.TrimSpace(static.VerificationStatus), "ok") {
-			missing = append(missing, "cloudflare_static.verification_status=ok")
-		}
-		if strings.TrimSpace(static.VerifiedAt) == "" {
-			missing = append(missing, "cloudflare_static.verified_at")
-		}
-		if strings.TrimSpace(static.PublishedAt) == "" {
-			missing = append(missing, "cloudflare_static.published_at")
-		}
-	}
-	if target == "hybrid_edge" && strings.TrimSpace(dep.ManifestKey) == "" {
-		missing = append(missing, "edge_manifest_key")
 	}
 	return missing
 }
@@ -581,6 +621,26 @@ func rollbackRedeployCommand(dep rollbackPlanDeployment, target, sourceDir strin
 			parts = append(parts, "-static-spa")
 		} else if notFound != "" {
 			parts = append(parts, "-static-not-found-handling "+cliHintArg(notFound))
+		}
+	}
+	if target == "hybrid_edge" {
+		if worker := rollbackHybridEdgeWorkerName(dep); worker != "" {
+			parts = append(parts, "-edge-name "+cliHintArg(worker))
+		}
+		if kvNamespaceID := rollbackHybridEdgeKVNamespaceID(dep); kvNamespaceID != "" {
+			parts = append(parts, "-edge-kv-namespace-id "+cliHintArg(kvNamespaceID))
+		}
+		if kvNamespace := rollbackHybridEdgeKVNamespace(dep); kvNamespace != "" {
+			parts = append(parts, "-edge-kv-namespace "+cliHintArg(kvNamespace))
+		}
+		if manifestMode := rollbackHybridEdgeManifestMode(dep); manifestMode != "" {
+			parts = append(parts, "-edge-manifest-mode "+cliHintArg(manifestMode))
+		}
+		if defaultCacheControl := rollbackHybridEdgeDefaultCacheControl(dep); defaultCacheControl != "" {
+			parts = append(parts, "-edge-default-cache-control "+cliHintArg(defaultCacheControl))
+		}
+		if dep.HybridEdge != nil && dep.HybridEdge.EntryOriginFallback {
+			parts = append(parts, "-entry-origin-fallback")
 		}
 	}
 	return strings.Join(parts, " ")
@@ -652,6 +712,14 @@ func rollbackCloudflareStaticDomains(dep rollbackPlanDeployment) []string {
 			}
 		}
 	}
+	if dep.HybridEdge != nil {
+		values = append(values, dep.HybridEdge.Domains...)
+		for _, raw := range dep.HybridEdge.URLs {
+			if host := rollbackHostFromURL(raw); host != "" {
+				values = append(values, host)
+			}
+		}
+	}
 	values = append(values, dep.SiteDomains...)
 	for _, raw := range dep.ProductionURLs {
 		if host := rollbackHostFromURL(raw); host != "" {
@@ -659,6 +727,41 @@ func rollbackCloudflareStaticDomains(dep rollbackPlanDeployment) []string {
 		}
 	}
 	return cleanDomains(values)
+}
+
+func rollbackHybridEdgeWorkerName(dep rollbackPlanDeployment) string {
+	if dep.HybridEdge != nil && strings.TrimSpace(dep.HybridEdge.WorkerName) != "" {
+		return strings.TrimSpace(dep.HybridEdge.WorkerName)
+	}
+	return "supercdn-" + cleanWorkerName(dep.SiteID) + "-edge"
+}
+
+func rollbackHybridEdgeKVNamespaceID(dep rollbackPlanDeployment) string {
+	if dep.HybridEdge != nil {
+		return strings.TrimSpace(dep.HybridEdge.KVNamespaceID)
+	}
+	return ""
+}
+
+func rollbackHybridEdgeKVNamespace(dep rollbackPlanDeployment) string {
+	if dep.HybridEdge != nil {
+		return strings.TrimSpace(dep.HybridEdge.KVNamespace)
+	}
+	return ""
+}
+
+func rollbackHybridEdgeManifestMode(dep rollbackPlanDeployment) string {
+	if dep.HybridEdge != nil {
+		return strings.TrimSpace(dep.HybridEdge.ManifestMode)
+	}
+	return ""
+}
+
+func rollbackHybridEdgeDefaultCacheControl(dep rollbackPlanDeployment) string {
+	if dep.HybridEdge != nil {
+		return strings.TrimSpace(dep.HybridEdge.DefaultCacheControl)
+	}
+	return ""
 }
 
 func rollbackHostFromURL(raw string) string {

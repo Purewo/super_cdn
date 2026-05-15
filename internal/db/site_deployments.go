@@ -132,6 +132,16 @@ func (d *DB) MarkSiteDeploymentReady(ctx context.Context, dep model.SiteDeployme
 	return d.GetSiteDeployment(ctx, dep.ID)
 }
 
+func (d *DB) UpdateSiteDeploymentManifest(ctx context.Context, id, manifestJSON string) (*model.SiteDeployment, error) {
+	_, err := d.sql.ExecContext(ctx, `
+		UPDATE site_deployments SET manifest_json = ?, updated_at = ? WHERE id = ?`,
+		manifestJSON, nowString(), id)
+	if err != nil {
+		return nil, err
+	}
+	return d.GetSiteDeployment(ctx, id)
+}
+
 func (d *DB) ActivateSiteDeployment(ctx context.Context, siteID, deploymentID string) (*model.SiteDeployment, error) {
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {

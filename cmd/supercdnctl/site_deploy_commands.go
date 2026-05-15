@@ -424,17 +424,47 @@ type hybridEdgeDeploySiteOptions struct {
 }
 
 type siteDeploymentResult struct {
-	ID               string   `json:"id"`
-	SiteID           string   `json:"site_id"`
-	Status           string   `json:"status"`
-	RouteProfile     string   `json:"route_profile"`
-	DeploymentTarget string   `json:"deployment_target"`
-	RoutingPolicy    string   `json:"routing_policy,omitempty"`
-	ResourceFailover bool     `json:"resource_failover"`
-	Active           bool     `json:"active"`
-	ProductionURL    string   `json:"production_url,omitempty"`
-	ProductionURLs   []string `json:"production_urls,omitempty"`
-	PreviewURL       string   `json:"preview_url,omitempty"`
+	ID               string                        `json:"id"`
+	SiteID           string                        `json:"site_id"`
+	Environment      string                        `json:"environment,omitempty"`
+	Status           string                        `json:"status"`
+	RouteProfile     string                        `json:"route_profile"`
+	DeploymentTarget string                        `json:"deployment_target"`
+	RoutingPolicy    string                        `json:"routing_policy,omitempty"`
+	ResourceFailover bool                          `json:"resource_failover"`
+	Active           bool                          `json:"active"`
+	ManifestKey      string                        `json:"manifest_key,omitempty"`
+	FileCount        int                           `json:"file_count,omitempty"`
+	TotalSize        int64                         `json:"total_size,omitempty"`
+	ProductionURL    string                        `json:"production_url,omitempty"`
+	ProductionURLs   []string                      `json:"production_urls,omitempty"`
+	PreviewURL       string                        `json:"preview_url,omitempty"`
+	HybridEdge       *hybridEdgeDeploymentEvidence `json:"hybrid_edge,omitempty"`
+}
+
+type hybridEdgeDeploymentEvidence struct {
+	WorkerName          string   `json:"worker_name,omitempty"`
+	VersionID           string   `json:"version_id,omitempty"`
+	Domains             []string `json:"domains,omitempty"`
+	URLs                []string `json:"urls,omitempty"`
+	CompatibilityDate   string   `json:"compatibility_date,omitempty"`
+	AssetsSHA256        string   `json:"assets_sha256,omitempty"`
+	CachePolicy         string   `json:"cache_policy,omitempty"`
+	HeadersGenerated    bool     `json:"headers_generated,omitempty"`
+	NotFoundHandling    string   `json:"not_found_handling,omitempty"`
+	VerificationStatus  string   `json:"verification_status,omitempty"`
+	VerifiedAt          string   `json:"verified_at,omitempty"`
+	PublishedAt         string   `json:"published_at,omitempty"`
+	KVNamespaceID       string   `json:"kv_namespace_id,omitempty"`
+	KVNamespace         string   `json:"kv_namespace,omitempty"`
+	KeyPrefix           string   `json:"key_prefix,omitempty"`
+	ManifestSHA256      string   `json:"manifest_sha256,omitempty"`
+	ManifestSize        int      `json:"manifest_size,omitempty"`
+	ManifestMode        string   `json:"manifest_mode,omitempty"`
+	DefaultCacheControl string   `json:"default_cache_control,omitempty"`
+	EntryOriginFallback bool     `json:"entry_origin_fallback,omitempty"`
+	ActiveKey           bool     `json:"active_key,omitempty"`
+	DeploymentKey       bool     `json:"deployment_key,omitempty"`
 }
 
 type edgeManifestPublishResponse struct {
@@ -525,6 +555,10 @@ func cloudflareVerifyFailureNextCommands(site, dir, target, profile string, doma
 func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 	if len(cleanDomains(opts.Domains)) == 0 {
 		return errors.New("hybrid_edge deploy-site requires at least one domain")
+	}
+	stats, err := summarizeCloudflareStaticDirectory(opts.Dir)
+	if err != nil {
+		return err
 	}
 	dep, err := createAndWaitSiteDeployment(c, opts.Site, siteDeploymentUploadOptions{
 		Dir:              opts.Dir,
@@ -637,6 +671,63 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 		_ = printJSON(raw)
 		return err
 	}
+	var warnings []string
+	if strings.EqualFold(strings.TrimSpace(verify.Status), "ok") {
+		recordedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		evidenceReq := map[string]any{
+			"worker_name":           workerName,
+			"version_id":            extractCloudflareVersionID(publish.Output),
+			"domains":               opts.Domains,
+			"compatibility_date":    opts.CompatibilityDate,
+			"assets_sha256":         stats.SHA256,
+			"cache_policy":          publish.CachePolicy,
+			"headers_generated":     publish.HeadersGenerated,
+			"not_found_handling":    publish.NotFoundHandling,
+			"verification_status":   verify.Status,
+			"verified_at_utc":       recordedAt,
+			"published_at_utc":      recordedAt,
+			"kv_namespace_id":       edgeManifest.KVNamespaceID,
+			"kv_namespace":          edgeManifest.KVNamespace,
+			"key_prefix":            edgeManifest.KeyPrefix,
+			"manifest_sha256":       edgeManifest.ManifestSHA256,
+			"manifest_size":         edgeManifest.ManifestSize,
+			"manifest_mode":         firstNonEmpty(opts.ManifestMode, "route"),
+			"default_cache_control": firstNonEmpty(opts.DefaultCacheControl, "public, max-age=300"),
+			"entry_origin_fallback": opts.EntryOriginFallback,
+			"active_key":            dep.Active,
+			"deployment_key":        true,
+		}
+		recordedRaw, err := c.recordHybridEdgeEvidence(opts.Site, dep.ID, evidenceReq)
+		if err != nil {
+			raw, _ := json.Marshal(hybridEdgeDeployResponse{
+				Status:       "evidence_record_failed_after_provider_write",
+				SiteID:       opts.Site,
+				DeploymentID: dep.ID,
+				URL:          firstNonEmpty(dep.ProductionURL, firstString(dep.ProductionURLs)),
+				URLs:         dep.ProductionURLs,
+				Deployment:   dep,
+				EdgeManifest: edgeManifest,
+				Worker:       publish,
+				Verify:       verify,
+				Warnings: []string{
+					"Hybrid edge provider write and readiness verification completed, but provider evidence could not be recorded in Super CDN metadata.",
+					"Do not treat rollback evidence as complete until the deployment response contains hybrid_edge Worker/KV/manifest evidence.",
+				},
+				NextCommands: []string{
+					"supercdnctl deployment -site " + cliHintArg(opts.Site) + " -deployment " + cliHintArg(dep.ID),
+					"supercdnctl reconcile-deployment -site " + cliHintArg(opts.Site) + " -deployment " + cliHintArg(dep.ID),
+				},
+			})
+			_ = printJSON(raw)
+			return err
+		}
+		var recorded siteDeploymentResult
+		if err := json.Unmarshal(recordedRaw, &recorded); err == nil && strings.TrimSpace(recorded.ID) != "" {
+			dep = recorded
+		}
+	} else {
+		warnings = append(warnings, "Hybrid edge provider evidence was not recorded because readiness verification status was "+strings.TrimSpace(verify.Status)+"; rollback-plan will report hybrid_edge evidence as incomplete.")
+	}
 	resp := hybridEdgeDeployResponse{
 		Status:       "ok",
 		SiteID:       opts.Site,
@@ -647,12 +738,17 @@ func deploySiteHybridEdge(c client, opts hybridEdgeDeploySiteOptions) error {
 		EdgeManifest: edgeManifest,
 		Worker:       publish,
 		Verify:       verify,
+		Warnings:     warnings,
 	}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return err
 	}
 	return printJSON(raw)
+}
+
+func (c client) recordHybridEdgeEvidence(site, deployment string, req map[string]any) ([]byte, error) {
+	return c.doRaw(http.MethodPost, "/api/v1/sites/"+url.PathEscape(site)+"/deployments/"+url.PathEscape(deployment)+"/hybrid-edge/evidence", bytes.NewReader(mustJSON(req)), "application/json")
 }
 
 type siteDeploymentUploadOptions struct {
@@ -1287,6 +1383,7 @@ type deleteDeploymentPlanDeployment struct {
 	ArtifactSHA256   string                                `json:"artifact_sha256,omitempty"`
 	ManifestKey      string                                `json:"manifest_key,omitempty"`
 	CloudflareStatic *rollbackPlanCloudflareStaticEvidence `json:"cloudflare_static,omitempty"`
+	HybridEdge       *hybridEdgeDeploymentEvidence         `json:"hybrid_edge,omitempty"`
 }
 
 type deleteDeploymentPlanOutput struct {
@@ -1308,6 +1405,7 @@ type deleteDeploymentPlanOutput struct {
 		ArtifactSHA256   string                                `json:"artifact_sha256,omitempty"`
 		ManifestKey      string                                `json:"manifest_key,omitempty"`
 		CloudflareStatic *rollbackPlanCloudflareStaticEvidence `json:"cloudflare_static,omitempty"`
+		HybridEdge       *hybridEdgeDeploymentEvidence         `json:"hybrid_edge,omitempty"`
 	} `json:"evidence"`
 }
 
@@ -1350,6 +1448,7 @@ func buildDeleteDeploymentPlan(dep deleteDeploymentPlanDeployment, deleteObjects
 	out.Evidence.ArtifactSHA256 = dep.ArtifactSHA256
 	out.Evidence.ManifestKey = dep.ManifestKey
 	out.Evidence.CloudflareStatic = dep.CloudflareStatic
+	out.Evidence.HybridEdge = dep.HybridEdge
 	out.RemoteCleanupSupported = deleteObjects && deleteRemote
 	if dep.Active {
 		out.SafeToRun = false

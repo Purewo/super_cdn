@@ -602,7 +602,7 @@ Read-only reconciliation for Cloudflare-backed deployments after a provider writ
 
 For `cloudflare_static`, the reconciler requires Cloudflare Static HTML evidence and direct same-site assets; when the deployment was recorded with generated headers, it also checks revalidating HTML and immutable asset cache headers. For `hybrid_edge`, it requires Cloudflare Static entry HTML and manifest-routed JS/CSS first hops.
 
-For non-active Cloudflare-backed deployments, the command falls back to recorded `cloudflare_static.urls` / `cloudflare_static.domains` when the API does not expose a production URL. The report keeps a warning because probing a shared custom domain may reflect the current live Worker/domain state rather than an archived provider version.
+For non-active Cloudflare-backed deployments, the command falls back to recorded `cloudflare_static.urls` / `cloudflare_static.domains` or `hybrid_edge.urls` / `hybrid_edge.domains` when the API does not expose a production URL. The report keeps a warning because probing a shared custom domain may reflect the current live Worker/domain state rather than an archived provider version.
 
 Parameters:
 | Parameter | Required | Default | Description |
@@ -818,11 +818,11 @@ HTTP: `POST /api/v1/sites/{id}/deployments/{deployment}/promote`
 .\bin\supercdnctl.exe rollback-plan -site blog -deployment dpl-static -dir .\dist-rollback
 ```
 
-输出字段包括 `action`、`metadata_promote_supported`、`redeploy_required`、`safe_to_run`、`rollback_write_ready`、`write_blockers[]`、`missing_evidence[]`、`evidence`、`warnings[]` 和 `next_commands[]`。`evidence` 会带出可核对的 route profile、artifact hash、manifest key、站点域名，以及 Cloudflare Static 的 Worker 名称、version id、assets hash、域名和验证状态。
+输出字段包括 `action`、`metadata_promote_supported`、`redeploy_required`、`safe_to_run`、`rollback_write_ready`、`write_blockers[]`、`missing_evidence[]`、`evidence`、`warnings[]` 和 `next_commands[]`。`evidence` 会带出可核对的 route profile、artifact hash、manifest key、站点域名，以及 Cloudflare Static 或 `hybrid_edge` 的 Worker、domain、assets、KV/manifest 和验证状态。
 
 - `origin_assisted` 且 ready 的历史 deployment 会给出 `metadata_promote` 和 `promote-deployment` 命令。
 - `cloudflare_static` 会给出 `redeploy_cloudflare_static`，提醒必须用目标产物重新发布 Cloudflare Static，不能做 metadata-only promote。证据完整且提供 `-dir` 时，`rollback_write_ready=true` 且 `next_commands[]` 会包含 `rollback-apply -dry-run=false -confirm rollback`；证据不足时仍返回 `write_blockers[]`/`missing_evidence[]`。`next_commands[]` 还会给出等价 `deploy-site` 命令和重发布后的 `probe-site -require-edge-static-html` 验证命令。
-- `hybrid_edge` 会给出 `redeploy_hybrid_edge`，提醒 Worker assets 与 active KV manifest 必须一起重新发布，并列出缺少的 Worker/KV/manifest 证据。`next_commands[]` 会包含 `probe-site -require-edge-static-html -require-edge-manifest-assets`，用来验证 HTML 和 JS/CSS 首跳没有回到 Go origin。
+- `hybrid_edge` 会给出 `redeploy_hybrid_edge`，提醒 Worker assets 与 active KV manifest 必须一起重新发布，并列出缺少的 Worker/KV/manifest 证据。若部署已记录 `hybrid_edge` evidence，`next_commands[]` 会带上 `-domains`、`-edge-name`、`-edge-kv-namespace-id` 等可复用参数；同时包含 `probe-site -require-edge-static-html -require-edge-manifest-assets`，用来验证 HTML 和 JS/CSS 首跳没有回到 Go origin。
 - 不传 `-dir` 时，Cloudflare 重发布命令会保留 `<dist>` 占位符，表示需要操作者提供正确历史产物目录。
 
 #### rollback-apply
@@ -856,7 +856,7 @@ HTTP: `DELETE /api/v1/sites/{id}/deployments/{deployment}?delete_objects=false&d
 
 参数：`-site`、`-deployment` 均必填；`-delete-objects` 默认 `false`，`-delete-remote` 默认 `true`，`-dry-run` 默认 `false`。
 
-`-dry-run` 会先读取 `GET /api/v1/sites/{id}/deployments/{deployment}`，不会删除元数据或远端对象。输出字段包括 `deployment_target`、`active`、`pinned`、`delete_objects`、`delete_remote`、`safe_to_run`、`remote_cleanup_supported`、`remote_cleanup_blockers[]`、`evidence`、`warnings[]` 和 `next_commands[]`。直接调用 API 时也可以在 `DELETE` 上传 `dry_run=true` 获得服务端安全计划。对 active 或 pinned deployment 会标记 `safe_to_run=false` 且不执行删除；对 `cloudflare_static` 和 `hybrid_edge` 会提示当前删除只移除 Super CDN 元数据，不会清理 Cloudflare Worker versions、custom domains 或 KV entries，并在 `evidence.cloudflare_static` 中带出 Worker/version/domain/assets 证据。
+`-dry-run` 会先读取 `GET /api/v1/sites/{id}/deployments/{deployment}`，不会删除元数据或远端对象。输出字段包括 `deployment_target`、`active`、`pinned`、`delete_objects`、`delete_remote`、`safe_to_run`、`remote_cleanup_supported`、`remote_cleanup_blockers[]`、`evidence`、`warnings[]` 和 `next_commands[]`。直接调用 API 时也可以在 `DELETE` 上传 `dry_run=true` 获得服务端安全计划。对 active 或 pinned deployment 会标记 `safe_to_run=false` 且不执行删除；对 `cloudflare_static` 和 `hybrid_edge` 会提示当前删除只移除 Super CDN 元数据，不会清理 Cloudflare Worker versions、custom domains 或 KV entries，并在 `evidence.cloudflare_static` 或 `evidence.hybrid_edge` 中带出 Worker/version/domain/assets/KV/manifest 证据。
 
 #### gc
 
@@ -910,7 +910,7 @@ HTTP: `POST /api/v1/sites/{id}/gc`
 - `export-edge-manifest` 是只读旁路导出，用于后续 Cloudflare Worker/KV/Pages 边缘路由改造；不会改变当前线上 Go-origin + storage 302 交付链路。
 - `publish-edge-manifest` 默认 dry-run；真实写入 KV 需要 `-dry-run=false`，默认会写 deployment key，并且仅当该 deployment 当前 active 时写 `sites/{host}/active/edge-manifest`。
 - `deploy-site -target cloudflare_static` 是正式的 Cloudflare-native 静态托管入口：它本地调用 Wrangler 发布 Workers Static Assets，然后把部署记录写回 Super CDN。
-- `deploy-site -target hybrid_edge` 会执行完整 no-Go 网站流程：上传线路 deployment、发布 active edge manifest 到 Workers KV、部署带 `ASSETS` 和 `run_worker_first` 的 Worker，然后验证 HTML/SPA 和被 manifest 重定向的资源。
+- `deploy-site -target hybrid_edge` 会执行完整 no-Go 网站流程：上传线路 deployment、发布 active edge manifest 到 Workers KV、部署带 `ASSETS` 和 `run_worker_first` 的 Worker，验证 HTML/SPA 和被 manifest 重定向的资源，然后把 Worker/KV/manifest/provider verification evidence 写回 deployment。
 - `hybrid_edge` readiness 会额外检查 root/SPA 的 `X-SuperCDN-Edge-Source: cloudflare_static`，以及 JS/CSS 首跳的 `X-SuperCDN-Edge-Manifest: route`，用来确认请求没有回到 Go origin。
 - `hybrid_edge` Worker 配置会写入 `EDGE_ORIGIN_FALLBACK=false`。只有显式改成 `true` 时，manifest 模式才允许回 Go origin。
 - `hybrid_edge` Worker 默认也会写入 `EDGE_ENTRY_ORIGIN_FALLBACK=false`。只有 `deploy-site -entry-origin-fallback` 会打开首页/SPA 临时回源；静态资源仍不能回退到 Go origin。

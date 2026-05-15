@@ -157,6 +157,7 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("GET /sites/{id}/deployments", s.handleListSiteDeployments)
 	s.apiMux.HandleFunc("GET /sites/{id}/deployments/{deployment}", s.handleGetSiteDeployment)
 	s.apiMux.HandleFunc("POST /sites/{id}/deployments/{deployment}/cloudflare-static/activate", s.handleActivateCloudflareStaticDeployment)
+	s.apiMux.HandleFunc("POST /sites/{id}/deployments/{deployment}/hybrid-edge/evidence", s.handleRecordHybridEdgeEvidence)
 	s.apiMux.HandleFunc("POST /sites/{id}/files/primary-target", s.handleSwitchActiveSiteFilePrimaryTarget)
 	s.apiMux.HandleFunc("POST /sites/{id}/deployments/{deployment}/files/primary-target", s.handleSwitchDeploymentSiteFilePrimaryTarget)
 	s.apiMux.HandleFunc("GET /sites/{id}/deployments/{deployment}/edge-manifest", s.handleExportSiteEdgeManifest)

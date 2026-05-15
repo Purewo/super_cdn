@@ -52,6 +52,7 @@ type SiteDeployment struct {
 	ProductionURLs   []string                    `json:"production_urls,omitempty"`
 	PreviewURL       string                      `json:"preview_url,omitempty"`
 	CloudflareStatic *CloudflareStaticDeployment `json:"cloudflare_static,omitempty"`
+	HybridEdge       *HybridEdgeDeployment       `json:"hybrid_edge,omitempty"`
 	Inspect          *siteinspect.Report         `json:"inspect,omitempty"`
 	DeliverySummary  map[string]int              `json:"delivery_summary,omitempty"`
 	CreatedAt        time.Time                   `json:"created_at"`
@@ -74,6 +75,31 @@ type CloudflareStaticDeployment struct {
 	VerificationStatus string    `json:"verification_status,omitempty"`
 	VerifiedAt         time.Time `json:"verified_at,omitempty"`
 	PublishedAt        time.Time `json:"published_at,omitempty"`
+}
+
+type HybridEdgeDeployment struct {
+	WorkerName          string    `json:"worker_name"`
+	VersionID           string    `json:"version_id,omitempty"`
+	Domains             []string  `json:"domains,omitempty"`
+	URLs                []string  `json:"urls,omitempty"`
+	CompatibilityDate   string    `json:"compatibility_date,omitempty"`
+	AssetsSHA256        string    `json:"assets_sha256,omitempty"`
+	CachePolicy         string    `json:"cache_policy,omitempty"`
+	HeadersGenerated    bool      `json:"headers_generated,omitempty"`
+	NotFoundHandling    string    `json:"not_found_handling,omitempty"`
+	VerificationStatus  string    `json:"verification_status,omitempty"`
+	VerifiedAt          time.Time `json:"verified_at,omitempty"`
+	PublishedAt         time.Time `json:"published_at,omitempty"`
+	KVNamespaceID       string    `json:"kv_namespace_id,omitempty"`
+	KVNamespace         string    `json:"kv_namespace,omitempty"`
+	KeyPrefix           string    `json:"key_prefix,omitempty"`
+	ManifestSHA256      string    `json:"manifest_sha256,omitempty"`
+	ManifestSize        int       `json:"manifest_size,omitempty"`
+	ManifestMode        string    `json:"manifest_mode,omitempty"`
+	DefaultCacheControl string    `json:"default_cache_control,omitempty"`
+	EntryOriginFallback bool      `json:"entry_origin_fallback,omitempty"`
+	ActiveKey           bool      `json:"active_key,omitempty"`
+	DeploymentKey       bool      `json:"deployment_key,omitempty"`
 }
 
 type SiteDeploymentFile struct {

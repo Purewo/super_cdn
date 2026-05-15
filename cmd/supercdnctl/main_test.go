@@ -1284,10 +1284,104 @@ func TestRollbackPlanHybridReportsMissingWriteEvidence(t *testing.T) {
 	if len(plan.NextCommands) != 2 || !strings.Contains(plan.NextCommands[1], "probe-site -site blog -production -require-edge-static-html -require-edge-manifest-assets") {
 		t.Fatalf("next_commands = %#v", plan.NextCommands)
 	}
-	for _, want := range []string{"source_dist_dir", "route_profile", "artifact_sha256", "file_count", "cloudflare_static", "edge_manifest_key"} {
+	for _, want := range []string{"source_dist_dir", "route_profile", "artifact_sha256", "file_count", "hybrid_edge", "edge_manifest_key"} {
 		if !stringSliceContains(plan.MissingEvidence, want) {
 			t.Fatalf("missing_evidence %#v does not contain %q", plan.MissingEvidence, want)
 		}
+	}
+}
+
+func TestRollbackPlanHybridUsesHybridEvidence(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-hybrid" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_, _ = w.Write([]byte(`{
+			"id":"dpl-hybrid",
+			"site_id":"blog",
+			"status":"ready",
+			"environment":"production",
+			"route_profile":"overseas",
+			"deployment_target":"hybrid_edge",
+			"manifest_key":"sites/blog/manifests/dpl-hybrid.json",
+			"file_count":12,
+			"total_size":3456,
+			"artifact_sha256":"artifact-sha",
+			"production_urls":["https://blog.example.com/"],
+			"hybrid_edge":{
+				"worker_name":"supercdn-blog-edge",
+				"version_id":"ver-edge",
+				"domains":["blog.example.com"],
+				"urls":["https://blog.example.com/"],
+				"assets_sha256":"assets-sha",
+				"verification_status":"ok",
+				"verified_at":"2026-05-15T00:00:00Z",
+				"published_at":"2026-05-15T00:01:00Z",
+				"kv_namespace_id":"kv-123",
+				"kv_namespace":"supercdn-edge-manifest",
+				"manifest_sha256":"manifest-sha",
+				"manifest_size":512,
+				"manifest_mode":"route",
+				"default_cache_control":"public, max-age=300"
+			},
+			"active":false
+		}`))
+	}))
+	defer srv.Close()
+
+	var plan rollbackPlanOutput
+	out := captureStdout(t, func() {
+		if err := rollbackPlan(client{baseURL: srv.URL, token: "test-token", http: srv.Client()}, []string{"-site", "blog", "-deployment", "dpl-hybrid", "-dir", "dist old"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.Action != "redeploy_hybrid_edge" || !plan.RedeployRequired || len(plan.WriteBlockers) != 4 || plan.RollbackWriteReady {
+		t.Fatalf("unexpected rollback plan: %+v", plan)
+	}
+	if len(plan.MissingEvidence) != 0 {
+		t.Fatalf("missing_evidence = %#v", plan.MissingEvidence)
+	}
+	if plan.Evidence.HybridEdge == nil || plan.Evidence.HybridEdge.WorkerName != "supercdn-blog-edge" || plan.Evidence.HybridEdge.ManifestSHA256 != "manifest-sha" {
+		t.Fatalf("hybrid evidence = %+v", plan.Evidence.HybridEdge)
+	}
+	if len(plan.NextCommands) != 2 || !strings.Contains(plan.NextCommands[0], "deploy-site -site blog -dir 'dist old' -target hybrid_edge -profile overseas -domains blog.example.com -edge-name supercdn-blog-edge -edge-kv-namespace-id kv-123") {
+		t.Fatalf("next_commands = %#v", plan.NextCommands)
+	}
+}
+
+func TestRecordHybridEdgeEvidenceCallsAPI(t *testing.T) {
+	var saw bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw = true
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sites/blog/deployments/dpl-hybrid/hybrid-edge/evidence" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req["worker_name"] != "supercdn-blog-edge" || req["kv_namespace_id"] != "kv-123" || req["manifest_sha256"] != "manifest-sha" {
+			t.Fatalf("request = %+v", req)
+		}
+		_, _ = w.Write([]byte(`{"id":"dpl-hybrid","site_id":"blog","hybrid_edge":{"worker_name":"supercdn-blog-edge"}}`))
+	}))
+	defer srv.Close()
+
+	raw, err := (client{baseURL: srv.URL, token: "test-token", http: srv.Client()}).recordHybridEdgeEvidence("blog", "dpl-hybrid", map[string]any{
+		"worker_name":         "supercdn-blog-edge",
+		"kv_namespace_id":     "kv-123",
+		"manifest_sha256":     "manifest-sha",
+		"manifest_size":       512,
+		"verification_status": "ok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !saw || !strings.Contains(string(raw), `"hybrid_edge"`) {
+		t.Fatalf("response = %s saw=%v", string(raw), saw)
 	}
 }
 

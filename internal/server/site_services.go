@@ -52,6 +52,7 @@ func (s *Server) siteDeploymentView(ctx context.Context, dep *model.SiteDeployme
 			view.Inspect = manifest.Inspect
 			view.DeliverySummary = manifest.DeliverySummary
 			view.CloudflareStatic = manifest.CloudflareStatic
+			view.HybridEdge = manifest.HybridEdge
 		}
 	}
 	if site, err := s.db.GetSite(ctx, dep.SiteID); err == nil {

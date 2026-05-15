@@ -52,6 +52,7 @@ type siteDeployManifest struct {
 	Operation        string                            `json:"operation,omitempty"`
 	RollbackTarget   string                            `json:"rollback_target_deployment,omitempty"`
 	CloudflareStatic *model.CloudflareStaticDeployment `json:"cloudflare_static,omitempty"`
+	HybridEdge       *model.HybridEdgeDeployment       `json:"hybrid_edge,omitempty"`
 }
 
 type siteDeployManifestFile struct {
@@ -107,6 +108,30 @@ type activateCloudflareStaticDeploymentRequest struct {
 	TotalSize          int64    `json:"total_size"`
 	VerificationStatus string   `json:"verification_status"`
 	VerifiedAtUTC      string   `json:"verified_at_utc"`
+}
+
+type recordHybridEdgeEvidenceRequest struct {
+	WorkerName          string   `json:"worker_name"`
+	VersionID           string   `json:"version_id"`
+	Domains             []string `json:"domains"`
+	CompatibilityDate   string   `json:"compatibility_date"`
+	AssetsSHA256        string   `json:"assets_sha256"`
+	CachePolicy         string   `json:"cache_policy"`
+	HeadersGenerated    bool     `json:"headers_generated"`
+	NotFoundHandling    string   `json:"not_found_handling"`
+	VerificationStatus  string   `json:"verification_status"`
+	VerifiedAtUTC       string   `json:"verified_at_utc"`
+	PublishedAtUTC      string   `json:"published_at_utc"`
+	KVNamespaceID       string   `json:"kv_namespace_id"`
+	KVNamespace         string   `json:"kv_namespace"`
+	KeyPrefix           string   `json:"key_prefix"`
+	ManifestSHA256      string   `json:"manifest_sha256"`
+	ManifestSize        int      `json:"manifest_size"`
+	ManifestMode        string   `json:"manifest_mode"`
+	DefaultCacheControl string   `json:"default_cache_control"`
+	EntryOriginFallback bool     `json:"entry_origin_fallback"`
+	ActiveKey           bool     `json:"active_key"`
+	DeploymentKey       bool     `json:"deployment_key"`
 }
 
 func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +233,28 @@ func (s *Server) handleActivateCloudflareStaticDeployment(w http.ResponseWriter,
 		return
 	}
 	if !s.auditMutation(w, r, "site.deployment.cloudflare_static.activate", "site:"+siteID+";deployment:"+deploymentID) {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleRecordHybridEdgeEvidence(w http.ResponseWriter, r *http.Request) {
+	siteID := cleanID(r.PathValue("id"))
+	deploymentID := cleanDeploymentID(r.PathValue("deployment"))
+	if _, ok := s.getSiteForAPI(w, r, siteID); !ok {
+		return
+	}
+	var req recordHybridEdgeEvidenceRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	resp, err := s.recordHybridEdgeEvidence(r.Context(), siteID, deploymentID, req)
+	if err != nil {
+		s.auditRejectedMutation(r, "site.deployment.hybrid_edge.evidence.rejected", "site:"+siteID+";deployment:"+deploymentID+";reason:"+auditReason(err))
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.auditMutation(w, r, "site.deployment.hybrid_edge.evidence", "site:"+siteID+";deployment:"+deploymentID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -433,6 +480,7 @@ type deleteSiteDeploymentPlanResult struct {
 		ArtifactSHA256   string                            `json:"artifact_sha256,omitempty"`
 		ManifestKey      string                            `json:"manifest_key,omitempty"`
 		CloudflareStatic *model.CloudflareStaticDeployment `json:"cloudflare_static,omitempty"`
+		HybridEdge       *model.HybridEdgeDeployment       `json:"hybrid_edge,omitempty"`
 	} `json:"evidence"`
 }
 
@@ -454,6 +502,7 @@ func buildDeleteSiteDeploymentPlan(dep *model.SiteDeployment, deleteObjects, del
 	out.Evidence.ArtifactSHA256 = dep.ArtifactSHA256
 	out.Evidence.ManifestKey = dep.ManifestKey
 	out.Evidence.CloudflareStatic = dep.CloudflareStatic
+	out.Evidence.HybridEdge = dep.HybridEdge
 	if dep.Active {
 		out.SafeToRun = false
 		out.Warnings = append(out.Warnings, "active production deployment cannot be deleted")
@@ -816,7 +865,8 @@ func (s *Server) recoverCloudflareStaticDeployment(ctx context.Context, siteID s
 	if strings.TrimSpace(req.VersionID) == "" {
 		return model.SiteDeployment{}, fmt.Errorf("version_id is required")
 	}
-	if !hasNonEmptyString(req.Domains) {
+	domains := mergeDomains(req.Domains)
+	if len(domains) == 0 {
 		return model.SiteDeployment{}, fmt.Errorf("domains are required")
 	}
 	if strings.TrimSpace(req.ProbeURL) == "" {
@@ -835,6 +885,7 @@ func (s *Server) recoverCloudflareStaticDeployment(ctx context.Context, siteID s
 		return model.SiteDeployment{}, fmt.Errorf("verified_at_utc is required")
 	}
 	recordReq := req.recordCloudflareStaticDeploymentRequest
+	recordReq.Domains = domains
 	recordReq.DeploymentTarget = model.SiteDeploymentTargetCloudflareStatic
 	recordReq.ResourceFailover = false
 	recordReq.VerificationStatus = "ok"
@@ -903,13 +954,107 @@ func (s *Server) activateCloudflareStaticDeployment(ctx context.Context, siteID,
 	return s.siteDeploymentView(ctx, activated), nil
 }
 
-func hasNonEmptyString(values []string) bool {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return true
-		}
+func (s *Server) recordHybridEdgeEvidence(ctx context.Context, siteID, deploymentID string, req recordHybridEdgeEvidenceRequest) (model.SiteDeployment, error) {
+	dep, err := s.db.GetSiteDeployment(ctx, deploymentID)
+	if err != nil || dep.SiteID != siteID {
+		return model.SiteDeployment{}, fmt.Errorf("deployment not found")
 	}
-	return false
+	if dep.DeploymentTarget != model.SiteDeploymentTargetHybridEdge {
+		return model.SiteDeployment{}, fmt.Errorf("deployment target must be hybrid_edge")
+	}
+	if dep.Status != model.SiteDeploymentReady && dep.Status != model.SiteDeploymentActive {
+		return model.SiteDeployment{}, fmt.Errorf("deployment is not ready")
+	}
+	if strings.TrimSpace(req.WorkerName) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("worker_name is required")
+	}
+	domains := mergeDomains(req.Domains)
+	if len(domains) == 0 {
+		return model.SiteDeployment{}, fmt.Errorf("domains are required")
+	}
+	if strings.TrimSpace(req.AssetsSHA256) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("assets_sha256 is required")
+	}
+	if strings.TrimSpace(req.KVNamespaceID) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("kv_namespace_id is required")
+	}
+	if strings.TrimSpace(req.ManifestSHA256) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("manifest_sha256 is required")
+	}
+	if req.ManifestSize <= 0 {
+		return model.SiteDeployment{}, fmt.Errorf("manifest_size must be positive")
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.VerificationStatus), "ok") {
+		return model.SiteDeployment{}, fmt.Errorf("verification_status must be ok")
+	}
+	if strings.TrimSpace(req.VerifiedAtUTC) == "" {
+		return model.SiteDeployment{}, fmt.Errorf("verified_at_utc is required")
+	}
+	verifiedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.VerifiedAtUTC))
+	if err != nil {
+		return model.SiteDeployment{}, fmt.Errorf("verified_at_utc must be RFC3339: %w", err)
+	}
+	publishedAt := time.Now().UTC()
+	if strings.TrimSpace(req.PublishedAtUTC) != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.PublishedAtUTC))
+		if err != nil {
+			return model.SiteDeployment{}, fmt.Errorf("published_at_utc must be RFC3339: %w", err)
+		}
+		publishedAt = parsed.UTC()
+	}
+	manifest := siteDeployManifest{
+		Version:          3,
+		Kind:             "supercdn-hybrid-edge-deployment",
+		StorageLayout:    "hybrid_edge",
+		SiteID:           siteID,
+		DeploymentID:     deploymentID,
+		Environment:      dep.Environment,
+		RouteProfile:     dep.RouteProfile,
+		DeploymentTarget: dep.DeploymentTarget,
+		RoutingPolicy:    dep.RoutingPolicy,
+		ResourceFailover: dep.ResourceFailover,
+		FileCount:        dep.FileCount,
+		TotalSize:        dep.TotalSize,
+		ArtifactSHA256:   dep.ArtifactSHA256,
+		ArtifactSize:     dep.ArtifactSize,
+	}
+	if strings.TrimSpace(dep.ManifestJSON) != "" {
+		_ = json.Unmarshal([]byte(dep.ManifestJSON), &manifest)
+	}
+	hybrid := model.HybridEdgeDeployment{
+		WorkerName:          strings.TrimSpace(req.WorkerName),
+		VersionID:           strings.TrimSpace(req.VersionID),
+		Domains:             domains,
+		URLs:                httpsDomainURLs(domains),
+		CompatibilityDate:   strings.TrimSpace(req.CompatibilityDate),
+		AssetsSHA256:        strings.TrimSpace(req.AssetsSHA256),
+		CachePolicy:         strings.TrimSpace(req.CachePolicy),
+		HeadersGenerated:    req.HeadersGenerated,
+		NotFoundHandling:    strings.TrimSpace(req.NotFoundHandling),
+		VerificationStatus:  "ok",
+		VerifiedAt:          verifiedAt.UTC(),
+		PublishedAt:         publishedAt,
+		KVNamespaceID:       strings.TrimSpace(req.KVNamespaceID),
+		KVNamespace:         strings.TrimSpace(req.KVNamespace),
+		KeyPrefix:           strings.TrimSpace(req.KeyPrefix),
+		ManifestSHA256:      strings.TrimSpace(req.ManifestSHA256),
+		ManifestSize:        req.ManifestSize,
+		ManifestMode:        strings.TrimSpace(req.ManifestMode),
+		DefaultCacheControl: strings.TrimSpace(req.DefaultCacheControl),
+		EntryOriginFallback: req.EntryOriginFallback,
+		ActiveKey:           req.ActiveKey,
+		DeploymentKey:       req.DeploymentKey,
+	}
+	manifest.HybridEdge = &hybrid
+	raw, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return model.SiteDeployment{}, err
+	}
+	updated, err := s.db.UpdateSiteDeploymentManifest(ctx, deploymentID, string(raw))
+	if err != nil {
+		return model.SiteDeployment{}, err
+	}
+	return s.siteDeploymentView(ctx, updated), nil
 }
 
 func (s *Server) validateCloudflareStaticRecordOperation(ctx context.Context, siteID string, req recordCloudflareStaticDeploymentRequest) (string, string, error) {
@@ -946,7 +1091,7 @@ func cloudflareStaticRecordAudit(siteID, deploymentID string, req recordCloudfla
 	return "site.deployment.cloudflare_static.record", "site:" + siteID + ";deployment:" + deploymentID
 }
 
-func cloudflareStaticRecoveryAuditResource(siteID string, err error) string {
+func auditReason(err error) string {
 	reason := "unknown"
 	if err != nil {
 		reason = strings.ToLower(strings.TrimSpace(err.Error()))
@@ -955,19 +1100,15 @@ func cloudflareStaticRecoveryAuditResource(siteID string, err error) string {
 			reason = reason[:120]
 		}
 	}
-	return "site:" + siteID + ";reason:" + reason
+	return reason
+}
+
+func cloudflareStaticRecoveryAuditResource(siteID string, err error) string {
+	return "site:" + siteID + ";reason:" + auditReason(err)
 }
 
 func cloudflareStaticActivationAuditResource(siteID, deploymentID string, err error) string {
-	reason := "unknown"
-	if err != nil {
-		reason = strings.ToLower(strings.TrimSpace(err.Error()))
-		reason = strings.NewReplacer(" ", "_", ";", "_", ":", "_", "\n", "_", "\r", "_", "\t", "_").Replace(reason)
-		if len(reason) > 120 {
-			reason = reason[:120]
-		}
-	}
-	return "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + reason
+	return "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + auditReason(err)
 }
 
 func sameDomainSet(a, b []string) bool {

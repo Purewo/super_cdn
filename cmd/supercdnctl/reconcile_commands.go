@@ -27,6 +27,7 @@ type reconcileDeploymentRecord struct {
 	PreviewURL       string                            `json:"preview_url"`
 	SiteDomains      []string                          `json:"site_domains,omitempty"`
 	CloudflareStatic *model.CloudflareStaticDeployment `json:"cloudflare_static,omitempty"`
+	HybridEdge       *model.HybridEdgeDeployment       `json:"hybrid_edge,omitempty"`
 }
 
 type reconcileDeploymentReport struct {
@@ -54,6 +55,8 @@ type reconcileMetadataSummary struct {
 	VersionID          string   `json:"version_id,omitempty"`
 	VerificationStatus string   `json:"verification_status,omitempty"`
 	VerifiedAtUTC      string   `json:"verified_at_utc,omitempty"`
+	KVNamespaceID      string   `json:"kv_namespace_id,omitempty"`
+	ManifestSHA256     string   `json:"manifest_sha256,omitempty"`
 }
 
 type reconcileProviderSummary struct {
@@ -197,6 +200,18 @@ func reconcileDeploymentURL(dep reconcileDeploymentRecord) (string, error) {
 			}
 		}
 	}
+	if dep.HybridEdge != nil {
+		for _, raw := range dep.HybridEdge.URLs {
+			if strings.TrimSpace(raw) != "" {
+				return raw, nil
+			}
+		}
+		for _, domain := range dep.HybridEdge.Domains {
+			if host := strings.TrimSpace(domain); host != "" {
+				return "https://" + host + "/", nil
+			}
+		}
+	}
 	if dep.PreviewURL != "" {
 		return dep.PreviewURL, nil
 	}
@@ -258,8 +273,21 @@ func buildReconcileDeploymentReport(dep reconcileDeploymentRecord, targetURL str
 			report.Metadata.VerifiedAtUTC = dep.CloudflareStatic.VerifiedAt.UTC().Format(time.RFC3339Nano)
 		}
 	}
+	if dep.HybridEdge != nil {
+		report.Metadata.WorkerName = dep.HybridEdge.WorkerName
+		report.Metadata.VersionID = dep.HybridEdge.VersionID
+		report.Metadata.VerificationStatus = dep.HybridEdge.VerificationStatus
+		report.Metadata.KVNamespaceID = dep.HybridEdge.KVNamespaceID
+		report.Metadata.ManifestSHA256 = dep.HybridEdge.ManifestSHA256
+		if !dep.HybridEdge.VerifiedAt.IsZero() {
+			report.Metadata.VerifiedAtUTC = dep.HybridEdge.VerifiedAt.UTC().Format(time.RFC3339Nano)
+		}
+	}
 	if dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic && dep.CloudflareStatic == nil {
 		report.Warnings = append(report.Warnings, "cloudflare_static deployment metadata has no Cloudflare evidence block")
+	}
+	if dep.DeploymentTarget == model.SiteDeploymentTargetHybridEdge && dep.HybridEdge == nil {
+		report.Warnings = append(report.Warnings, "hybrid_edge deployment metadata has no Worker/KV/manifest evidence block")
 	}
 	if (dep.DeploymentTarget == model.SiteDeploymentTargetCloudflareStatic || dep.DeploymentTarget == model.SiteDeploymentTargetHybridEdge) && !dep.Active {
 		report.Warnings = append(report.Warnings, dep.DeploymentTarget+" deployment is not active; probe may represent the current live domain state rather than an archived provider version")
@@ -324,6 +352,18 @@ func firstReconcileDomain(dep reconcileDeploymentRecord, targetURL string) strin
 			}
 		}
 		for _, raw := range dep.CloudflareStatic.URLs {
+			if host := hostFromURL(raw); host != "" {
+				return host
+			}
+		}
+	}
+	if dep.HybridEdge != nil {
+		for _, domain := range dep.HybridEdge.Domains {
+			if host := cleanReconcileDomain(domain); host != "" {
+				return host
+			}
+		}
+		for _, raw := range dep.HybridEdge.URLs {
 			if host := hostFromURL(raw); host != "" {
 				return host
 			}
