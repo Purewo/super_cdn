@@ -530,6 +530,7 @@ local only
 .\bin\supercdnctl.exe probe-site -url https://blog.sites.example.com/ -max-assets 20
 .\bin\supercdnctl.exe probe-site -url https://blog.qwk.ccwu.cc/ -resolver 1.1.1.1:53 -require-direct-assets -require-html-revalidate -require-immutable-assets
 .\bin\supercdnctl.exe probe-site -url https://blog.qwk.ccwu.cc/ -spa-path /movie/123 -require-edge-static-html -require-edge-manifest-assets
+.\bin\supercdnctl.exe probe-site -url https://blog.qwk.ccwu.cc/ -browser-render
 ```
 
 `probe-site` and deployment readiness reports redact query values for signed storage URLs by default. Use `-redact-urls=false` only when debugging locally and avoiding shared logs.
@@ -544,6 +545,7 @@ local only
 - 传 `-require-edge-static-html` 时要求 root/SPA 响应带 `X-SuperCDN-Edge-Source: cloudflare_static`。
 - 传 `-require-edge-manifest-assets` 时要求 JS/CSS 首跳带 `X-SuperCDN-Edge-Source: manifest` 和 `X-SuperCDN-Edge-Manifest: route`。
 - 传 `-resolver 1.1.1.1:53` 时，HTTP 探测会绕开本机 DNS 缓存，用指定解析器确认实际公网接管状态。
+- 传 `-browser-render` 时，会调用本机 Chrome/Edge headless 截图并做非白像素比例检查，用来捕获 HTTP/MIME/CORS 都正常但首屏白屏的情况；浏览器缺失时可传 `-browser-path` 或设置 `SUPERCDN_BROWSER`。
 
 ### deployments
 

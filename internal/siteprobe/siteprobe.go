@@ -45,10 +45,26 @@ type Report struct {
 	HTML     Check          `json:"html"`
 	Assets   []AssetCheck   `json:"assets,omitempty"`
 	SPA      *Check         `json:"spa,omitempty"`
+	Browser  *BrowserCheck  `json:"browser,omitempty"`
 	Warnings []string       `json:"warnings,omitempty"`
 	Errors   []string       `json:"errors,omitempty"`
 	Summary  map[string]int `json:"summary"`
 	Duration int64          `json:"duration_ms"`
+}
+
+type BrowserCheck struct {
+	URL            string   `json:"url"`
+	OK             bool     `json:"ok"`
+	BrowserPath    string   `json:"browser_path,omitempty"`
+	Width          int      `json:"width,omitempty"`
+	Height         int      `json:"height,omitempty"`
+	NonWhiteRatio  float64  `json:"non_white_ratio,omitempty"`
+	NonWhitePixels int      `json:"non_white_pixels,omitempty"`
+	PixelCount     int      `json:"pixel_count,omitempty"`
+	Threshold      float64  `json:"threshold,omitempty"`
+	Duration       int64    `json:"duration_ms,omitempty"`
+	Error          string   `json:"error,omitempty"`
+	Warnings       []string `json:"warnings,omitempty"`
 }
 
 type Check struct {

@@ -62,6 +62,14 @@ func probeSite(c client, args []string) error {
 	requireEdgeManifestAssets := fs.Bool("require-edge-manifest-assets", false, "fail if JS/CSS asset first hops are not routed by the edge manifest")
 	requireHTMLRevalidate := fs.Bool("require-html-revalidate", false, "fail if root HTML is not served with a revalidating cache policy")
 	requireImmutableAssets := fs.Bool("require-immutable-assets", false, "fail if JS/CSS assets are not served with immutable long-term cache policy")
+	browserRender := fs.Bool("browser-render", false, "run an installed Chrome/Edge headless screenshot check for blank-page detection")
+	browserPath := fs.String("browser-path", "", "Chrome/Edge executable path for -browser-render")
+	browserTimeout := fs.Duration("browser-timeout", defaultBrowserRenderTimeout, "maximum time for -browser-render")
+	browserVirtualTime := fs.Duration("browser-virtual-time", defaultBrowserVirtualTimeBudget, "virtual time budget for browser JavaScript rendering")
+	browserWidth := fs.Int("browser-width", defaultBrowserRenderWidth, "browser screenshot viewport width")
+	browserHeight := fs.Int("browser-height", defaultBrowserRenderHeight, "browser screenshot viewport height")
+	browserNonWhiteThreshold := fs.Float64("browser-non-white-threshold", defaultBrowserNonWhiteThreshold, "minimum non-white pixel ratio for -browser-render")
+	browserScreenshot := fs.String("browser-screenshot", "", "optional path to keep the browser screenshot")
 	redactURLs := fs.Bool("redact-urls", true, "redact query values for signed URLs from JSON output")
 	_ = fs.Parse(args)
 	if *preview && *production {
@@ -99,6 +107,27 @@ func probeSite(c client, args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if *browserRender {
+		check := runBrowserRenderCheck(context.Background(), browserRenderOptions{
+			URL:                targetURL,
+			BrowserPath:        *browserPath,
+			Timeout:            *browserTimeout,
+			VirtualTimeBudget:  *browserVirtualTime,
+			Width:              *browserWidth,
+			Height:             *browserHeight,
+			NonWhiteThreshold:  *browserNonWhiteThreshold,
+			KeepScreenshotPath: *browserScreenshot,
+		})
+		report.Browser = &check
+		report.Duration += check.Duration
+		if check.OK {
+			report.Summary["browser_ok"] = 1
+		} else {
+			report.Summary["browser_failed"] = 1
+			report.OK = false
+			report.Errors = append(report.Errors, "browser render failed: "+firstNonEmpty(check.Error, "blank-page check did not pass"))
+		}
 	}
 	if *redactURLs {
 		report = redactSignedProbeReport(report)
@@ -196,6 +225,11 @@ func redactSignedProbeReport(report siteprobe.Report) siteprobe.Report {
 		spa.URL = redactSignedURL(spa.URL)
 		spa.FinalURL = redactSignedURL(spa.FinalURL)
 		report.SPA = &spa
+	}
+	if report.Browser != nil {
+		browser := *report.Browser
+		browser.URL = redactSignedURL(browser.URL)
+		report.Browser = &browser
 	}
 	for i := range report.Assets {
 		report.Assets[i].URL = redactSignedURL(report.Assets[i].URL)

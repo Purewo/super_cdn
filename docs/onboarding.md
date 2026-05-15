@@ -122,7 +122,7 @@ When a published site fails or renders blank, collect these in order:
 | Bucket upload fails | `cdn-doctor -bucket <slug> -path <path>` | Bucket state, route profile, storage target, policy/constraint error |
 | Batch upload partly fails | read `upload-report.json` | Failed paths, attempt counts, retry command in `next_commands` |
 | Public URL works but direct storage URL fails | `cdn-doctor` | Signed URL expiry, replica state, AList/OpenList HEAD-vs-GET behavior |
-| Site has a blank screen | `probe-site` then `site-doctor -path <asset>` | HTML status, JS/CSS MIME, CORS, manifest headers and selected route |
+| Site has a blank screen | `probe-site -browser-render` then `site-doctor -path <asset>` | HTML status, JS/CSS MIME, CORS, manifest headers, selected route and headless screenshot blank-page check |
 | Hybrid deploy waits or fails before publishing | `routing-policy-status` | At least two ready candidates are required for new smart/failover routes |
 
 ## 8. Cleanup
