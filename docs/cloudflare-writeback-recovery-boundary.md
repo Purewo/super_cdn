@@ -20,6 +20,7 @@ Current supported recovery behavior:
 - `refresh-edge-manifest` can republish the active hybrid edge manifest when signatures or manifest contents need repair.
 - `recover-cloudflare-static` can validate the evidence for unrecorded `cloudflare_static` provider writes: source summary, Worker/version/domain evidence and strict live probe. With `-dry-run=false -confirm recover`, it records a non-active Super CDN deployment through a recovery-specific server endpoint and audit action.
 - `cloudflare_static` readiness timeouts before metadata recording no longer require losing all metadata evidence, but a provider write alone is still not enough to activate Super CDN metadata.
+- Live recovery canary `supercdn-recovery-0515-090858.qwk.ccwu.cc` proved this boundary on 2026-05-15: `publish-cloudflare-static` wrote Worker version `89fe1670-c92a-4896-bf22-d198dc2f6fa7` without Super CDN metadata, `recover-cloudflare-static` dry-run verified strict provider evidence, the confirmed write recorded inactive deployment `dpl-diiuko109n5o`, audit logged `site.deployment.cloudflare_static.recovery`, and `reconcile-deployment` returned `status=ok` / `settled=true`.
 
 ## Failure Shapes
 
@@ -87,10 +88,10 @@ The recovery-specific endpoint must keep these properties:
 
 ## Test And Canary Requirements
 
-Before treating this mature, cover these cases:
+Before extending this into activation or hybrid writeback, keep these cases covered:
 
 - unit test: dry-run refuses missing source dir, Worker name, domain or strict probe evidence;
 - unit test: successful recovery writes a deployment record with Cloudflare evidence and a distinct audit action;
 - unit test: activation is rejected without explicit confirmation;
 - integration test: failed strict probe prints a recovery report and writes nothing;
-- live canary: induce or simulate a Cloudflare Static readiness timeout, recover after propagation, then run `reconcile-deployment` and `probe-site` against the recovered deployment.
+- live canary: simulate an unrecorded Cloudflare Static provider write, recover after propagation, then run `reconcile-deployment` and `probe-site` against the recovered deployment. This is currently covered by `supercdn-recovery-0515-090858` / `dpl-diiuko109n5o`.
