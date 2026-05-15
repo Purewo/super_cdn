@@ -24,6 +24,7 @@ Completed after `v0.4.0`:
 - Rollback planning follow-up: `supercdnctl rollback-plan` is a read-only preflight for a target deployment. It returns `metadata_promote` for ready `origin_assisted` rollbacks, and `redeploy_cloudflare_static` / `redeploy_hybrid_edge` plans when Cloudflare assets or active KV state must be republished instead of metadata-promoted. Plans include evidence such as artifact hash, manifest key, Worker name, version id, assets hash, domains and verification status when those fields are available.
 - API contract follow-up: OpenAPI now models `CDNDoctorReport`, `SiteDoctorReport`, route explanation, edge routes, route candidates, asset-bucket init/delete/replica-refresh results, site delete results and `DoctorRecommendation` instead of leaving operator responses as unstructured `AnyObject` responses.
 - CI/security follow-up: GitHub Actions and `scripts/foundation-check.ps1` now run `govulncheck`, GitHub Actions workflow linting, Redocly OpenAPI lint and Worker dependency audit as normal release gates. After pushing, `scripts/github-actions-status.ps1 -Wait -IncludeJobs` checks the GitHub Actions run for the current branch/head SHA and includes job/step summaries on failure. GitHub Actions also runs `go test -race ./...` on Ubuntu so race coverage is not blocked by this Windows host's C toolchain. `go.mod` is pinned to Go `1.25.10` so the vulnerability scan uses the patched standard library.
+- Real-scenario regression follow-up: `scripts/real-scenario-regression.ps1` and `docs/real-scenario-regression.md` provide a read-only JSON evidence harness for existing public sites, authenticated sites/deployments and CDN buckets. It wraps `doctor`, `cdn-doctor`, `site-doctor`, `probe-site` and `reconcile-deployment` without doing provider writes, so refactor slices can collect real environment evidence before asking for mutating canary tests.
 
 Next refactor entry point:
 
@@ -36,6 +37,7 @@ Next refactor entry point:
 - Current narrow package-boundary extractions: `internal/deploymenttarget`, `internal/deploymentevidence`, `internal/edgeheaders`, and server audit action constants in `internal/server/audit.go`.
 - Manual switching now has a safe first apply path for non-policy, non-resource-failover primary-target cases. `switch-plan` separates candidate readiness from apply support so policy/failover routes do not look directly switchable. Metadata-only rollback is blocked for Cloudflare-backed site targets where it would not move real traffic, and `rollback-plan` now gives operators a read-only plan before they attempt recovery. Further switching work should focus on policy-level apply/rollback or full Cloudflare Worker rollback only when the real traffic boundary can be verified end to end.
 - Do not restart at CI/OpenAPI/migrations/audit unless a regression appears.
+- Use the read-only real-scenario regression harness after touching Web delivery, provider evidence, rollback, switching, DNS or storage-provider behavior. Ask for mutating real-provider canaries only after local gates and read-only probes pass.
 
 ## Goal
 

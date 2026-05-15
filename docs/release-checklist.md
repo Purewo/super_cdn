@@ -67,6 +67,23 @@ $env:CGO_ENABLED = "1"
 
 If `go test -race` cannot run because the Windows host lacks a working C toolchain, record it as unverified instead of passed.
 
+## Real Scenario Regression
+
+For refactors or releases that touch Web delivery, provider evidence, rollback, switching, DNS, storage providers or browser rendering, run the read-only regression harness against at least one existing public site or authenticated canary:
+
+```powershell
+.\scripts\real-scenario-regression.ps1 -UseGoRun -PublicUrl https://example.com/ -SpaPath /movie/123 -RequireEdgeStaticHtml -RequireEdgeManifestAssets -OutputPath .\data\real-regression-public.json
+```
+
+For authenticated operator checks, pass `-Server`, `-Site`, `-Deployment`, `-Bucket` and a token/profile:
+
+```powershell
+$env:SUPERCDN_TOKEN = "sct_xxx"
+.\scripts\real-scenario-regression.ps1 -UseGoRun -Server https://qwk.ccwu.cc -Site cyberstream -Deployment dpl_xxx -SitePath /assets/app.js -SpaPath /movie/123 -RequireEdgeStaticHtml -RequireEdgeManifestAssets -OutputPath .\data\real-regression-site.json
+```
+
+The script is read-only and retries failed steps once by default to smooth transient provider reads. Mutating canaries such as A -> B -> rollback A, bucket upload/warmup, IPFS smoke or manual `switch-apply` still need explicit operator confirmation and should be recorded separately. See [real-scenario-regression.md](real-scenario-regression.md).
+
 ## Release Steps
 
 1. Commit all release changes.

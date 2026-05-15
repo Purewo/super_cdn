@@ -52,6 +52,7 @@ Use `-resource-failover` only when the selected route profile has a primary targ
 - New-user onboarding: [docs/onboarding.md](docs/onboarding.md)
 - Advanced command book: [docs/commands.md](docs/commands.md)
 - Parameter-level CLI reference: [docs/cli-reference.md](docs/cli-reference.md)
+- Real scenario regression runbook: [docs/real-scenario-regression.md](docs/real-scenario-regression.md)
 - Formal REST contract: [api/openapi.yaml](api/openapi.yaml)
 - Web-hosting boundary: [docs/web-hosting-boundaries.md](docs/web-hosting-boundaries.md)
 - Release checklist: [docs/release-checklist.md](docs/release-checklist.md)
