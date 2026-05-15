@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"supercdn/internal/deploymentevidence"
 	"supercdn/internal/siteprobe"
 )
 
@@ -227,7 +228,7 @@ func recoverHybridEdge(c client, args []string) error {
 		"entry_origin_fallback":      report.Provider.EntryOriginFallback,
 		"active_key":                 report.Provider.ActiveKey,
 		"deployment_key":             report.Provider.DeploymentKey,
-		"operation":                  "writeback",
+		"operation":                  deploymentevidence.OperationWriteback,
 		"rollback_target_deployment": "",
 	}
 	raw, err := c.recordHybridEdgeEvidence(report.SiteID, report.DeploymentID, req)

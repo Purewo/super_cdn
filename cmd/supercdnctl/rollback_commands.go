@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"supercdn/internal/deploymentevidence"
 )
 
 type rollbackPlanDeployment struct {
@@ -409,7 +411,7 @@ func rollbackApplyCloudflareStatic(c client, dep rollbackPlanDeployment, report 
 		VerifyResolver:    opts.VerifyResolver,
 		Promote:           true,
 		Pinned:            false,
-		Operation:         "rollback_apply",
+		Operation:         deploymentevidence.OperationRollbackApply,
 		RollbackTarget:    dep.ID,
 	})
 	if len(raw) > 0 {
@@ -511,7 +513,7 @@ func rollbackApplyHybridEdge(c client, dep rollbackPlanDeployment, report rollba
 		DefaultCacheControl: rollbackHybridEdgeDefaultCacheControl(dep),
 		CandidateWait:       true,
 		CandidateTimeout:    opts.CandidateTimeout,
-		Operation:           "rollback_apply",
+		Operation:           deploymentevidence.OperationRollbackApply,
 		RollbackTarget:      dep.ID,
 	})
 	if len(raw) > 0 {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"supercdn/internal/config"
+	"supercdn/internal/deploymentevidence"
 	"supercdn/internal/model"
 	"supercdn/internal/siteinspect"
 	"supercdn/internal/storage"
@@ -1068,13 +1069,13 @@ func (s *Server) recordHybridEdgeEvidence(ctx context.Context, siteID, deploymen
 }
 
 func (s *Server) validateHybridEdgeEvidenceOperation(ctx context.Context, siteID string, req recordHybridEdgeEvidenceRequest) (string, string, error) {
-	operation := strings.TrimSpace(req.Operation)
+	operation := deploymentevidence.NormalizeOperation(req.Operation)
 	switch operation {
-	case "", "deploy":
+	case "", deploymentevidence.OperationDeploy:
 		return "", "", nil
-	case "writeback":
+	case deploymentevidence.OperationWriteback:
 		return operation, "", nil
-	case "rollback_apply":
+	case deploymentevidence.OperationRollbackApply:
 		target := cleanDeploymentID(req.RollbackTarget)
 		if target == "" {
 			return "", "", fmt.Errorf("rollback_target_deployment is required for rollback_apply")
@@ -1096,11 +1097,11 @@ func (s *Server) validateHybridEdgeEvidenceOperation(ctx context.Context, siteID
 }
 
 func (s *Server) validateCloudflareStaticRecordOperation(ctx context.Context, siteID string, req recordCloudflareStaticDeploymentRequest) (string, string, error) {
-	operation := strings.TrimSpace(req.Operation)
+	operation := deploymentevidence.NormalizeOperation(req.Operation)
 	switch operation {
-	case "", "deploy":
+	case "", deploymentevidence.OperationDeploy:
 		return "", "", nil
-	case "rollback_apply":
+	case deploymentevidence.OperationRollbackApply:
 		target := cleanDeploymentID(req.RollbackTarget)
 		if target == "" {
 			return "", "", fmt.Errorf("rollback_target_deployment is required for rollback_apply")
@@ -1122,7 +1123,7 @@ func (s *Server) validateCloudflareStaticRecordOperation(ctx context.Context, si
 }
 
 func cloudflareStaticRecordAudit(siteID, deploymentID string, req recordCloudflareStaticDeploymentRequest) (string, string) {
-	if strings.TrimSpace(req.Operation) == "rollback_apply" {
+	if deploymentevidence.NormalizeOperation(req.Operation) == deploymentevidence.OperationRollbackApply {
 		target := cleanDeploymentID(req.RollbackTarget)
 		return "site.deployment.cloudflare_static.rollback", "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
 	}
@@ -1130,10 +1131,10 @@ func cloudflareStaticRecordAudit(siteID, deploymentID string, req recordCloudfla
 }
 
 func hybridEdgeEvidenceAudit(siteID, deploymentID string, req recordHybridEdgeEvidenceRequest) (string, string) {
-	if strings.TrimSpace(req.Operation) == "writeback" {
+	switch deploymentevidence.NormalizeOperation(req.Operation) {
+	case deploymentevidence.OperationWriteback:
 		return "site.deployment.hybrid_edge.writeback", "site:" + siteID + ";deployment:" + deploymentID
-	}
-	if strings.TrimSpace(req.Operation) == "rollback_apply" {
+	case deploymentevidence.OperationRollbackApply:
 		target := cleanDeploymentID(req.RollbackTarget)
 		return "site.deployment.hybrid_edge.rollback", "site:" + siteID + ";deployment:" + deploymentID + ";target:" + target
 	}
@@ -1141,7 +1142,7 @@ func hybridEdgeEvidenceAudit(siteID, deploymentID string, req recordHybridEdgeEv
 }
 
 func hybridEdgeEvidenceRejectedAudit(siteID, deploymentID string, req recordHybridEdgeEvidenceRequest, err error) (string, string) {
-	if strings.TrimSpace(req.Operation) == "writeback" {
+	if deploymentevidence.NormalizeOperation(req.Operation) == deploymentevidence.OperationWriteback {
 		return "site.deployment.hybrid_edge.writeback.rejected", "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + auditReason(err)
 	}
 	return "site.deployment.hybrid_edge.evidence.rejected", "site:" + siteID + ";deployment:" + deploymentID + ";reason:" + auditReason(err)
