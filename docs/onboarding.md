@@ -1,5 +1,7 @@
 # Super CDN Onboarding Guide
 
+[English](onboarding.md) | [简体中文](onboarding.zh-CN.md)
+
 This guide is the shortest supported path for a real user to create a CDN bucket, upload files, publish a Web site, and send useful diagnostics when something fails.
 
 ## 1. Connect And Run Doctor

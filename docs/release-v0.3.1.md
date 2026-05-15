@@ -1,5 +1,7 @@
 # Super CDN v0.3.1
 
+[English](release-v0.3.1.md) | [简体中文](release-v0.3.1.zh-CN.md)
+
 Release date: 2026-05-06
 
 Status: internal stable patch.

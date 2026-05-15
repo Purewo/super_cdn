@@ -1,5 +1,7 @@
 # Super CDN CLI Reference
 
+[English](cli-reference.md) | [简体中文](cli-reference.zh-CN.md)
+
 This is the parameter-level reference for `supercdnctl`: command purpose, HTTP API mapping, request shape, important flags and response fields.
 
 For a workflow-oriented command book, use [docs/commands.md](commands.md). For the shortest real-user path from login to bucket upload, batch upload, Web publish and diagnostics, see [docs/onboarding.md](onboarding.md).

@@ -1,5 +1,7 @@
 # Policy Switching Boundary
 
+[English](policy-switching-boundary.md) | [简体中文](policy-switching-boundary.zh-CN.md)
+
 Last updated: 2026-05-15 Asia/Shanghai.
 
 This note records the current decision for `routing_policy` and `resource_failover` switching. It exists to prevent a false sense of maturity: Super CDN can inspect policy candidates today, but it must not expose a write command that claims to switch policy traffic until the real traffic boundary is proven.

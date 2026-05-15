@@ -1,5 +1,7 @@
 # Cloudflare Rollback Boundary
 
+[English](cloudflare-rollback-boundary.md) | [简体中文](cloudflare-rollback-boundary.zh-CN.md)
+
 Last updated: 2026-05-15 Asia/Shanghai.
 
 This note records the boundary for Cloudflare Static and `hybrid_edge` rollback write commands. It complements `rollback-plan`, which is intentionally read-only.

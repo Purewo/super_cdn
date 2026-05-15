@@ -1,5 +1,7 @@
 # Real Scenario Regression
 
+[English](real-scenario-regression.md) | [简体中文](real-scenario-regression.zh-CN.md)
+
 This runbook is for read-only regression checks against a real Super CDN server or public site after refactor, release, deployment or provider-recovery work.
 
 The default path is intentionally non-mutating. It collects evidence from existing operator commands and fails when any required probe fails. Use separate canary commands for mutating flows such as bucket uploads or rollback writes.

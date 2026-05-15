@@ -1,5 +1,7 @@
 # Super CDN v0.1.0
 
+[English](release-v0.1.0.md) | [简体中文](release-v0.1.0.zh-CN.md)
+
 Release date: 2026-04-30
 
 Status: internal stable milestone.

@@ -1,5 +1,7 @@
 # Cloudflare Writeback And Recovery Boundary
 
+[English](cloudflare-writeback-recovery-boundary.md) | [简体中文](cloudflare-writeback-recovery-boundary.zh-CN.md)
+
 Last updated: 2026-05-15 Asia/Shanghai.
 
 This note defines the boundary for future Cloudflare Static and `hybrid_edge` recovery commands when provider-side writes may have succeeded but Super CDN metadata, readiness verification or activation did not finish cleanly.

@@ -1,5 +1,7 @@
 # Super CDN v0.5.0
 
+[English](release-v0.5.0.md) | [简体中文](release-v0.5.0.zh-CN.md)
+
 Release date: 2026-05-15
 
 Status: staged mature milestone.

@@ -1,5 +1,7 @@
 # Super CDN Maturity Audit
 
+[English](maturity-audit.md) | [简体中文](maturity-audit.zh-CN.md)
+
 Last updated: 2026-05-15 Asia/Shanghai.
 
 This document tracks the current maturity work after the staged `v0.4.0` release. It is intentionally evidence-based: do not mark the product mature because a broad test command passed unless the command covers the specific requirement.

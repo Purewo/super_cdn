@@ -57,17 +57,17 @@ go run .\cmd\supercdnctl -- site-doctor -site cyberstream -path /assets/app.js
 
 ## 文档入口
 
-- 新用户上手流程：[docs/onboarding.md](docs/onboarding.md)
+- 新用户上手流程：[docs/onboarding.zh-CN.md](docs/onboarding.zh-CN.md)
 - 中文命令大全：[docs/commands.zh-CN.md](docs/commands.zh-CN.md)
 - 英文命令大全：[docs/commands.md](docs/commands.md)
-- 参数级 CLI 参考：[docs/cli-reference.md](docs/cli-reference.md)
-- 运维手册：[docs/operations.md](docs/operations.md)
-- 真实场景回归手册：[docs/real-scenario-regression.md](docs/real-scenario-regression.md)
+- 参数级 CLI 参考：[docs/cli-reference.zh-CN.md](docs/cli-reference.zh-CN.md)
+- 运维手册：[docs/operations.zh-CN.md](docs/operations.zh-CN.md)
+- 真实场景回归手册：[docs/real-scenario-regression.zh-CN.md](docs/real-scenario-regression.zh-CN.md)
 - REST API 契约：[api/openapi.yaml](api/openapi.yaml)
-- Web 托管边界：[docs/web-hosting-boundaries.md](docs/web-hosting-boundaries.md)
-- 当前阶段发布说明：[docs/release-v0.5.0.md](docs/release-v0.5.0.md)
-- 成熟度检查清单：[docs/maturity-audit.md](docs/maturity-audit.md)
-- 后续重构计划：[docs/refactor-plan.md](docs/refactor-plan.md)、[docs/tomorrow-plan.md](docs/tomorrow-plan.md)
+- Web 托管边界：[docs/web-hosting-boundaries.zh-CN.md](docs/web-hosting-boundaries.zh-CN.md)
+- 当前阶段发布说明：[docs/release-v0.5.0.zh-CN.md](docs/release-v0.5.0.zh-CN.md)
+- 成熟度检查清单：[docs/maturity-audit.zh-CN.md](docs/maturity-audit.zh-CN.md)
+- 后续重构计划：[docs/refactor-plan.zh-CN.md](docs/refactor-plan.zh-CN.md)、[docs/tomorrow-plan.zh-CN.md](docs/tomorrow-plan.zh-CN.md)
 
 ## 核心概念
 

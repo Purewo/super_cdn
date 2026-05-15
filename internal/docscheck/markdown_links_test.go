@@ -64,6 +64,80 @@ func TestMarkdownLocalLinksResolve(t *testing.T) {
 	}
 }
 
+func TestMarkdownLanguagePairs(t *testing.T) {
+	repo := repoRoot(t)
+	var englishFiles []string
+	englishFiles = append(englishFiles, filepath.Join(repo, "README.md"))
+	docsDir := filepath.Join(repo, "docs")
+	if err := filepath.WalkDir(docsDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || strings.ToLower(filepath.Ext(path)) != ".md" || strings.HasSuffix(path, ".zh-CN.md") {
+			return nil
+		}
+		englishFiles = append(englishFiles, path)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var missing []string
+	for _, english := range englishFiles {
+		zh := strings.TrimSuffix(english, ".md") + ".zh-CN.md"
+		if _, err := os.Stat(zh); err != nil {
+			missing = append(missing, filepath.ToSlash(mustRel(t, repo, english))+" -> missing zh-CN pair")
+			continue
+		}
+		englishRaw, err := os.ReadFile(english)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zhRaw, err := os.ReadFile(zh)
+		if err != nil {
+			t.Fatal(err)
+		}
+		englishName := filepath.Base(english)
+		zhName := filepath.Base(zh)
+		englishSwitch := "[English](" + englishName + ") | [简体中文](" + zhName + ")"
+		zhSwitch := "[English](" + englishName + ") | 简体中文"
+		if !strings.Contains(string(englishRaw), englishSwitch) {
+			missing = append(missing, filepath.ToSlash(mustRel(t, repo, english))+" -> missing language switch")
+		}
+		if !strings.Contains(string(zhRaw), zhSwitch) {
+			missing = append(missing, filepath.ToSlash(mustRel(t, repo, zh))+" -> missing language switch")
+		}
+	}
+
+	zhFiles, err := filepath.Glob(filepath.Join(repo, "README*.zh-CN.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := filepath.WalkDir(docsDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".zh-CN.md") {
+			return nil
+		}
+		zhFiles = append(zhFiles, path)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, zh := range zhFiles {
+		english := strings.TrimSuffix(zh, ".zh-CN.md") + ".md"
+		if _, err := os.Stat(english); err != nil {
+			missing = append(missing, filepath.ToSlash(mustRel(t, repo, zh))+" -> missing English pair")
+		}
+	}
+
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		t.Fatalf("broken bilingual documentation coverage:\n%s", strings.Join(missing, "\n"))
+	}
+}
+
 func localLinkTarget(raw string) string {
 	target := strings.Trim(strings.TrimSpace(raw), "<>")
 	if target == "" || strings.HasPrefix(target, "#") {

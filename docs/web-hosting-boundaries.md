@@ -1,5 +1,7 @@
 # Web Hosting Boundary
 
+[English](web-hosting-boundaries.md) | [简体中文](web-hosting-boundaries.zh-CN.md)
+
 Last updated: 2026-05-02 Asia/Shanghai.
 
 This document records the accepted product boundary for Super CDN Web hosting. It is the reference when implementation, docs, tests or config examples disagree.

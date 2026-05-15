@@ -1,5 +1,7 @@
 # Super CDN Handoff
 
+[English](tomorrow-plan.md) | [简体中文](tomorrow-plan.zh-CN.md)
+
 Last updated: 2026-05-15 Asia/Shanghai.
 
 ## Current State

@@ -1,5 +1,7 @@
 # Release Checklist
 
+[English](release-checklist.md) | [简体中文](release-checklist.zh-CN.md)
+
 Use this checklist before tagging a staged stable release.
 
 ## Scope

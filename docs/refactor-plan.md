@@ -1,5 +1,7 @@
 # Super CDN Refactor Plan
 
+[English](refactor-plan.md) | [简体中文](refactor-plan.zh-CN.md)
+
 Last updated: 2026-05-15 Asia/Shanghai.
 
 Baseline: `v0.5.0` is the current staged mature release. It freezes the post-`v0.4.0` structure, operations, documentation and real-scenario regression maturity cycle before the next product feature slice.

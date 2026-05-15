@@ -6,9 +6,9 @@
 
 深入参考：
 
-- 参数细节：[cli-reference.md](cli-reference.md)
-- 新用户流程：[onboarding.md](onboarding.md)
-- 运维手册：[operations.md](operations.md)
+- 参数细节：[cli-reference.zh-CN.md](cli-reference.zh-CN.md)
+- 新用户流程：[onboarding.zh-CN.md](onboarding.zh-CN.md)
+- 运维手册：[operations.zh-CN.md](operations.zh-CN.md)
 - API 契约：[../api/openapi.yaml](../api/openapi.yaml)
 
 ## 约定
