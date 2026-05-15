@@ -30,7 +30,7 @@ Concrete success criteria:
 | API contract | `api/openapi.yaml` | Redocly lint passed locally. The schema no longer uses catch-all `AnyObject`; remaining dynamic response extensions use typed primary fields plus `additionalProperties: true` where forward compatibility is intentional. |
 | Versioned migrations | `internal/db` migration code and tests | Covered by existing DB tests in `go test ./...`. |
 | Audit query surface | `GET /api/v1/audit-events`, `supercdnctl audit-log` | Tests cover workspace scoping, viewer rejection and CLI query parameters. |
-| Audit action ownership | `internal/server/audit.go` | Server-side audit action names are centralized as constants. Handler code references constants, while tests still assert literal action strings to catch accidental contract changes. |
+| Audit action ownership | `internal/server/audit.go` | Server-side audit action names are centralized as constants. Handler code references constants, while tests still assert literal action strings to catch accidental contract changes. Commit `b450185` passed local `foundation-check.ps1 -SkipLinuxBuild -Race` and CI run `25902976766`. |
 | Dangerous rollback audit | `site.deployment.promote.rejected` | Tests cover rejected `cloudflare_static` and `hybrid_edge` metadata promote attempts writing audit events. |
 | Server ownership boundary | `internal/server/server.go` plus split handler/service files | `server.go` is now route/lifecycle plumbing; feature code lives in narrower files. |
 | CLI ownership boundary | `cmd/supercdnctl/main.go` plus command files | `main.go` is dispatcher/global flag plumbing; command groups live in separate files. |
