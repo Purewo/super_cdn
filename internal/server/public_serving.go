@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"supercdn/internal/edgeheaders"
 	"supercdn/internal/model"
 	"supercdn/internal/storage"
 )
@@ -97,10 +98,10 @@ func (s *Server) serveBucketAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	if target, policyName, reason, candidate, ok := s.bucketRoutingRedirect(r.Context(), r, bucketConfig, obj); ok {
 		setDynamicRedirectNoStore(w.Header())
-		w.Header().Set("X-SuperCDN-Redirect", "storage")
-		w.Header().Set("X-SuperCDN-Route-Policy", policyName)
-		w.Header().Set("X-SuperCDN-Route-Target", candidate.Target)
-		w.Header().Set("X-SuperCDN-Route-Reason", reason)
+		w.Header().Set(edgeheaders.HeaderRedirect, edgeheaders.RedirectStorage)
+		w.Header().Set(edgeheaders.HeaderRoutePolicy, policyName)
+		w.Header().Set(edgeheaders.HeaderRouteTarget, candidate.Target)
+		w.Header().Set(edgeheaders.HeaderRouteReason, reason)
 		http.Redirect(w, r, target, http.StatusFound)
 		return
 	}
@@ -171,7 +172,7 @@ func (s *Server) serveDownloadRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Info("site direct download redirect", "site", siteID, "deployment", deploymentID, "path", objectPath, "object_id", obj.ID, "target", obj.PrimaryTarget)
 	w.Header().Set("Cache-Control", firstNonEmpty(obj.CacheControl, "public, max-age=300"))
-	w.Header().Set("X-SuperCDN-Redirect", "storage")
+	w.Header().Set(edgeheaders.HeaderRedirect, edgeheaders.RedirectStorage)
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
@@ -307,10 +308,10 @@ func (s *Server) writeSiteFile(w http.ResponseWriter, r *http.Request, site *mod
 	if s.shouldRedirectSiteFile(r, rules, objectPath, status) {
 		if target, policyName, reason, candidate, ok := s.siteRoutingRedirect(r.Context(), r, site, dep, obj); ok {
 			setDynamicRedirectNoStore(w.Header())
-			w.Header().Set("X-SuperCDN-Redirect", "storage")
-			w.Header().Set("X-SuperCDN-Route-Policy", policyName)
-			w.Header().Set("X-SuperCDN-Route-Target", candidate.Target)
-			w.Header().Set("X-SuperCDN-Route-Reason", reason)
+			w.Header().Set(edgeheaders.HeaderRedirect, edgeheaders.RedirectStorage)
+			w.Header().Set(edgeheaders.HeaderRoutePolicy, policyName)
+			w.Header().Set(edgeheaders.HeaderRouteTarget, candidate.Target)
+			w.Header().Set(edgeheaders.HeaderRouteReason, reason)
 			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}
@@ -321,7 +322,7 @@ func (s *Server) writeSiteFile(w http.ResponseWriter, r *http.Request, site *mod
 		}
 		if err == nil && target != "" {
 			setDynamicRedirectNoStore(w.Header())
-			w.Header().Set("X-SuperCDN-Redirect", "storage")
+			w.Header().Set(edgeheaders.HeaderRedirect, edgeheaders.RedirectStorage)
 			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}

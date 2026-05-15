@@ -243,8 +243,6 @@ const (
 	cloudflareStaticHTMLCacheControl      = "public, max-age=0, must-revalidate"
 	cloudflareStaticShortCacheControl     = "public, max-age=300, must-revalidate"
 	cloudflareStaticImmutableCacheControl = "public, max-age=31536000, immutable"
-	cloudflareStaticEdgeSourceHeader      = "X-SuperCDN-Edge-Source"
-	cloudflareStaticEdgeSourceValue       = "cloudflare_static"
 
 	cloudflareStaticVerifyWait = "wait"
 	cloudflareStaticVerifyWarn = "warn"

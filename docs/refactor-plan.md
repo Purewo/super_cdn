@@ -33,6 +33,7 @@ Next refactor entry point:
 - Phase 6 large-file reduction is substantially complete. Continue only with narrow package-boundary work where a stable boundary is obvious.
 - Do not move behavior again just to reduce line counts; next work should be focused tests, docs alignment, or package extraction with clear ownership.
 - CLI cleanup is mostly complete for now; only revisit it for command-specific tests, help text fixes or smaller ownership tweaks.
+- Current narrow package-boundary extractions: `internal/deploymenttarget`, `internal/deploymentevidence`, and `internal/edgeheaders`.
 - Manual switching now has a safe first apply path for non-policy, non-resource-failover primary-target cases. `switch-plan` separates candidate readiness from apply support so policy/failover routes do not look directly switchable. Metadata-only rollback is blocked for Cloudflare-backed site targets where it would not move real traffic, and `rollback-plan` now gives operators a read-only plan before they attempt recovery. Further switching work should focus on policy-level apply/rollback or full Cloudflare Worker rollback only when the real traffic boundary can be verified end to end.
 - Do not restart at CI/OpenAPI/migrations/audit unless a regression appears.
 

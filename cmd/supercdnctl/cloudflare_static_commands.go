@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"supercdn/internal/edgeheaders"
 )
 
 func publishCloudflareStatic(args []string) error {
@@ -345,7 +347,7 @@ func generatedCloudflareStaticHeaders(root string) string {
 }
 
 func cloudflareStaticHeadersHaveEdgeSource(raw []byte) bool {
-	return strings.Contains(strings.ToLower(string(raw)), strings.ToLower(cloudflareStaticEdgeSourceHeader)+":")
+	return strings.Contains(strings.ToLower(string(raw)), strings.ToLower(edgeheaders.HeaderSource)+":")
 }
 
 func appendCloudflareStaticEdgeSourceHeader(path string) error {
@@ -367,7 +369,7 @@ func appendCloudflareStaticEdgeSourceHeader(path string) error {
 }
 
 func cloudflareStaticEdgeSourceHeaderBlock() string {
-	return "/*\n  " + cloudflareStaticEdgeSourceHeader + ": " + cloudflareStaticEdgeSourceValue + "\n\n"
+	return "/*\n  " + edgeheaders.HeaderSource + ": " + edgeheaders.SourceCloudflareStatic + "\n\n"
 }
 
 func listCloudflareStaticHeaderFiles(root string) []string {

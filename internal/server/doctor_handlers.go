@@ -14,6 +14,7 @@ import (
 
 	"supercdn/internal/config"
 	"supercdn/internal/db"
+	"supercdn/internal/edgeheaders"
 	"supercdn/internal/model"
 	"supercdn/internal/storage"
 )
@@ -787,28 +788,28 @@ func siteDoctorExpectedHeaders(dep *model.SiteDeployment, route *routeExplainRes
 	target := firstNonEmpty(dep.DeploymentTarget, model.SiteDeploymentTargetOriginAssisted)
 	switch target {
 	case model.SiteDeploymentTargetCloudflareStatic:
-		headers["X-SuperCDN-Edge-Source"] = "cloudflare_static"
+		headers[edgeheaders.HeaderSource] = edgeheaders.SourceCloudflareStatic
 	case model.SiteDeploymentTargetHybridEdge:
-		headers["X-SuperCDN-Edge-Manifest"] = "route"
+		headers[edgeheaders.HeaderManifest] = edgeheaders.ManifestRoute
 		if route != nil && route.Route.File != "" {
-			headers["X-SuperCDN-Edge-File"] = route.Route.File
+			headers[edgeheaders.HeaderFile] = route.Route.File
 		}
 		if route != nil {
 			if source := expectedEdgeSourceForRoute(route.Route); source != "" {
-				headers["X-SuperCDN-Edge-Source"] = source
+				headers[edgeheaders.HeaderSource] = source
 			}
 			if route.Selection != nil && route.Selection.Target != "" {
-				headers["X-SuperCDN-Route-Target"] = route.Selection.Target
+				headers[edgeheaders.HeaderRouteTarget] = route.Selection.Target
 			}
 		}
 	case model.SiteDeploymentTargetOriginAssisted:
 		if route != nil && route.Route.Type != "origin" {
-			headers["X-SuperCDN-Redirect"] = "storage"
+			headers[edgeheaders.HeaderRedirect] = edgeheaders.RedirectStorage
 			if route.RoutingPolicy != "" {
-				headers["X-SuperCDN-Route-Policy"] = route.RoutingPolicy
+				headers[edgeheaders.HeaderRoutePolicy] = route.RoutingPolicy
 			}
 			if route.Selection != nil && route.Selection.Target != "" {
-				headers["X-SuperCDN-Route-Target"] = route.Selection.Target
+				headers[edgeheaders.HeaderRouteTarget] = route.Selection.Target
 			}
 		}
 	}
@@ -821,13 +822,13 @@ func siteDoctorExpectedHeaders(dep *model.SiteDeployment, route *routeExplainRes
 func expectedEdgeSourceForRoute(route edgeManifestRoute) string {
 	switch route.Type {
 	case "ipfs":
-		return "ipfs_gateway"
+		return edgeheaders.SourceIPFSGateway
 	case "failover":
-		return "resource_failover"
+		return edgeheaders.SourceResourceFailover
 	case "redirect", "smart":
-		return "manifest"
+		return edgeheaders.SourceManifest
 	case "origin":
-		return "cloudflare_static"
+		return edgeheaders.SourceCloudflareStatic
 	default:
 		return ""
 	}

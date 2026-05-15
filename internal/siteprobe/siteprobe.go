@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"supercdn/internal/edgeheaders"
 )
 
 const (
@@ -198,7 +200,7 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 			check.OK = false
 			check.Error = "SPA fallback did not return HTML"
 		}
-		if check.OK && opts.RequireEdgeStaticHTML && !strings.EqualFold(check.EdgeSource, "cloudflare_static") {
+		if check.OK && opts.RequireEdgeStaticHTML && !strings.EqualFold(check.EdgeSource, edgeheaders.SourceCloudflareStatic) {
 			check.OK = false
 			check.Error = "SPA fallback was not served by Cloudflare Static Assets"
 		}
@@ -278,7 +280,7 @@ func validateHTML(report *Report, opts Options) {
 		report.HTML.OK = false
 		report.HTML.Error = "root HTML cache policy is not revalidating"
 	}
-	if opts.RequireEdgeStaticHTML && !strings.EqualFold(report.HTML.EdgeSource, "cloudflare_static") {
+	if opts.RequireEdgeStaticHTML && !strings.EqualFold(report.HTML.EdgeSource, edgeheaders.SourceCloudflareStatic) {
 		report.Errors = append(report.Errors, "root HTML was not served by Cloudflare Static Assets")
 		report.HTML.OK = false
 		report.HTML.Error = "root HTML was not served by Cloudflare Static Assets"
@@ -368,10 +370,10 @@ func fetch(ctx context.Context, client *http.Client, rawURL, origin string, maxB
 			Location:                 resp.Header.Get("Location"),
 			ContentType:              resp.Header.Get("Content-Type"),
 			CacheControl:             resp.Header.Get("Cache-Control"),
-			SuperCDNRedirect:         resp.Header.Get("X-Supercdn-Redirect"),
-			SuperCDNEdgeSource:       resp.Header.Get("X-SuperCDN-Edge-Source"),
-			SuperCDNEdgeManifest:     resp.Header.Get("X-SuperCDN-Edge-Manifest"),
-			SuperCDNEdgeAction:       resp.Header.Get("X-SuperCDN-Edge-Action"),
+			SuperCDNRedirect:         resp.Header.Get(edgeheaders.HeaderRedirect),
+			SuperCDNEdgeSource:       resp.Header.Get(edgeheaders.HeaderSource),
+			SuperCDNEdgeManifest:     resp.Header.Get(edgeheaders.HeaderManifest),
+			SuperCDNEdgeAction:       resp.Header.Get(edgeheaders.HeaderAction),
 			AccessControlAllowOrigin: resp.Header.Get("Access-Control-Allow-Origin"),
 			LatencyMS:                latency,
 		}
