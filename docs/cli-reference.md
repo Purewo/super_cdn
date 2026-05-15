@@ -72,6 +72,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `publish-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 发布边缘 manifest 到 Cloudflare Workers KV |
 | `refresh-edge-manifest` | `POST /api/v1/sites/{id}/deployments/{deployment}/edge-manifest/publish` | 刷新 active edge manifest 并默认执行 hybrid 探测 |
 | `rollback-plan` | `GET /api/v1/sites/{id}/deployments/{deployment}` | 只读生成 deployment 回滚方式，区分 metadata promote 与 Cloudflare 重新发布 |
+| `reconcile-deployment` | `GET /api/v1/sites/{id}/deployments/{deployment}` + HTTP probe | Read-only reconcile of Super CDN deployment metadata against real Cloudflare Static / hybrid-edge provider state after a readiness timeout |
 | `publish-cloudflare-static` | 本地 Wrangler 调用 | 发布本地目录到 Cloudflare Workers Static Assets |
 | `promote-deployment` | `POST /api/v1/sites/{id}/deployments/{deployment}/promote` | 将部署提升为当前生产版本 |
 | `delete-deployment` | `DELETE /api/v1/sites/{id}/deployments/{deployment}` | 删除未激活且未 pinned 的部署 |
@@ -583,6 +584,30 @@ HTTP: `GET /api/v1/sites/{id}/deployments/{deployment}`
 | --- | --- | --- | --- |
 | `-site` | 是 | 空 | 站点 ID |
 | `-deployment` | 是 | 空 | Deployment ID |
+
+#### reconcile-deployment
+
+Read-only reconciliation for Cloudflare-backed deployments after a provider write may have succeeded but readiness verification timed out. It loads Super CDN deployment metadata, chooses target-specific strict probe requirements, probes the real production URL, and returns `settled`, metadata summary, provider summary, redacted probe evidence and next commands. It does not mutate Super CDN metadata or Cloudflare state.
+
+```powershell
+.\bin\supercdnctl.exe reconcile-deployment -site blog
+.\bin\supercdnctl.exe reconcile-deployment -site blog -deployment dpl-abc
+.\bin\supercdnctl.exe reconcile-deployment -site blog -deployment dpl-abc -spa-path /movie/123
+```
+
+For `cloudflare_static`, the reconciler requires Cloudflare Static HTML evidence and direct same-site assets; when the deployment was recorded with generated headers, it also checks revalidating HTML and immutable asset cache headers. For `hybrid_edge`, it requires Cloudflare Static entry HTML and manifest-routed JS/CSS first hops.
+
+Parameters:
+| Parameter | Required | Default | Description |
+| --- | --- | --- | --- |
+| `-site` | Yes | Empty | Site ID |
+| `-deployment` | No | active production | Deployment ID |
+| `-url` | No | deployment production URL | Explicit public URL to probe |
+| `-spa-path` | No | Empty | Optional SPA route to verify as HTML |
+| `-max-assets` | No | `20` | Maximum JS/CSS assets to probe |
+| `-timeout` | No | `30s` | Overall probe timeout |
+| `-resolver` | No | system DNS | Optional DNS resolver for probes |
+| `-redact-urls` | No | `true` | Redact signed query values in the probe report |
 
 #### export-edge-manifest
 

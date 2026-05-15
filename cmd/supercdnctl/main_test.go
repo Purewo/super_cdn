@@ -134,6 +134,117 @@ func TestAuditLogCallsAPI(t *testing.T) {
 	}
 }
 
+func TestReconcileHybridDeploymentRunsStrictProbe(t *testing.T) {
+	siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
+			w.Header().Set("X-SuperCDN-Edge-Source", "cloudflare_static")
+			_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			w.Header().Set("Content-Type", "text/javascript")
+			w.Header().Set("X-SuperCDN-Edge-Source", "manifest")
+			w.Header().Set("X-SuperCDN-Edge-Manifest", "route")
+			w.Header().Set("X-SuperCDN-Edge-Action", "route")
+			_, _ = w.Write([]byte(`console.log("ok")`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer siteSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/demo/deployments/dpl-1" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-1",
+			"site_id":           "demo",
+			"environment":       "production",
+			"status":            "active",
+			"route_profile":     "china_mobile",
+			"deployment_target": "hybrid_edge",
+			"active":            true,
+			"production_url":    siteSrv.URL + "/",
+			"site_domains":      []string{"demo.example.com"},
+		})
+	}))
+	defer apiSrv.Close()
+
+	var err error
+	out := captureStdout(t, func() {
+		err = reconcileDeployment(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{"-site", "demo", "-deployment", "dpl-1"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report reconcileDeploymentReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "ok" || !report.Settled || !report.Provider.RequireEdgeManifestAssets {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if report.Provider.AssetOK != 1 || report.Provider.HTMLSource != "cloudflare_static" {
+		t.Fatalf("unexpected provider summary: %+v", report.Provider)
+	}
+	if !strings.Contains(strings.Join(report.NextCommands, "\n"), "refresh-edge-manifest") {
+		t.Fatalf("missing refresh hint: %+v", report.NextCommands)
+	}
+}
+
+func TestReconcileCloudflareStaticFailureReturnsReport(t *testing.T) {
+	siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<script src="/app.js"></script>`))
+	}))
+	defer siteSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sites/demo/deployments/dpl-static" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                "dpl-static",
+			"site_id":           "demo",
+			"environment":       "production",
+			"status":            "active",
+			"route_profile":     "overseas",
+			"deployment_target": "cloudflare_static",
+			"active":            true,
+			"production_url":    siteSrv.URL + "/",
+			"cloudflare_static": map[string]any{
+				"worker_name":         "supercdn-demo-static",
+				"headers_generated":   true,
+				"verification_status": "verify_failed_after_provider_write",
+			},
+		})
+	}))
+	defer apiSrv.Close()
+
+	var err error
+	out := captureStdout(t, func() {
+		err = reconcileDeployment(client{baseURL: apiSrv.URL, token: "test-token", http: apiSrv.Client()}, []string{"-site", "demo", "-deployment", "dpl-static"})
+	})
+	if err == nil {
+		t.Fatal("expected reconcile failure")
+	}
+	var report reconcileDeploymentReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != "failed" || report.Settled {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if !report.Provider.RequireDirectAssets || !report.Provider.RequireHTMLRevalidate {
+		t.Fatalf("unexpected probe requirements: %+v", report.Provider)
+	}
+	if !strings.Contains(strings.Join(report.Warnings, "\n"), "provider state is not verified") {
+		t.Fatalf("missing warning: %+v", report.Warnings)
+	}
+}
+
 func TestCDNDoctorCallsAPI(t *testing.T) {
 	var saw bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

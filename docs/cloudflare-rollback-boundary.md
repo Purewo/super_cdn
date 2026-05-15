@@ -13,6 +13,7 @@ Current supported behavior:
 - `promote-deployment` blocks non-active `cloudflare_static` and `hybrid_edge` metadata-only rollback.
 - rejected metadata rollback attempts are audited as `site.deployment.promote.rejected`.
 - `rollback-plan` returns a read-only plan, version evidence when available, and explicit `write_blockers[]` / `missing_evidence[]` for any Cloudflare-backed rollback write path.
+- `reconcile-deployment` is a read-only post-timeout inspection command for comparing recorded Super CDN deployment metadata with live Cloudflare Static / hybrid-edge provider behavior.
 - `delete-deployment` warns that Cloudflare Worker versions, custom domains and KV entries are not deleted.
 - `refresh-edge-manifest` can republish the active hybrid edge manifest after repair or signature recovery, but it is not a deployment rollback command.
 
@@ -27,6 +28,7 @@ The live run also exposed two operator risks:
 
 - Cloudflare custom-domain propagation can outlast the CLI readiness timeout even when the provider write later succeeds.
 - `repo_china_mobile` AList upload visibility failed for new hybrid deployment paths and correctly blocked activation. This specific visibility issue was later reproduced, fixed by refreshing the AList/OpenList parent directory before post-upload stat retry, deployed from commit `c2243727223d9ce9bf20a4692ff25797ec2c021e`, and revalidated by mobile hybrid canary `dpl-diit34iw5d3t`.
+- Recorded post-timeout deployments can now be inspected with `reconcile-deployment`; live run on `supercdn-maturity-hybrid-0515` deployment `dpl-diit34iw5d3t` returned `settled=true` with entry HTML from `cloudflare_static` and manifest-routed JS through `repo_china_mobile`.
 
 ## Why A Metadata Rollback Is Unsafe
 
