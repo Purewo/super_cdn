@@ -22,6 +22,8 @@ security:
 tags:
   - name: Auth
     description: Invite, login, user and token management.
+  - name: Quotas
+    description: Per-user cumulative upload quotas and root-admin approval workflow.
   - name: Diagnostics
     description: Operator support reports, route checks and provider status.
   - name: Audit
@@ -171,6 +173,169 @@ paths:
                     example: ok
                   token_id:
                     type: string
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/quota":
+    get:
+      tags: [Quotas]
+      operationId: getCurrentUserQuota
+      summary: Read the current user's upload quota
+      description: Root admin tokens are reported as unlimited. Non-root users default to a cumulative 10 GiB upload quota.
+      responses:
+        "200":
+          description: Current quota view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  "/api/v1/quota/requests":
+    post:
+      tags: [Quotas]
+      operationId: createQuotaRequest
+      summary: Request a higher upload quota
+      description: Creates a pending request for the current non-root user. Only a root admin token can approve or reject it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQuotaRequest"
+      responses:
+        "201":
+          description: Quota request was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaRequestResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    get:
+      tags: [Quotas]
+      operationId: listQuotaRequests
+      summary: List quota requests
+      description: Non-root users see only their own requests. Root admin tokens can filter by workspace, user and status.
+      parameters:
+        - name: workspace_id
+          in: query
+          schema:
+            type: string
+          description: Root-only workspace filter.
+        - name: user_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+          description: Root-only user filter.
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, approved, rejected]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: Quota requests.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requests]
+                properties:
+                  requests:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UserQuotaRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/api/v1/quota/requests/{id}/approve":
+    post:
+      tags: [Quotas]
+      operationId: approveQuotaRequest
+      summary: Approve a quota request
+      description: Root-admin only. If approved_max_bytes is omitted or zero, the requested value is used.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveQuotaRequest"
+      responses:
+        "200":
+          description: Request was approved and user quota was updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaDecisionResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/quota/requests/{id}/reject":
+    post:
+      tags: [Quotas]
+      operationId: rejectQuotaRequest
+      summary: Reject a quota request
+      description: Root-admin only.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectQuotaRequest"
+      responses:
+        "200":
+          description: Request was rejected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaDecisionResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/api/v1/quota/users/{id}":
+    post:
+      tags: [Quotas]
+      operationId: setUserQuota
+      summary: Set a user's upload quota directly
+      description: Root-admin only direct override for a workspace user.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetUserQuotaRequest"
+      responses:
+        "200":
+          description: Quota was updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaResponse"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -1898,6 +2063,133 @@ components:
           type: string
           format: date-time
       additionalProperties: true
+    UserUploadQuota:
+      type: object
+      required: [workspace_id, user_id, max_bytes, used_bytes, remaining_bytes]
+      properties:
+        workspace_id:
+          type: string
+        user_id:
+          type: integer
+          format: int64
+        max_bytes:
+          type: integer
+          format: int64
+          description: Cumulative upload quota. Non-root users default to 10737418240 bytes.
+        used_bytes:
+          type: integer
+          format: int64
+        remaining_bytes:
+          type: integer
+          format: int64
+        unlimited:
+          type: boolean
+          description: True for root admin tokens, which bypass user quotas.
+        approved_by:
+          type: integer
+          format: int64
+        approved_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    UserQuotaRequest:
+      type: object
+      required: [id, workspace_id, user_id, requested_max_bytes, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        workspace_id:
+          type: string
+        user_id:
+          type: integer
+          format: int64
+        requested_max_bytes:
+          type: integer
+          format: int64
+        reason:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        decided_by:
+          type: integer
+          format: int64
+        decided_at:
+          type: string
+          format: date-time
+        decision_note:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    QuotaResponse:
+      type: object
+      required: [quota, default_max_bytes]
+      properties:
+        quota:
+          $ref: "#/components/schemas/UserUploadQuota"
+        default_max_bytes:
+          type: integer
+          format: int64
+          example: 10737418240
+    CreateQuotaRequest:
+      type: object
+      required: [requested_max_bytes]
+      properties:
+        requested_max_bytes:
+          type: integer
+          format: int64
+        reason:
+          type: string
+    QuotaRequestResponse:
+      type: object
+      required: [request]
+      properties:
+        request:
+          $ref: "#/components/schemas/UserQuotaRequest"
+    ApproveQuotaRequest:
+      type: object
+      properties:
+        workspace_id:
+          type: string
+        approved_max_bytes:
+          type: integer
+          format: int64
+        note:
+          type: string
+    RejectQuotaRequest:
+      type: object
+      properties:
+        workspace_id:
+          type: string
+        note:
+          type: string
+    SetUserQuotaRequest:
+      type: object
+      required: [max_bytes]
+      properties:
+        workspace_id:
+          type: string
+        max_bytes:
+          type: integer
+          format: int64
+        note:
+          type: string
+    QuotaDecisionResponse:
+      type: object
+      required: [request]
+      properties:
+        request:
+          $ref: "#/components/schemas/UserQuotaRequest"
+        quota:
+          $ref: "#/components/schemas/UserUploadQuota"
     AuditEvent:
       type: object
       required: [id, workspace_id, action, resource, created_at]

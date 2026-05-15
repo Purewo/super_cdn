@@ -21,6 +21,11 @@ const (
 	auditActionAuthTokenCreate  = "auth.token.create"
 	auditActionAuthTokenRevoke  = "auth.token.revoke"
 
+	auditActionQuotaRequestCreate  = "quota.request.create"
+	auditActionQuotaRequestApprove = "quota.request.approve"
+	auditActionQuotaRequestReject  = "quota.request.reject"
+	auditActionQuotaSet            = "quota.set"
+
 	auditActionAssetBucketCreate              = "asset_bucket.create"
 	auditActionAssetBucketDelete              = "asset_bucket.delete"
 	auditActionAssetBucketPurge               = "asset_bucket.purge"

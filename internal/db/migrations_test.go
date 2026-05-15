@@ -67,6 +67,8 @@ func TestOpenAppliesNamedSchemaMigrationsToOldDatabase(t *testing.T) {
 	assertColumnExists(t, ctx, state, "site_deployments", "deployment_target")
 	assertColumnExists(t, ctx, state, "site_deployments", "routing_policy")
 	assertColumnExists(t, ctx, state, "site_deployments", "resource_failover")
+	assertTableExists(t, ctx, state, "user_upload_quotas")
+	assertTableExists(t, ctx, state, "user_quota_requests")
 }
 
 func TestOpenReturnsClearSchemaMigrationCheckError(t *testing.T) {
@@ -116,6 +118,14 @@ func assertColumnExists(t *testing.T, ctx context.Context, state *DB, table, col
 		t.Fatalf("iterate table_info(%s): %v", table, err)
 	}
 	t.Fatalf("column %s.%s was not created", table, column)
+}
+
+func assertTableExists(t *testing.T, ctx context.Context, state *DB, table string) {
+	t.Helper()
+	var name string
+	if err := state.SQL().QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name); err != nil {
+		t.Fatalf("table %s was not created: %v", table, err)
+	}
 }
 
 func oldSchemaStatements() []string {

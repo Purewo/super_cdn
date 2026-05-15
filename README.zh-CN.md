@@ -106,10 +106,13 @@ go run .\cmd\supercdnctl -- site-doctor -site cyberstream -path /assets/app.js
 go run .\cmd\supercdnctl -- -token <root-token> invite-user -name alice -role maintainer
 go run .\cmd\supercdnctl -- -server https://qwk.ccwu.cc -profile alice login -invite-token sci_xxx
 go run .\cmd\supercdnctl -- -profile alice whoami
+go run .\cmd\supercdnctl -- -profile alice quota
 go run .\cmd\supercdnctl -- -profile alice doctor
 ```
 
 用户 token 保存在本地 `supercdn/cli.json` profile 中，并按 workspace 生效。Owner 可以管理邀请和 token；maintainer 可以创建资源桶和部署网站；viewer 只读。Cloudflare、R2、AList 等底层配置命令仍保持 root-only。
+
+非 root 用户默认累计上传配额为 10 GiB。总上传量低于剩余额度时，用户配额层不再附加更细限制。用户可以运行 `request-quota -max-gb 20 -reason "release test"` 创建申请；只有 root 管理员 token 可以用 `approve-quota` 审批，或用 `set-user-quota` 直接调整某个用户。
 
 ## 运维检查
 

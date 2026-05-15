@@ -56,6 +56,9 @@ func (s *Server) handlePreflightUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.preflightProfile(r.Context(), req.RouteProfile, profile, req)
 	if err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -96,6 +99,9 @@ func (s *Server) handlePreflightSiteDeploy(w http.ResponseWriter, r *http.Reques
 	}
 	result, err := s.preflightProfile(r.Context(), profileName, profile, req)
 	if err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -143,6 +149,9 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 		LargestFileSize: staged.Size,
 		BatchFileCount:  1,
 	}); err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -156,6 +165,20 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	cacheControl := firstNonEmpty(r.FormValue("cache_control"), profile.DefaultCacheControl, "public, max-age=3600")
 	key := storage.JoinKey("objects", projectID, objectPath)
+	reservation, _, err := s.reserveUploadQuota(r.Context(), staged.Size)
+	if err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	quotaCommitted := false
+	defer func() {
+		if !quotaCommitted {
+			s.releaseUploadQuota(r.Context(), reservation)
+		}
+	}()
 	obj, jobs, err := s.putObjectFromFile(r.Context(), putObjectInput{
 		ProjectID:      projectID,
 		ObjectPath:     objectPath,
@@ -174,6 +197,7 @@ func (s *Server) handleUploadAsset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	quotaCommitted = true
 	writeJSON(w, http.StatusCreated, s.withOverclockWarning(map[string]any{
 		"object": obj,
 		"jobs":   jobs,

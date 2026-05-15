@@ -54,6 +54,8 @@ $env:SUPERCDN_TOKEN = "change-me"
 
 ```powershell
 .\bin\supercdnctl.exe doctor
+.\bin\supercdnctl.exe quota
+.\bin\supercdnctl.exe request-quota -max-gb 20 -reason "temporary release"
 .\bin\supercdnctl.exe create-cdn-bucket -slug downloads -name downloads -types archive
 .\bin\supercdnctl.exe upload-bucket -bucket downloads -file .\app.zip -path release/v1/app.zip -asset-type archive -warmup
 .\bin\supercdnctl.exe upload-bucket-dir -bucket downloads -dir .\release -prefix release/v1 -skip-existing -retry 2 -report-file .\upload-report.json

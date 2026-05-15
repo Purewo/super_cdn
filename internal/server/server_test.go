@@ -369,6 +369,93 @@ func TestTeamInviteLoginAndRolePermissions(t *testing.T) {
 	}
 }
 
+func TestUserUploadQuotaDefaultAndEnforcement(t *testing.T) {
+	app := newTestServer(t)
+	apiToken := acceptInviteForTest(t, app, createInviteForTest(t, app, "quota-user", model.RoleMaintainer))
+	userID := userIDForName(t, app, "quota-user")
+
+	quotaRec := apiJSON(t, app, http.MethodGet, "/api/v1/quota", apiToken, nil)
+	if quotaRec.Code != http.StatusOK || !strings.Contains(quotaRec.Body.String(), `"max_bytes":10737418240`) {
+		t.Fatalf("default quota status = %d body=%s", quotaRec.Code, quotaRec.Body.String())
+	}
+
+	set := apiJSON(t, app, http.MethodPost, "/api/v1/quota/users/"+strconv.FormatInt(userID, 10), "test-token", map[string]any{"max_bytes": int64(10)})
+	if set.Code != http.StatusOK {
+		t.Fatalf("set quota status = %d body=%s", set.Code, set.Body.String())
+	}
+
+	body, ctype := multipartBody(t, map[string]string{
+		"project_id":    "quota-assets",
+		"path":          "/ok.txt",
+		"route_profile": "overseas",
+	}, "file", "ok.txt", []byte("1234567"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/assets", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+apiToken)
+	rec := httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("upload within quota status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	quotaRec = apiJSON(t, app, http.MethodGet, "/api/v1/quota", apiToken, nil)
+	if quotaRec.Code != http.StatusOK || !strings.Contains(quotaRec.Body.String(), `"used_bytes":7`) || !strings.Contains(quotaRec.Body.String(), `"remaining_bytes":3`) {
+		t.Fatalf("quota after upload status = %d body=%s", quotaRec.Code, quotaRec.Body.String())
+	}
+
+	body, ctype = multipartBody(t, map[string]string{
+		"project_id":    "quota-assets",
+		"path":          "/blocked.txt",
+		"route_profile": "overseas",
+	}, "file", "blocked.txt", []byte("1234"))
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/assets", body)
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+apiToken)
+	rec = httptest.NewRecorder()
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"code":"user_upload_quota_exceeded"`) {
+		t.Fatalf("upload over quota status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestQuotaRequestRequiresRootApproval(t *testing.T) {
+	app := newTestServer(t)
+	apiToken := acceptInviteForTest(t, app, createInviteForTest(t, app, "quota-requester", model.RoleMaintainer))
+	ownerToken := acceptInviteForTest(t, app, createInviteForTest(t, app, "quota-owner", model.RoleOwner))
+
+	reqRec := apiJSON(t, app, http.MethodPost, "/api/v1/quota/requests", apiToken, map[string]any{
+		"requested_max_bytes": int64(20 * 1024 * 1024 * 1024),
+		"reason":              "release test",
+	})
+	if reqRec.Code != http.StatusCreated {
+		t.Fatalf("create quota request status = %d body=%s", reqRec.Code, reqRec.Body.String())
+	}
+	var created struct {
+		Request model.UserQuotaRequest `json:"request"`
+	}
+	if err := json.Unmarshal(reqRec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Request.Status != model.QuotaRequestPending {
+		t.Fatalf("request status = %+v", created.Request)
+	}
+
+	ownerApprove := apiJSON(t, app, http.MethodPost, "/api/v1/quota/requests/"+created.Request.ID+"/approve", ownerToken, nil)
+	if ownerApprove.Code != http.StatusForbidden {
+		t.Fatalf("owner approve status = %d body=%s", ownerApprove.Code, ownerApprove.Body.String())
+	}
+
+	rootApprove := apiJSON(t, app, http.MethodPost, "/api/v1/quota/requests/"+created.Request.ID+"/approve", "test-token", nil)
+	if rootApprove.Code != http.StatusOK || !strings.Contains(rootApprove.Body.String(), `"status":"approved"`) || !strings.Contains(rootApprove.Body.String(), `"max_bytes":21474836480`) {
+		t.Fatalf("root approve status = %d body=%s", rootApprove.Code, rootApprove.Body.String())
+	}
+
+	mine := apiJSON(t, app, http.MethodGet, "/api/v1/quota/requests", apiToken, nil)
+	if mine.Code != http.StatusOK || !strings.Contains(mine.Body.String(), created.Request.ID) {
+		t.Fatalf("list own quota requests status = %d body=%s", mine.Code, mine.Body.String())
+	}
+}
+
 func TestDoctorReportsControlPlaneBaseline(t *testing.T) {
 	app := newTestServer(t)
 	rec := apiJSON(t, app, http.MethodGet, "/api/v1/doctor?resources=false", "test-token", nil)
@@ -5489,6 +5576,21 @@ func acceptInviteForTest(t *testing.T, app *Server, inviteToken string) string {
 		t.Fatalf("missing api token: %s", rec.Body.String())
 	}
 	return resp.APIToken
+}
+
+func userIDForName(t *testing.T, app *Server, name string) int64 {
+	t.Helper()
+	users, err := app.db.UsersInWorkspace(context.Background(), model.DefaultWorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, user := range users {
+		if user.User.Name == name {
+			return user.User.ID
+		}
+	}
+	t.Fatalf("user %q not found in %+v", name, users)
+	return 0
 }
 
 func createDeployment(t *testing.T, app *Server, siteID string, files map[string]string, fields map[string]string) string {

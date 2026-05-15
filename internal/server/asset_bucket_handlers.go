@@ -410,6 +410,9 @@ func (s *Server) handleUploadBucketObject(w http.ResponseWriter, r *http.Request
 	defer os.Remove(staged.Path)
 	item, obj, jobs, err := s.putBucketObjectFromStaged(r.Context(), bucket, logicalPath, staged, header.Filename, r.FormValue("asset_type"), r.FormValue("cache_control"))
 	if err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -603,6 +606,16 @@ func (s *Server) putBucketObjectFromStaged(ctx context.Context, bucket *model.As
 	}); err != nil {
 		return nil, nil, nil, err
 	}
+	reservation, _, err := s.reserveUploadQuota(ctx, staged.Size)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	quotaCommitted := false
+	defer func() {
+		if !quotaCommitted {
+			s.releaseUploadQuota(ctx, reservation)
+		}
+	}()
 	projectID := "bucket:" + bucket.Slug
 	if _, err := s.db.CreateProjectInWorkspace(ctx, projectID, bucket.WorkspaceID); err != nil {
 		return nil, nil, nil, err
@@ -626,6 +639,7 @@ func (s *Server) putBucketObjectFromStaged(ctx context.Context, bucket *model.As
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	quotaCommitted = true
 	item, err := s.db.SaveAssetBucketObject(ctx, model.AssetBucketObject{
 		BucketSlug:  bucket.Slug,
 		LogicalPath: logicalPath,

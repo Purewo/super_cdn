@@ -67,6 +67,12 @@ go run .\cmd\supercdnctl -- doctor
 | `invite-user` | 为 owner、maintainer 或 viewer 创建一次性邀请。 |
 | `list-users` | 列出当前 workspace 用户。 |
 | `revoke-token` | 吊销用户 API token。 |
+| `quota` | 查看当前用户上传配额、已用字节和剩余额度。 |
+| `request-quota` | 向 root 管理员申请提升当前用户上传配额。 |
+| `quota-requests` | 查看配额申请；普通用户只能看自己的申请，root 可筛选全部。 |
+| `approve-quota` | root-only，审批通过配额申请。 |
+| `reject-quota` | root-only，拒绝配额申请。 |
+| `set-user-quota` | root-only，直接设置某个 workspace 用户的上传配额。 |
 
 典型流程：
 
@@ -74,8 +80,14 @@ go run .\cmd\supercdnctl -- doctor
 go run .\cmd\supercdnctl -- -token <root-token> invite-user -name alice -role maintainer
 go run .\cmd\supercdnctl -- -server https://qwk.ccwu.cc -profile alice login -invite-token sci_xxx
 go run .\cmd\supercdnctl -- -profile alice whoami
+go run .\cmd\supercdnctl -- -profile alice quota
+go run .\cmd\supercdnctl -- -profile alice request-quota -max-gb 20 -reason "release test"
+go run .\cmd\supercdnctl -- -token <root-token> quota-requests -status pending
+go run .\cmd\supercdnctl -- -token <root-token> approve-quota -id qr_xxx -max-gb 20
 go run .\cmd\supercdnctl -- -profile alice doctor
 ```
+
+非 root 用户默认累计上传配额为 10 GiB。总上传量低于该额度时，用户配额层不再附加更细限制；只有 root 管理员 token 可以审批配额申请或直接调整用户配额。
 
 ## 静态对象 Project
 

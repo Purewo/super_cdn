@@ -23,11 +23,14 @@ import (
 )
 
 type deploySitePayload struct {
-	SiteID       string `json:"site_id"`
-	DeploymentID string `json:"deployment_id"`
-	StagedPath   string `json:"staged_path"`
-	FileName     string `json:"file_name"`
-	Promote      bool   `json:"promote"`
+	SiteID           string `json:"site_id"`
+	DeploymentID     string `json:"deployment_id"`
+	StagedPath       string `json:"staged_path"`
+	FileName         string `json:"file_name"`
+	Promote          bool   `json:"promote"`
+	QuotaWorkspaceID string `json:"quota_workspace_id,omitempty"`
+	QuotaUserID      int64  `json:"quota_user_id,omitempty"`
+	QuotaBytes       int64  `json:"quota_bytes,omitempty"`
 }
 
 type siteDeployManifest struct {
@@ -148,12 +151,16 @@ func (s *Server) handleCreateSiteDeployment(w http.ResponseWriter, r *http.Reque
 	}
 	dep, payload, err := s.createSiteDeploymentFromRequest(w, r, siteID, "", false)
 	if err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	raw, _ := json.Marshal(payload)
 	job, err := s.db.CreateJob(r.Context(), model.JobDeploySite, string(raw))
 	if err != nil {
+		s.releaseUploadQuota(r.Context(), payload.quotaReservation())
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -182,11 +189,29 @@ func (s *Server) handleRecordCloudflareStaticDeployment(w http.ResponseWriter, r
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	reservation, _, err := s.reserveUploadQuota(r.Context(), req.TotalSize)
+	if err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	quotaCommitted := false
+	defer func() {
+		if !quotaCommitted {
+			s.releaseUploadQuota(r.Context(), reservation)
+		}
+	}()
 	resp, err := s.recordCloudflareStaticDeployment(r.Context(), siteID, req)
 	if err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	quotaCommitted = true
 	action, resource := cloudflareStaticRecordAudit(siteID, resp.ID, req)
 	if !s.auditMutation(w, r, action, resource) {
 		return
@@ -633,6 +658,16 @@ func (s *Server) createSiteDeploymentFromRequest(w http.ResponseWriter, r *http.
 		_ = os.Remove(staged.Path)
 		return nil, deploySitePayload{}, err
 	}
+	uploadStats, err := s.siteZipUploadStats(r.Context(), stagedPath, profileName, profile, environment)
+	if err != nil {
+		_ = os.Remove(stagedPath)
+		return nil, deploySitePayload{}, err
+	}
+	reservation, _, err := s.reserveUploadQuota(r.Context(), uploadStats.TotalSize)
+	if err != nil {
+		_ = os.Remove(stagedPath)
+		return nil, deploySitePayload{}, err
+	}
 	expiresAt := time.Time{}
 	if environment == model.SiteEnvironmentPreview && !pinned {
 		expiresAt = time.Now().UTC().Add(7 * 24 * time.Hour)
@@ -652,15 +687,22 @@ func (s *Server) createSiteDeploymentFromRequest(w http.ResponseWriter, r *http.
 	})
 	if err != nil {
 		_ = os.Remove(stagedPath)
+		s.releaseUploadQuota(r.Context(), reservation)
 		return nil, deploySitePayload{}, err
 	}
-	return dep, deploySitePayload{
+	payload := deploySitePayload{
 		SiteID:       siteID,
 		DeploymentID: deploymentID,
 		StagedPath:   stagedPath,
 		FileName:     header.Filename,
 		Promote:      promote,
-	}, nil
+	}
+	if reservation != nil {
+		payload.QuotaWorkspaceID = reservation.WorkspaceID
+		payload.QuotaUserID = reservation.UserID
+		payload.QuotaBytes = reservation.Bytes
+	}
+	return dep, payload, nil
 }
 
 func (s *Server) processSiteDeployment(ctx context.Context, payload deploySitePayload) (*model.SiteDeployment, error) {
@@ -1202,6 +1244,51 @@ func probeURLMatchesDomains(raw string, domains []string) bool {
 type siteZipEntry struct {
 	file *zip.File
 	path string
+}
+
+type siteZipUploadStats struct {
+	TotalSize       int64
+	LargestFileSize int64
+	FileCount       int
+}
+
+func (p deploySitePayload) quotaReservation() *quotaReservation {
+	if p.QuotaWorkspaceID == "" || p.QuotaUserID <= 0 || p.QuotaBytes <= 0 {
+		return nil
+	}
+	return &quotaReservation{WorkspaceID: p.QuotaWorkspaceID, UserID: p.QuotaUserID, Bytes: p.QuotaBytes}
+}
+
+func (s *Server) siteZipUploadStats(ctx context.Context, stagedPath, profileName string, profile config.RouteProfile, environment string) (siteZipUploadStats, error) {
+	reader, err := zip.OpenReader(stagedPath)
+	if err != nil {
+		return siteZipUploadStats{}, err
+	}
+	defer reader.Close()
+	entries, _, err := readSiteZipEntries(reader.File)
+	if err != nil {
+		return siteZipUploadStats{}, err
+	}
+	if err := s.checkDeploymentFileCount(environment, len(entries)); err != nil {
+		return siteZipUploadStats{}, err
+	}
+	var stats siteZipUploadStats
+	stats.FileCount = len(entries)
+	for _, entry := range entries {
+		size := int64(entry.file.UncompressedSize64)
+		stats.TotalSize += size
+		if size > stats.LargestFileSize {
+			stats.LargestFileSize = size
+		}
+	}
+	if _, err := s.preflightProfile(ctx, profileName, profile, preflightRequest{
+		TotalSize:       stats.TotalSize,
+		LargestFileSize: stats.LargestFileSize,
+		BatchFileCount:  stats.FileCount,
+	}); err != nil {
+		return siteZipUploadStats{}, err
+	}
+	return stats, nil
 }
 
 func (s *Server) buildSiteDeployment(ctx context.Context, dep *model.SiteDeployment, payload deploySitePayload) (*model.SiteDeployment, error) {

@@ -54,6 +54,18 @@ func main() {
 		err = listUsers(c, args[1:])
 	case "revoke-token":
 		err = revokeToken(c, args[1:])
+	case "quota":
+		err = quota(c, args[1:])
+	case "request-quota":
+		err = requestQuota(c, args[1:])
+	case "quota-requests":
+		err = quotaRequests(c, args[1:])
+	case "approve-quota":
+		err = approveQuota(c, args[1:])
+	case "reject-quota":
+		err = rejectQuota(c, args[1:])
+	case "set-user-quota":
+		err = setUserQuota(c, args[1:])
 	case "create-project":
 		err = createProject(c, args[1:])
 	case "upload":
@@ -221,6 +233,12 @@ func usage() {
   supercdnctl [global flags] invite-user -name alice -role maintainer
   supercdnctl [global flags] list-users
   supercdnctl [global flags] revoke-token -id tok_xxx
+  supercdnctl [global flags] quota
+  supercdnctl [global flags] request-quota -max-gb 20 -reason "temporary release"
+  supercdnctl [global flags] quota-requests -status pending
+  supercdnctl [global flags] approve-quota -id qr_xxx -max-gb 20
+  supercdnctl [global flags] reject-quota -id qr_xxx -note "not needed"
+  supercdnctl [global flags] set-user-quota -user-id 2 -max-gb 10
   supercdnctl [global flags] create-project -id assets
   supercdnctl [global flags] list-sites
   supercdnctl [global flags] offline-site -site blog

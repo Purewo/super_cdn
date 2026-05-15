@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const latestSchemaMigration = "20260514_0012_asset_buckets_routing_policy"
+const latestSchemaMigration = "20260516_0013_user_upload_quotas"
 
 type schemaMigration struct {
 	Version     string
@@ -94,10 +94,47 @@ var schemaMigrations = []schemaMigration{
 		},
 	},
 	{
-		Version:     latestSchemaMigration,
+		Version:     "20260514_0012_asset_buckets_routing_policy",
 		Description: "store routing policies on asset buckets",
 		Run: func(ctx context.Context, tx *sql.Tx) error {
 			return ensureColumn(ctx, tx, "asset_buckets", "routing_policy", "TEXT NOT NULL DEFAULT ''")
+		},
+	},
+	{
+		Version:     latestSchemaMigration,
+		Description: "store per-user upload quotas and quota requests",
+		Run: func(ctx context.Context, tx *sql.Tx) error {
+			stmts := []string{
+				`CREATE TABLE IF NOT EXISTS user_upload_quotas (
+					workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+					user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+					max_bytes INTEGER NOT NULL,
+					used_bytes INTEGER NOT NULL DEFAULT 0,
+					approved_by INTEGER NOT NULL DEFAULT 0,
+					approved_at TEXT NOT NULL DEFAULT '',
+					updated_at TEXT NOT NULL,
+					PRIMARY KEY(workspace_id, user_id)
+				);`,
+				`CREATE TABLE IF NOT EXISTS user_quota_requests (
+					id TEXT PRIMARY KEY,
+					workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+					user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+					requested_max_bytes INTEGER NOT NULL,
+					reason TEXT NOT NULL DEFAULT '',
+					status TEXT NOT NULL,
+					decided_by INTEGER NOT NULL DEFAULT 0,
+					decided_at TEXT NOT NULL DEFAULT '',
+					decision_note TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);`,
+			}
+			for _, stmt := range stmts {
+				if _, err := tx.ExecContext(ctx, stmt); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	},
 }

@@ -136,6 +136,96 @@ func TestAuditLogCallsAPI(t *testing.T) {
 	}
 }
 
+func TestQuotaCommandsCallAPI(t *testing.T) {
+	var sawQuota, sawRequest, sawApprove bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/quota":
+			sawQuota = true
+			_, _ = w.Write([]byte(`{"quota":{"max_bytes":10737418240,"used_bytes":0,"remaining_bytes":10737418240}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/quota/requests":
+			sawRequest = true
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["requested_max_bytes"] != float64(21474836480) || body["reason"] != "release" {
+				t.Fatalf("quota request body = %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"request":{"id":"qr_1","status":"pending"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/quota/requests/qr_1/approve":
+			sawApprove = true
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["approved_max_bytes"] != float64(32212254720) {
+				t.Fatalf("approve body = %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"request":{"id":"qr_1","status":"approved"},"quota":{"max_bytes":32212254720}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c := client{baseURL: srv.URL, token: "test-token", http: srv.Client()}
+	if err := quota(c, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := requestQuota(c, []string{"-max-gb", "20", "-reason", "release"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := approveQuota(c, []string{"-id", "qr_1", "-max-gb", "30"}); err != nil {
+		t.Fatal(err)
+	}
+	if !sawQuota || !sawRequest || !sawApprove {
+		t.Fatalf("sawQuota=%v sawRequest=%v sawApprove=%v", sawQuota, sawRequest, sawApprove)
+	}
+}
+
+func TestQuotaListRejectAndSetUserQuotaCommandsCallAPI(t *testing.T) {
+	var sawList, sawReject, sawSet bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/quota/requests":
+			sawList = true
+			if r.URL.Query().Get("status") != "pending" || r.URL.Query().Get("user_id") != "7" {
+				t.Fatalf("quota request query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"requests":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/quota/requests/qr_1/reject":
+			sawReject = true
+			_, _ = w.Write([]byte(`{"request":{"id":"qr_1","status":"rejected"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/quota/users/7":
+			sawSet = true
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["max_bytes"] != float64(10737418240) {
+				t.Fatalf("set quota body = %#v", body)
+			}
+			_, _ = w.Write([]byte(`{"quota":{"user_id":7,"max_bytes":10737418240}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c := client{baseURL: srv.URL, token: "test-token", http: srv.Client()}
+	if err := quotaRequests(c, []string{"-status", "pending", "-user-id", "7"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectQuota(c, []string{"-id", "qr_1", "-note", "later"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := setUserQuota(c, []string{"-user-id", "7", "-max-gb", "10"}); err != nil {
+		t.Fatal(err)
+	}
+	if !sawList || !sawReject || !sawSet {
+		t.Fatalf("sawList=%v sawReject=%v sawSet=%v", sawList, sawReject, sawSet)
+	}
+}
+
 func TestReconcileHybridDeploymentRunsStrictProbe(t *testing.T) {
 	siteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

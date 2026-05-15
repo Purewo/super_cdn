@@ -149,10 +149,13 @@ The server admin token remains the root/break-glass credential. For team use, cr
 go run .\cmd\supercdnctl -- -token <root-token> invite-user -name alice -role maintainer
 go run .\cmd\supercdnctl -- -server https://qwk.ccwu.cc -profile alice login -invite-token sci_xxx
 go run .\cmd\supercdnctl -- -profile alice whoami
+go run .\cmd\supercdnctl -- -profile alice quota
 go run .\cmd\supercdnctl -- -profile alice doctor
 ```
 
 User tokens are stored in the local `supercdn/cli.json` profile and are scoped to a workspace. Owners can manage invites and tokens; maintainers can create and deploy sites/buckets; viewers are read-only. Cloudflare/R2/AList configuration commands stay root-only.
+
+Non-root users start with a cumulative 10 GiB upload quota. Uploads under the remaining total are not additionally restricted by user quota. Users can run `request-quota -max-gb 20 -reason "release test"`; only the root admin token can approve requests with `approve-quota` or directly adjust a user with `set-user-quota`.
 
 `doctor` prints a support-safe JSON report for auth, database, storage target, route profile, resource status and routing policy checks. It does not print tokens or secrets; resource-library detail is still root-only and non-root users get a warning when that part is skipped.
 

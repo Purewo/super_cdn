@@ -67,6 +67,12 @@ go run .\cmd\supercdnctl -- doctor
 | `invite-user` | Create a one-time invite for an owner, maintainer or viewer. |
 | `list-users` | List users in the current workspace. |
 | `revoke-token` | Revoke a user API token. |
+| `quota` | Show the current user's upload quota, used bytes and remaining bytes. |
+| `request-quota` | Ask a root admin to raise the current user's upload quota. |
+| `quota-requests` | List quota requests. Users see their own; root can filter all. |
+| `approve-quota` | Root-only approval for a quota request. |
+| `reject-quota` | Root-only rejection for a quota request. |
+| `set-user-quota` | Root-only direct quota override for a workspace user. |
 
 Typical flow:
 
@@ -74,8 +80,14 @@ Typical flow:
 go run .\cmd\supercdnctl -- -token <root-token> invite-user -name alice -role maintainer
 go run .\cmd\supercdnctl -- -server https://qwk.ccwu.cc -profile alice login -invite-token sci_xxx
 go run .\cmd\supercdnctl -- -profile alice whoami
+go run .\cmd\supercdnctl -- -profile alice quota
+go run .\cmd\supercdnctl -- -profile alice request-quota -max-gb 20 -reason "release test"
+go run .\cmd\supercdnctl -- -token <root-token> quota-requests -status pending
+go run .\cmd\supercdnctl -- -token <root-token> approve-quota -id qr_xxx -max-gb 20
 go run .\cmd\supercdnctl -- -profile alice doctor
 ```
+
+Non-root users get a default cumulative upload quota of 10 GiB. Uploads below that total are otherwise unrestricted by user quota; only the root admin token can approve quota requests or set a user's quota directly.
 
 ## Static Object Projects
 

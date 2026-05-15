@@ -11,6 +11,7 @@ Use a saved profile when possible:
 ```powershell
 .\bin\supercdnctl.exe -server https://qwk.ccwu.cc -profile alice login -invite-token sci_xxx
 .\bin\supercdnctl.exe -profile alice whoami
+.\bin\supercdnctl.exe -profile alice quota
 .\bin\supercdnctl.exe -profile alice doctor
 ```
 
@@ -22,6 +23,8 @@ $env:SUPERCDN_TOKEN = "sct_xxx"
 ```
 
 `doctor` is the first support report. It checks authentication, database reachability, storage targets, route profiles, staging storage, resource-library status and routing-policy status without printing tokens or secrets.
+
+Non-root users start with a cumulative 10 GiB upload quota. Run `quota` before a large upload. If the remaining quota is not enough, run `request-quota -max-gb 20 -reason "release test"` and ask a root admin to approve it with `approve-quota`.
 
 ## 2. Choose A Resource Line
 

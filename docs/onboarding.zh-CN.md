@@ -11,6 +11,7 @@
 ```powershell
 .\bin\supercdnctl.exe -server https://qwk.ccwu.cc -profile alice login -invite-token sci_xxx
 .\bin\supercdnctl.exe -profile alice whoami
+.\bin\supercdnctl.exe -profile alice quota
 .\bin\supercdnctl.exe -profile alice doctor
 ```
 
@@ -22,6 +23,8 @@ $env:SUPERCDN_TOKEN = "sct_xxx"
 ```
 
 `doctor` 是第一份支持报告。它检查认证、数据库、存储目标、route profile、staging 存储、资源库状态和路由策略状态，不会输出 token 或 secret。
+
+非 root 用户默认累计上传配额为 10 GiB。大文件上传前先运行 `quota`；如果剩余额度不够，运行 `request-quota -max-gb 20 -reason "release test"` 创建申请，再让 root 管理员用 `approve-quota` 审批。
 
 ## 2. 选择资源线路
 

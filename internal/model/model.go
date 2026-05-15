@@ -23,6 +23,12 @@ const (
 	RoleMaintainer = "maintainer"
 	RoleViewer     = "viewer"
 
+	DefaultUserUploadQuotaBytes int64 = 10 * 1024 * 1024 * 1024
+
+	QuotaRequestPending  = "pending"
+	QuotaRequestApproved = "approved"
+	QuotaRequestRejected = "rejected"
+
 	SiteStatusActive  = "active"
 	SiteStatusOffline = "offline"
 )
@@ -141,6 +147,30 @@ type Invite struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 	AcceptedAt  time.Time `json:"accepted_at,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+type UserUploadQuota struct {
+	WorkspaceID string    `json:"workspace_id"`
+	UserID      int64     `json:"user_id"`
+	MaxBytes    int64     `json:"max_bytes"`
+	UsedBytes   int64     `json:"used_bytes"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	ApprovedBy  int64     `json:"approved_by,omitempty"`
+	ApprovedAt  time.Time `json:"approved_at,omitempty"`
+}
+
+type UserQuotaRequest struct {
+	ID                string    `json:"id"`
+	WorkspaceID       string    `json:"workspace_id"`
+	UserID            int64     `json:"user_id"`
+	RequestedMaxBytes int64     `json:"requested_max_bytes"`
+	Reason            string    `json:"reason,omitempty"`
+	Status            string    `json:"status"`
+	DecidedBy         int64     `json:"decided_by,omitempty"`
+	DecidedAt         time.Time `json:"decided_at,omitempty"`
+	DecisionNote      string    `json:"decision_note,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type AuditEvent struct {

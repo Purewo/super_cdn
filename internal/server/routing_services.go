@@ -105,6 +105,10 @@ func (s *Server) preflightProfile(ctx context.Context, profileName string, profi
 	if !s.overclockMode() && s.cfg.Limits.MaxUploadBytes > 0 && req.TotalSize > s.cfg.Limits.MaxUploadBytes {
 		return nil, fmt.Errorf("server max_upload_bytes is %d bytes, upload total got %d bytes", s.cfg.Limits.MaxUploadBytes, req.TotalSize)
 	}
+	quota, err := s.checkUserUploadQuota(ctx, req.TotalSize)
+	if err != nil {
+		return nil, err
+	}
 	primary, ok := s.stores.Get(profile.Primary)
 	if !ok {
 		return nil, fmt.Errorf("primary storage %q is not configured", profile.Primary)
@@ -122,6 +126,9 @@ func (s *Server) preflightProfile(ctx context.Context, profileName string, profi
 		"largest_file_size": req.LargestFileSize,
 		"batch_file_count":  req.BatchFileCount,
 	})
+	if quota != nil {
+		result["user_quota"] = quotaView(quota)
+	}
 	if s.overclockMode() {
 		result["limits_ignored"] = []string{
 			"max_upload_bytes",

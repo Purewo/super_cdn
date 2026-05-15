@@ -53,6 +53,12 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `invite-user` | `POST /api/v1/auth/invites` | 创建一次性用户邀请 |
 | `list-users` | `GET /api/v1/users` | 列出当前 workspace 用户 |
 | `revoke-token` | `DELETE /api/v1/tokens/{id}` | 撤销用户 API token |
+| `quota` | `GET /api/v1/quota` | 查看当前用户上传配额 |
+| `request-quota` | `POST /api/v1/quota/requests` | 向 root 管理员申请提升上传配额 |
+| `quota-requests` | `GET /api/v1/quota/requests` | 查看配额申请 |
+| `approve-quota` | `POST /api/v1/quota/requests/{id}/approve` | root-only，审批配额申请 |
+| `reject-quota` | `POST /api/v1/quota/requests/{id}/reject` | root-only，拒绝配额申请 |
+| `set-user-quota` | `POST /api/v1/quota/users/{id}` | root-only，直接设置用户配额 |
 | `create-project` | `POST /api/v1/projects` | 创建普通静态资源项目 |
 | `upload` | `POST /api/v1/preflight/upload` + `POST /api/v1/assets` | 上传普通静态资源 |
 | `create-site` | `POST /api/v1/sites` | 创建静态站点 |
@@ -158,6 +164,19 @@ root 创建邀请：
 ```
 
 `login` 只在接受邀请时收到一次 API token，并写入本机 profile；之后普通命令不需要传 `-token`。`invite-user` 返回的一次性 `invite_token` 需要发给对应成员；用户 API token 不会通过 `list-users` 展示。
+
+用户上传配额：
+
+```powershell
+.\bin\supercdnctl.exe quota
+.\bin\supercdnctl.exe request-quota -max-gb 20 -reason "temporary release"
+.\bin\supercdnctl.exe -token <root-token> quota-requests -status pending
+.\bin\supercdnctl.exe -token <root-token> approve-quota -id qr_xxx -max-gb 20
+.\bin\supercdnctl.exe -token <root-token> reject-quota -id qr_xxx -note "not needed"
+.\bin\supercdnctl.exe -token <root-token> set-user-quota -user-id 2 -max-gb 10
+```
+
+非 root 用户默认累计上传配额为 10 GiB。`request-quota` 只创建申请；审批和直接设置额度都必须使用 root 管理员 token。
 
 ### doctor
 
