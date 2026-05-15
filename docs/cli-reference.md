@@ -1,8 +1,11 @@
 # Super CDN CLI Reference
 
+This is the parameter-level reference for `supercdnctl`: command purpose, HTTP API mapping, request shape, important flags and response fields.
+
+For a workflow-oriented command book, use [docs/commands.md](commands.md). For the shortest real-user path from login to bucket upload, batch upload, Web publish and diagnostics, see [docs/onboarding.md](onboarding.md).
+
 本文档按“命令 -> HTTP API -> 参数 -> 返回”的方式记录 `supercdnctl`，用于快速检索和交接。
 
-For the shortest real-user path from login to bucket upload, batch upload, Web publish and diagnostics, see [docs/onboarding.md](onboarding.md).
 Formal REST API contract: [api/openapi.yaml](../api/openapi.yaml).
 
 ## 全局约定

@@ -1,8 +1,87 @@
 # Super CDN
 
-Windows-first MVP for static asset acceleration and static site hosting.
+Super CDN is a Windows-first control plane for CDN asset buckets and static Web hosting. It combines a Go API service, `supercdnctl`, SQLite metadata, storage adapters, and Cloudflare Worker/Static Assets automation.
 
-## Product target
+Use it to:
+
+- publish ordinary static sites to Cloudflare-native hosting;
+- publish hybrid sites where Cloudflare serves entry HTML and Worker/KV routes non-entry assets to resource libraries;
+- create reusable CDN buckets on Cloudflare R2, AList/OpenList, or Pinata/IPFS;
+- inspect bundles, probe live delivery, diagnose bucket/site routing, switch ready replicas manually, and recover or roll back deployments.
+
+## Start here
+
+For a first run, read this README from top to bottom once. The minimum path is:
+
+1. Start the control plane locally or point `supercdnctl` at a deployed server.
+2. Login with an invite token, or set `SUPERCDN_TOKEN` for local testing.
+3. Run `doctor` before creating resources.
+4. Create a bucket for reusable assets, or create a site for Web hosting.
+5. Upload/deploy, then verify with `cdn-doctor`, `site-doctor`, or `probe-site`.
+
+```powershell
+.\scripts\start-dev.ps1 -Config .\configs\config.local.json
+
+$env:SUPERCDN_TOKEN = "change-me"
+go run .\cmd\supercdnctl -- doctor
+go run .\cmd\supercdnctl -- create-cdn-bucket -slug overseas-assets -name overseas-assets -types image,archive
+go run .\cmd\supercdnctl -- upload-bucket -bucket overseas-assets -file .\poster.jpg -path images/v1/poster.jpg -asset-type image -warmup
+go run .\cmd\supercdnctl -- cdn-doctor -bucket overseas-assets -path images/v1/poster.jpg
+```
+
+For a normal static Web site:
+
+```powershell
+go run .\cmd\supercdnctl -- create-site -site demo -profile overseas -target cloudflare_static -domains demo.example.com
+go run .\cmd\supercdnctl -- deploy-site -site demo -dir .\dist -target cloudflare_static -domains demo.example.com -static-spa
+go run .\cmd\supercdnctl -- probe-site -site demo -spa-path /movie/123 -require-edge-static-html
+```
+
+For a hybrid site with Cloudflare entry plus resource-library routes:
+
+```powershell
+go run .\cmd\supercdnctl -- create-site -site cyberstream -profile china_mobile -target hybrid_edge -domains cyberstream.example.com
+go run .\cmd\supercdnctl -- deploy-site -site cyberstream -dir .\dist -target hybrid_edge -profile china_mobile -domains cyberstream.example.com -static-spa -resource-failover
+go run .\cmd\supercdnctl -- site-doctor -site cyberstream -path /assets/app.js
+```
+
+Use `-resource-failover` only when the selected route profile has a primary target plus at least one ready backup. Super CDN does not silently fall back to the Go origin for static resources.
+
+## Documentation map
+
+- New-user onboarding: [docs/onboarding.md](docs/onboarding.md)
+- Advanced command book: [docs/commands.md](docs/commands.md)
+- Parameter-level CLI reference: [docs/cli-reference.md](docs/cli-reference.md)
+- Formal REST contract: [api/openapi.yaml](api/openapi.yaml)
+- Web-hosting boundary: [docs/web-hosting-boundaries.md](docs/web-hosting-boundaries.md)
+- Release checklist: [docs/release-checklist.md](docs/release-checklist.md)
+- Current maturity audit: [docs/maturity-audit.md](docs/maturity-audit.md)
+- Refactor plan and handoff: [docs/refactor-plan.md](docs/refactor-plan.md), [docs/tomorrow-plan.md](docs/tomorrow-plan.md)
+
+## Core concepts
+
+| Concept | Meaning |
+| --- | --- |
+| Project | Basic static-object namespace served from `/o/{project}/{path}`. |
+| Asset bucket | User-facing CDN bucket for reusable assets, served from `/a/{bucket}/{logical_path}`. |
+| Site | Static Web property with domains, deployments, hosting target and route profile. |
+| Deployment | Immutable site release. Production is an active deployment pointer, not an in-place overwrite. |
+| Storage target | Physical backend such as local disk, R2, AList/OpenList or Pinata/IPFS. |
+| Resource library | Logical CDN line that may wrap storage or mounted paths, for example a domestic AList line. |
+| Route profile | Upload/deploy policy: primary storage target, backups, cache behavior and replication policy. |
+| Deployment target | Web-hosting shape: `cloudflare_static`, `hybrid_edge`, or `origin_assisted`. |
+| Routing policy | Explicit smart-routing/load-balance/failover rule. It requires multiple ready sources. |
+
+## What is included
+
+- Go origin/control service with REST API.
+- `supercdnctl` CLI for asset upload, site deployment, diagnostics and operations.
+- SQLite state for projects, objects, replicas, jobs, sites, domains, users and audit events.
+- Storage adapters for local disk, Cloudflare R2, AList/OpenList and Pinata/IPFS.
+- TypeScript Cloudflare Worker for same-origin storage fetch, edge cache, hybrid edge routing and compatibility origin fallback.
+- Readiness, recovery, rollback and support-safe diagnostic commands for production operations.
+
+## Architecture direction
 
 Super CDN is a website hosting and CDN orchestration platform. It should use Cloudflare's native static-site surfaces where they already fit, instead of rebuilding that layer from R2 and KV alone.
 
@@ -17,26 +96,6 @@ The target architecture is:
 - Future global acceleration: routing policy can choose ready resource libraries by site, path, asset class, health, region and availability. Smart routing and failover require at least two ready sources and are explicit opt-in.
 
 The Go service remains the control plane: deploy intake, inspection, health checks, manifest generation, Cloudflare automation, storage synchronization and rollback. Public website delivery should move away from depending on the Go origin at runtime.
-
-## What is included
-
-- Go origin/control service with REST API.
-- `supercdnctl` CLI for asset upload and `dist` directory deployment.
-- SQLite state for projects, objects, replicas, jobs, sites and domains.
-- Storage adapters for local disk, Cloudflare R2, AList and Pinata/IPFS.
-- TypeScript Cloudflare Worker for same-origin storage fetch, edge cache and compatibility origin fallback.
-
-Full CLI reference: [docs/cli-reference.md](docs/cli-reference.md).
-
-Real user onboarding guide: [docs/onboarding.md](docs/onboarding.md).
-
-v0.1.x maintenance scope and runbooks: [docs/v0.1-maintenance.md](docs/v0.1-maintenance.md).
-
-Next feature roadmap: [docs/v0.2-roadmap.md](docs/v0.2-roadmap.md).
-
-Web hosting product boundary: [docs/web-hosting-boundaries.md](docs/web-hosting-boundaries.md).
-
-Development handoff and next goals: [docs/tomorrow-plan.md](docs/tomorrow-plan.md).
 
 ## Current verified live site
 
