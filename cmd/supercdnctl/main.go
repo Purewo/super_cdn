@@ -46,6 +46,8 @@ func main() {
 		err = whoami(c, args[1:])
 	case "doctor":
 		err = doctor(c, args[1:])
+	case "line-health":
+		err = lineHealth(c, args[1:])
 	case "audit-log":
 		err = auditLog(c, args[1:])
 	case "invite-user":
@@ -229,6 +231,7 @@ func usage() {
   supercdnctl [global flags] logout
   supercdnctl [global flags] whoami
   supercdnctl [global flags] doctor
+  supercdnctl [global flags] line-health
   supercdnctl [global flags] audit-log -limit 50
   supercdnctl [global flags] invite-user -name alice -role maintainer
   supercdnctl [global flags] list-users

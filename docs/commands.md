@@ -249,6 +249,7 @@ Cloudflare Static and `hybrid_edge` rollback are provider-aware. Do not use meta
 | `init-libraries` | Initialize resource-library directory layout and markers. |
 | `init-job` | Check a resource-library initialization job. |
 | `resource-status` | Check configured library state and cached health. |
+| `line-health` | Run concurrent, passive checks of all configured resource lines with an eight-second server deadline. |
 | `routing-policy-status` | Check smart-routing policy definition and source readiness. |
 | `health-check` | Run passive or explicit resource-library health checks. |
 | `e2e-probe` | Upload, read and cleanup through a real route profile primary. |
@@ -260,6 +261,7 @@ go run .\cmd\supercdnctl -- init-libraries -dry-run
 go run .\cmd\supercdnctl -- init-libraries
 go run .\cmd\supercdnctl -- init-job -id 1
 go run .\cmd\supercdnctl -- resource-status -library repo_china_all
+go run .\cmd\supercdnctl -- line-health
 go run .\cmd\supercdnctl -- routing-policy-status -policy global_smart
 go run .\cmd\supercdnctl -- health-check -libraries repo_china_all
 go run .\cmd\supercdnctl -- e2e-probe -profile china_all

@@ -54,6 +54,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 
 ```powershell
 .\bin\supercdnctl.exe doctor
+.\bin\supercdnctl.exe -server https://supercdn.gameuniverse.top line-health
 .\bin\supercdnctl.exe quota
 .\bin\supercdnctl.exe request-quota -max-gb 20 -reason "temporary release"
 .\bin\supercdnctl.exe create-cdn-bucket -slug downloads -name downloads -types archive

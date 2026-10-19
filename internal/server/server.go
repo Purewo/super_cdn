@@ -119,6 +119,7 @@ func (s *Server) routes() {
 	s.apiMux.HandleFunc("POST /preflight/upload", s.handlePreflightUpload)
 	s.apiMux.HandleFunc("POST /preflight/site-deploy", s.handlePreflightSiteDeploy)
 	s.apiMux.HandleFunc("GET /doctor", s.handleDoctor)
+	s.apiMux.HandleFunc("GET /line-health", s.handleLineHealth)
 	s.apiMux.HandleFunc("GET /audit-events", s.handleAuditEvents)
 	s.apiMux.HandleFunc("POST /init/resource-libraries", s.handleInitResourceLibraries)
 	s.apiMux.HandleFunc("GET /init/jobs/{id}", s.handleGetInitJob)

@@ -249,6 +249,7 @@ Cloudflare Static 和 `hybrid_edge` 回滚需要 provider-aware。不要在 Work
 | `init-libraries` | 初始化资源库目录结构和 marker。 |
 | `init-job` | 查看资源库初始化任务。 |
 | `resource-status` | 查看配置的资源库状态和缓存健康状态。 |
+| `line-health` | 并发检查所有已配置资源线路，服务端八秒截止，仅执行被动检查。 |
 | `routing-policy-status` | 检查智能路由策略定义和来源就绪情况。 |
 | `health-check` | 运行被动或显式资源库健康检查。 |
 | `e2e-probe` | 通过真实 route profile 主路径上传、读取并清理。 |
@@ -260,6 +261,7 @@ go run .\cmd\supercdnctl -- init-libraries -dry-run
 go run .\cmd\supercdnctl -- init-libraries
 go run .\cmd\supercdnctl -- init-job -id 1
 go run .\cmd\supercdnctl -- resource-status -library repo_china_all
+go run .\cmd\supercdnctl -- line-health
 go run .\cmd\supercdnctl -- routing-policy-status -policy global_smart
 go run .\cmd\supercdnctl -- health-check -libraries repo_china_all
 go run .\cmd\supercdnctl -- e2e-probe -profile china_all

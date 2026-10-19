@@ -7,7 +7,22 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
+
+func lineHealth(c client, args []string) error {
+	fs := flag.NewFlagSet("line-health", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("line-health does not accept positional arguments")
+	}
+	boundedClient := *c.http
+	boundedClient.Timeout = 10 * time.Second
+	c.http = &boundedClient
+	return c.do(http.MethodGet, "/api/v1/line-health", nil, "")
+}
 
 func doctor(c client, args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)

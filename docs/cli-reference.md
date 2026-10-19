@@ -96,6 +96,7 @@ $env:SUPERCDN_TOKEN = "change-me"
 | `init-libraries` | `POST /api/v1/init/resource-libraries` | 初始化资源库目录结构 |
 | `init-job` | `GET /api/v1/init/jobs/{id}` | 查询初始化任务 |
 | `resource-status` | `GET /api/v1/resource-libraries/status` | 查询资源库状态和本地健康缓存 |
+| `line-health` | `GET /api/v1/line-health` | 并发执行所有资源线路的实时被动检查，八秒截止 |
 | `routing-policy-status` | `GET /api/v1/routing-policies/status` | 查询智能路由策略和源状态 |
 | `cdn-doctor` | `GET /api/v1/asset-buckets/{slug}/doctor` | Diagnose one CDN bucket and optionally one logical object path |
 | `site-doctor` | `GET /api/v1/sites/{id}/doctor` | Diagnose one site, active deployment and optionally one routed path |
@@ -1058,6 +1059,20 @@ GET /api/v1/resource-libraries/status?library=repo_china_all
 ```
 
 返回会包含资源能力声明：是否可上传、是否能删除远端对象、是否能产出公开 locator、Range GET/HEAD 支持、HTTP-only locator 风险、Web/CDN bucket 适用性、CID 不可变行为和建议缓存策略。`resource-status` 也可以查询 `pinata`、`r2`、`alist` 这类直接资源 target；`health-check` 仍只对支持健康检查的资源库执行主动探测。
+
+### line-health
+
+一条命令并发检查所有已配置资源库及直接 AList、R2、Pinata 目标。owner 和 maintainer 可调用。服务端在八秒截止，超时线路返回 `timeout`；`status=degraded` 仍返回 HTTP 200，便于一次读取全部结果。检查只列目录或查询 provider 状态，不上传、删除，也不改写路由健康缓存。`reason` 是脱敏后的错误类别。
+
+```powershell
+.\bin\supercdnctl.exe -server https://supercdn.gameuniverse.top line-health
+```
+
+HTTP:
+
+```http
+GET /api/v1/line-health
+```
 
 ### routing-policy-status
 

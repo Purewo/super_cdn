@@ -365,6 +365,23 @@ paths:
                 $ref: "#/components/schemas/DoctorReport"
         "400":
           $ref: "#/components/responses/BadRequest"
+  "/api/v1/line-health":
+    get:
+      tags: [Diagnostics]
+      operationId: getLineHealth
+      summary: Check configured resource lines within eight seconds
+      description: Owner and maintainer tokens can run passive provider checks concurrently. It does not upload, delete, or change cached routing health. Unfinished lines are reported as timeout; a degraded result still uses HTTP 200.
+      responses:
+        "200":
+          description: Live resource-line results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineHealthResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   "/api/v1/audit-events":
     get:
       tags: [Audit]
@@ -2265,6 +2282,64 @@ components:
           type: array
           items:
             type: string
+    LineHealthResponse:
+      type: object
+      required: [status, checked_at_utc, duration_ms, deadline_ms, mode, lines]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, unknown]
+        checked_at_utc:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+          minimum: 0
+        deadline_ms:
+          type: integer
+          minimum: 0
+        mode:
+          type: string
+          enum: [passive]
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineHealthLine"
+    LineHealthLine:
+      type: object
+      required: [name, status, latency_ms]
+      properties:
+        name:
+          type: string
+        target_type:
+          type: string
+        status:
+          type: string
+          enum: [ok, failed, timeout, unsupported]
+        latency_ms:
+          type: integer
+          minimum: 0
+        reason:
+          type: string
+          description: Stable error category without provider URL, path, or credentials.
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineHealthBinding"
+    LineHealthBinding:
+      type: object
+      required: [name, status, latency_ms]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [ok, failed]
+        latency_ms:
+          type: integer
+          minimum: 0
+        reason:
+          type: string
     DoctorCheck:
       type: object
       required: [name, status]
